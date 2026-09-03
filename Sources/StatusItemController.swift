@@ -32,9 +32,13 @@ final class StatusItemController: NSObject {
         }
     }
 
-    /// 左键：剪贴板若是真实存在的文件夹路径，设为新根文件夹。
+    /// 左键：剪贴板若是「纯文件夹路径」（不带「」包裹，即非本应用复制的），设为新根文件夹。
     private func handleLeftClick() {
-        guard let text = clipboard.read(), fs.isExistingDirectory(text) else { return }
+        guard let raw = clipboard.read() else { return }
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        // 本应用复制路径会带「」包裹，这里只识别不带「」的纯路径，避免误设根。
+        guard !text.hasPrefix("\u{300C}") else { return }
+        guard fs.isExistingDirectory(text) else { return }
         store.save(text)
     }
 

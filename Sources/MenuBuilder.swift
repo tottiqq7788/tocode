@@ -16,9 +16,9 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
 
     func menuWillOpen(_ menu: NSMenu) {
         guard let dir = menuDirectoryMap[ObjectIdentifier(menu)] else { return }
-        // 仅在仍是占位状态时填充（首次展开）
-        guard menu.items.count == 1, menu.items[0].title == Self.placeholderTitle else { return }
-        menu.removeAllItems()
+        // 首次展开：移除占位项，填充真实子项
+        guard let idx = menu.items.firstIndex(where: { $0.title == Self.placeholderTitle }) else { return }
+        menu.removeItem(at: idx)
         fill(menu, with: dir)
     }
 
@@ -36,37 +36,36 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
     }
 
     private func makeItem(for entry: FileSystemService.Entry) -> NSMenuItem {
-        let item = NSMenuItem()
+        let item = NSMenuItem(title: entry.name, action: #selector(copyItem(_:)), keyEquivalent: "")
         item.target = self
-        item.action = #selector(itemClicked(_:))
         item.representedObject = entry.path
 
-        let isFolder = entry.kind == .directory
-        let view = MenuItemView(name: entry.name, isFolder: isFolder, onClick: { [weak self] in
-            self?.copyPath(entry.path)
-        })
-        item.view = view
-
-        if isFolder {
+        if entry.kind == .directory {
             let submenu = NSMenu()
             submenu.autoenablesItems = false
             submenu.delegate = self
+
+            // 第一项：复制此文件夹路径
+            let copyItem = NSMenuItem(title: "复制路径", action: #selector(copyItem(_:)), keyEquivalent: "")
+            copyItem.target = self
+            copyItem.representedObject = entry.path
+            submenu.addItem(copyItem)
+            submenu.addItem(.separator())
+
+            // 占位（惰性加载子项）
             let placeholder = NSMenuItem(title: Self.placeholderTitle, action: nil, keyEquivalent: "")
             placeholder.isEnabled = false
             submenu.addItem(placeholder)
+
             menuDirectoryMap[ObjectIdentifier(submenu)] = entry.path
             item.submenu = submenu
         }
         return item
     }
 
-    @objc private func itemClicked(_ sender: NSMenuItem) {
+    @objc private func copyItem(_ sender: NSMenuItem) {
         if let path = sender.representedObject as? String {
-            copyPath(path)
+            clipboard.copyPath(path)
         }
-    }
-
-    private func copyPath(_ path: String) {
-        clipboard.copy(path)
     }
 }

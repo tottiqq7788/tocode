@@ -73,6 +73,9 @@ func testClipboardService() {
     let clip = ClipboardService(pasteboard: pb)
     clip.copy("/Users/test/hello.txt")
     expect(clip.read() == "/Users/test/hello.txt", "ClipboardService 写入后读取一致")
+
+    clip.copyPath("/Users/test/folder")
+    expect(clip.read() == "「/Users/test/folder」", "ClipboardService.copyPath 用「」包裹路径")
 }
 
 @main
