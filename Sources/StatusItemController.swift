@@ -1,7 +1,7 @@
 import AppKit
 import UserNotifications
 
-/// 菜单栏图标控制器：分发左右键点击事件。
+/// 菜单栏图标控制器：左键弹目录树，右键弹功能菜单。
 @MainActor
 final class StatusItemController: NSObject {
     private let statusItem: NSStatusItem
@@ -26,26 +26,15 @@ final class StatusItemController: NSObject {
         guard let event = NSApp.currentEvent else { return }
         switch event.type {
         case .rightMouseUp:
-            showDirectoryMenu()
+            showActionMenu()
         case .leftMouseUp:
-            handleLeftClick()
+            showDirectoryMenu()
         default:
             break
         }
     }
 
-    /// 左键：剪贴板若是「纯文件夹路径」（不带「」包裹，即非本应用复制的），设为新根文件夹。
-    private func handleLeftClick() {
-        guard let raw = clipboard.read() else { return }
-        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        // 本应用复制路径会带「」包裹，这里只识别不带「」的纯路径，避免误设根。
-        guard !text.hasPrefix("\u{300C}") else { return }
-        guard fs.isExistingDirectory(text) else { return }
-        store.save(text)
-        notifyRootChanged(text)
-    }
-
-    /// 右键：弹出根文件夹目录树。
+    /// 左键：弹出目录树（路径选择框），不含功能项。
     private func showDirectoryMenu() {
         let menu = NSMenu()
         menu.autoenablesItems = false
@@ -57,14 +46,43 @@ final class StatusItemController: NSObject {
             item.target = self
         }
 
+        if let button = statusItem.button {
+            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
+        }
+    }
+
+    /// 右键：弹出功能菜单（读取剪贴板、更改目录、退出），每项左侧带图标。
+    private func showActionMenu() {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+
+        let readClip = menu.addItem(withTitle: "读取剪贴板", action: #selector(readClipboard), keyEquivalent: "")
+        readClip.target = self
+        readClip.image = NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: nil)
+
+        let changeDir = menu.addItem(withTitle: "更改目录", action: #selector(chooseRoot), keyEquivalent: "")
+        changeDir.target = self
+        changeDir.image = NSImage(systemSymbolName: "folder.badge.plus", accessibilityDescription: nil)
+
         menu.addItem(.separator())
-        let change = menu.addItem(withTitle: "更改根文件夹…", action: #selector(chooseRoot), keyEquivalent: "")
-        change.target = self
-        menu.addItem(withTitle: "退出", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+
+        let quit = menu.addItem(withTitle: "退出", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        quit.image = NSImage(systemSymbolName: "power", accessibilityDescription: nil)
 
         if let button = statusItem.button {
             menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
         }
+    }
+
+    /// 读取剪贴板：若是纯文件夹路径（不带「」），设为根文件夹并通知。
+    @objc private func readClipboard() {
+        guard let raw = clipboard.read() else { return }
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        // 本应用复制路径会带「」包裹，这里只识别不带「」的纯路径，避免误设根。
+        guard !text.hasPrefix("\u{300C}") else { return }
+        guard fs.isExistingDirectory(text) else { return }
+        store.save(text)
+        notifyRootChanged(text)
     }
 
     @objc private func chooseRoot() {
