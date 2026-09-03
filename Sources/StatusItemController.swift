@@ -1,4 +1,5 @@
 import AppKit
+import UserNotifications
 
 /// 菜单栏图标控制器：分发左右键点击事件。
 @MainActor
@@ -18,6 +19,7 @@ final class StatusItemController: NSObject {
             button.action = #selector(handleClick(_:))
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
+        requestNotificationAuthorization()
     }
 
     @objc private func handleClick(_ sender: Any?) {
@@ -40,6 +42,7 @@ final class StatusItemController: NSObject {
         guard !text.hasPrefix("\u{300C}") else { return }
         guard fs.isExistingDirectory(text) else { return }
         store.save(text)
+        notifyRootChanged(text)
     }
 
     /// 右键：弹出根文件夹目录树。
@@ -73,6 +76,27 @@ final class StatusItemController: NSObject {
         panel.message = "选择作为根文件夹的目录"
         if panel.runModal() == .OK, let url = panel.url {
             store.save(url.path)
+            notifyRootChanged(url.path)
         }
+    }
+
+    // MARK: - 通知
+
+    private func requestNotificationAuthorization() {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+
+    private func notifyRootChanged(_ path: String) {
+        let content = UNMutableNotificationContent()
+        content.title = "根目录已更新"
+        content.body = path
+        content.sound = .default
+
+        let request = UNNotificationRequest(
+            identifier: UUID().uuidString,
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request) { _ in }
     }
 }
