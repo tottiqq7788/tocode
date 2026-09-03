@@ -45,14 +45,7 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
             submenu.autoenablesItems = false
             submenu.delegate = self
 
-            // 第一项：复制此文件夹路径
-            let copyItem = NSMenuItem(title: "复制路径", action: #selector(copyItem(_:)), keyEquivalent: "")
-            copyItem.target = self
-            copyItem.representedObject = entry.path
-            submenu.addItem(copyItem)
-            submenu.addItem(.separator())
-
-            // 占位（惰性加载子项）
+            // 占位（惰性加载子项）；点击文件夹本身已直接复制路径，无需再放「复制路径」项
             let placeholder = NSMenuItem(title: Self.placeholderTitle, action: nil, keyEquivalent: "")
             placeholder.isEnabled = false
             submenu.addItem(placeholder)
