@@ -46,6 +46,8 @@ final class StatusItemController: NSObject {
             item.target = self
         }
 
+        addBottomSpacer(to: menu)
+
         if let button = statusItem.button {
             menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
         }
@@ -68,6 +70,8 @@ final class StatusItemController: NSObject {
 
         let quit = menu.addItem(withTitle: "退出", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quit.image = NSImage(systemSymbolName: "power", accessibilityDescription: nil)
+
+        addBottomSpacer(to: menu)
 
         if let button = statusItem.button {
             menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
@@ -99,6 +103,14 @@ final class StatusItemController: NSObject {
     }
 
     // MARK: - 通知
+
+    /// 在菜单末尾加一段底部留白，避免最后一项贴着菜单框底。
+    private func addBottomSpacer(to menu: NSMenu) {
+        let item = NSMenuItem()
+        item.view = NSView(frame: NSRect(x: 0, y: 0, width: 10, height: 8))
+        item.isEnabled = false
+        menu.addItem(item)
+    }
 
     private func requestNotificationAuthorization() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
