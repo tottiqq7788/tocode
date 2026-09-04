@@ -2,7 +2,7 @@ import Foundation
 
 /// 根文件夹路径的持久化存储。
 struct RootPathStore {
-    static let key = "tomaid.rootFolderPath"
+    static let key = "tocode.rootFolderPath"
     let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {

@@ -15,7 +15,7 @@ func expect(_ cond: Bool, _ msg: String) {
 func testFileSystemService() {
     let fm = FileManager.default
     let tmp = fm.temporaryDirectory
-        .appendingPathComponent("tomaid-test-\(UUID().uuidString)").path
+        .appendingPathComponent("tocode-test-\(UUID().uuidString)").path
     try! fm.createDirectory(atPath: tmp, withIntermediateDirectories: true)
     defer { try? fm.removeItem(atPath: tmp) }
 
@@ -56,7 +56,7 @@ func testFileSystemService() {
 }
 
 func testRootPathStore() {
-    let suite = "tomaid-test-\(UUID().uuidString)"
+    let suite = "tocode-test-\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suite)!
     defaults.removePersistentDomain(forName: suite)
 
@@ -68,7 +68,7 @@ func testRootPathStore() {
 }
 
 func testClipboardService() {
-    let name = NSPasteboard.Name("tomaid-test-\(UUID().uuidString)")
+    let name = NSPasteboard.Name("tocode-test-\(UUID().uuidString)")
     let pb = NSPasteboard(name: name)
     let clip = ClipboardService(pasteboard: pb)
     clip.copy("/Users/test/hello.txt")

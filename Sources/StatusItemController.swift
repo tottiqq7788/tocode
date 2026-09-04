@@ -14,7 +14,7 @@ final class StatusItemController: NSObject {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         super.init()
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "folder", accessibilityDescription: "tomaid")
+            button.image = NSImage(systemSymbolName: "folder", accessibilityDescription: "tocode")
             button.target = self
             button.action = #selector(handleClick(_:))
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])

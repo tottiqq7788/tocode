@@ -3,17 +3,17 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>Tomaid</string>
+    <string>Tocode</string>
     <key>CFBundleDisplayName</key>
-    <string>Tomaid</string>
+    <string>Tocode</string>
     <key>CFBundleIdentifier</key>
-    <string>com.tomaid.app</string>
+    <string>com.tocode.app</string>
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>CFBundleShortVersionString</key>
     <string>0.1.0</string>
     <key>CFBundleExecutable</key>
-    <string>Tomaid</string>
+    <string>Tocode</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleIconFile</key>

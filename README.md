@@ -1,4 +1,4 @@
-# Tomaid（app）
+# Tocode（app）
 
 macOS 菜单栏文件管理器，Swift/AppKit 原生实现。
 
@@ -13,7 +13,7 @@ macOS 菜单栏文件管理器，Swift/AppKit 原生实现。
 ## 构建
 
 ```bash
-bash scripts/build.sh        # 编译并打包到 build/Tomaid.app
+bash scripts/build.sh        # 编译并打包到 build/Tocode.app
 bash scripts/test.sh         # 运行单元测试
 ```
 

@@ -1,7 +1,7 @@
 import AppKit
 
 @main
-struct TomaidApp {
+struct TocodeApp {
     @MainActor
     static func main() {
         let app = NSApplication.shared
