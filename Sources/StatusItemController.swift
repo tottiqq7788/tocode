@@ -39,12 +39,8 @@ final class StatusItemController: NSObject {
         let menu = NSMenu()
         menu.autoenablesItems = false
 
-        if let root = store.load(), fs.isExistingDirectory(root) {
-            builder.fillRoot(menu, with: root)
-        } else {
-            let item = menu.addItem(withTitle: "选择根文件夹…", action: #selector(chooseRoot), keyEquivalent: "")
-            item.target = self
-        }
+        let root = store.resolveRoot(isDirectory: { fs.isExistingDirectory($0) })
+        builder.fillRoot(menu, with: root)
 
         addBottomSpacer(to: menu)
 
@@ -53,7 +49,7 @@ final class StatusItemController: NSObject {
         }
     }
 
-    /// 右键：弹出功能菜单（读取剪贴板、更改目录、退出），每项左侧带图标。
+    /// 右键：弹出功能菜单（读取剪贴板、更改目录、重置初始目录、退出），每项左侧带图标。
     private func showActionMenu() {
         let menu = NSMenu()
         menu.autoenablesItems = false
@@ -65,6 +61,10 @@ final class StatusItemController: NSObject {
         let changeDir = menu.addItem(withTitle: "更改目录", action: #selector(chooseRoot), keyEquivalent: "")
         changeDir.target = self
         changeDir.image = NSImage(systemSymbolName: "folder.badge.plus", accessibilityDescription: nil)
+
+        let resetRoot = menu.addItem(withTitle: "重置初始目录", action: #selector(resetRoot), keyEquivalent: "")
+        resetRoot.target = self
+        resetRoot.image = NSImage(systemSymbolName: "arrow.counterclockwise", accessibilityDescription: nil)
 
         menu.addItem(.separator())
 
@@ -100,6 +100,12 @@ final class StatusItemController: NSObject {
             store.save(url.path)
             notifyRootChanged(url.path)
         }
+    }
+
+    /// 重置初始目录：把根文件夹设回默认目录并通知。
+    @objc private func resetRoot() {
+        store.reset()
+        notifyRootChanged(RootPathStore.defaultRoot)
     }
 
     // MARK: - 通知

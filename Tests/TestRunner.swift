@@ -59,12 +59,41 @@ func testRootPathStore() {
     let suite = "tocode-test-\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suite)!
     defaults.removePersistentDomain(forName: suite)
+    defer { defaults.removePersistentDomain(forName: suite) }
 
+    let fm = FileManager.default
     let store = RootPathStore(defaults: defaults)
+
+    // 初始为 nil
     expect(store.load() == nil, "RootPathStore 初始为 nil")
+
+    // 保存后读取一致
     store.save("/tmp/some/path")
     expect(store.load() == "/tmp/some/path", "RootPathStore 保存后读取一致")
+
+    // 已保存且存在 → 返回保存值
+    let savedDir = "/tmp/tocode-saved-\(UUID().uuidString)"
+    try! fm.createDirectory(atPath: savedDir, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(atPath: savedDir) }
+    store.save(savedDir)
+    expect(store.resolveRoot(isDirectory: { fm.fileExists(atPath: $0, isDirectory: nil) }) == savedDir,
+           "resolveRoot 已保存且存在时返回保存值")
+
+    // 已保存但不存在 → 回退默认目录
+    store.save("/tmp/tocode-nonexistent-\(UUID().uuidString)")
+    expect(store.resolveRoot(isDirectory: { $0 == RootPathStore.defaultRoot }) == RootPathStore.defaultRoot,
+           "resolveRoot 保存值不存在时回退默认目录")
+
+    // 未保存 → 回退默认目录
     defaults.removePersistentDomain(forName: suite)
+    expect(store.resolveRoot(isDirectory: { $0 == RootPathStore.defaultRoot }) == RootPathStore.defaultRoot,
+           "resolveRoot 未保存时回退默认目录")
+
+    // reset → 默认目录
+    store.save("/tmp/other/path")
+    store.reset()
+    expect(store.load() == RootPathStore.defaultRoot, "reset 后根目录为默认目录")
+    expect(RootPathStore.defaultRoot == "/Users/admin/Documents", "默认目录为 /Users/admin/Documents")
 }
 
 func testClipboardService() {
