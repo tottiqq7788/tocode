@@ -11,8 +11,10 @@ final class StatusItemController: NSObject {
     private let store = RootPathStore()
     private let visibility = FinderVisibilityService()
     private let finderSelection = FinderSelectionService()
+    private let shortcuts: GlobalShortcutService
 
-    override init() {
+    init(shortcuts: GlobalShortcutService) {
+        self.shortcuts = shortcuts
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         super.init()
         if let button = statusItem.button {
@@ -86,6 +88,24 @@ final class StatusItemController: NSObject {
             systemSymbolName: showAll ? "eye.slash" : "eye",
             accessibilityDescription: nil
         )
+        addShortcutToggle(
+            to: settings,
+            title: "x/v移动文件",
+            enabled: shortcuts.isFinderMoveEffective,
+            action: #selector(toggleFinderMoveHotkeys(_:))
+        )
+        addShortcutToggle(
+            to: settings,
+            title: "双击⌘Q",
+            enabled: shortcuts.isDoubleCommandQEffective,
+            action: #selector(toggleDoubleCommandQ(_:))
+        )
+        addShortcutToggle(
+            to: settings,
+            title: "⌘Q强关访达",
+            enabled: shortcuts.isFinderCommandQEffective,
+            action: #selector(toggleFinderCommandQ(_:))
+        )
         settingsItem.submenu = settings
 
         menu.addItem(.separator())
@@ -136,6 +156,21 @@ final class StatusItemController: NSObject {
         _ = visibility.setShowAllFiles(next)
     }
 
+    @objc private func toggleFinderMoveHotkeys(_ sender: NSMenuItem) {
+        _ = shortcuts.setFinderMoveEnabled(!shortcuts.isFinderMoveEffective)
+        ShortcutMenuAppearance.apply(to: sender, enabled: shortcuts.isFinderMoveEffective)
+    }
+
+    @objc private func toggleDoubleCommandQ(_ sender: NSMenuItem) {
+        _ = shortcuts.setDoubleCommandQEnabled(!shortcuts.isDoubleCommandQEffective)
+        ShortcutMenuAppearance.apply(to: sender, enabled: shortcuts.isDoubleCommandQEffective)
+    }
+
+    @objc private func toggleFinderCommandQ(_ sender: NSMenuItem) {
+        _ = shortcuts.setFinderCommandQEnabled(!shortcuts.isFinderCommandQEffective)
+        ShortcutMenuAppearance.apply(to: sender, enabled: shortcuts.isFinderCommandQEffective)
+    }
+
     /// 点击时重新解析访达单选项；失效则不改写根目录。
     @objc private func initRootFromFinder() {
         guard case .success(let directory) = finderSelection.resolveInitializationDirectory() else {
@@ -146,6 +181,12 @@ final class StatusItemController: NSObject {
     }
 
     // MARK: - 通知
+
+    private func addShortcutToggle(to menu: NSMenu, title: String, enabled: Bool, action: Selector) {
+        let item = menu.addItem(withTitle: title, action: action, keyEquivalent: "")
+        item.target = self
+        ShortcutMenuAppearance.apply(to: item, enabled: enabled)
+    }
 
     /// 在菜单末尾加一段底部留白，避免最后一项贴着菜单框底。
     private func addBottomSpacer(to menu: NSMenu) {

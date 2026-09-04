@@ -7,7 +7,10 @@ mkdir -p "$APP/Contents/MacOS"
 
 swiftc -O Sources/*.swift \
   -o "$APP/Contents/MacOS/Tocode" \
-  -framework AppKit
+  -framework AppKit \
+  -framework ApplicationServices \
+  -framework CoreGraphics \
+  -framework UserNotifications
 
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 
