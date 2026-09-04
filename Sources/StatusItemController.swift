@@ -12,9 +12,14 @@ final class StatusItemController: NSObject {
     private let visibility = FinderVisibilityService()
     private let finderSelection = FinderSelectionService()
     private let shortcuts: GlobalShortcutService
+    private let launchAtLogin: LaunchAtLoginControlling
 
-    init(shortcuts: GlobalShortcutService) {
+    init(
+        shortcuts: GlobalShortcutService,
+        launchAtLogin: LaunchAtLoginControlling = LaunchAtLoginService()
+    ) {
         self.shortcuts = shortcuts
+        self.launchAtLogin = launchAtLogin
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         super.init()
         if let button = statusItem.button {
@@ -80,6 +85,12 @@ final class StatusItemController: NSObject {
         settingsItem.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil)
         let settings = NSMenu()
         settings.autoenablesItems = false
+        addShortcutToggle(
+            to: settings,
+            title: LaunchAtLoginService.menuTitle,
+            enabled: launchAtLogin.isEnabled,
+            action: #selector(toggleLaunchAtLogin(_:))
+        )
         let showAll = visibility.currentShowAllFiles()
         let toggleTitle = showAll ? "隐藏隐藏文件" : "显示隐藏文件"
         let toggle = settings.addItem(withTitle: toggleTitle, action: #selector(toggleHiddenVisibility), keyEquivalent: "")
@@ -151,6 +162,14 @@ final class StatusItemController: NSObject {
     }
 
     /// 按当前访达权威切换隐藏文件显示；失败则保持原状。
+    @objc private func toggleLaunchAtLogin(_ sender: NSMenuItem) {
+        let result = launchAtLogin.setEnabled(!launchAtLogin.isEnabled)
+        ShortcutMenuAppearance.apply(to: sender, enabled: launchAtLogin.isEnabled)
+        if case .failure(let error) = result {
+            notifyLaunchAtLoginFailure(error)
+        }
+    }
+
     @objc private func toggleHiddenVisibility() {
         let next = !visibility.currentShowAllFiles()
         _ = visibility.setShowAllFiles(next)
@@ -198,6 +217,28 @@ final class StatusItemController: NSObject {
 
     private func requestNotificationAuthorization() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+
+    private func notifyLaunchAtLoginFailure(_ error: LaunchAtLoginError) {
+        let content = UNMutableNotificationContent()
+        switch error {
+        case .needsApproval:
+            content.title = "无法开启开机自启"
+            content.body = "请在“系统设置 → 通用 → 登录项与扩展”中允许 Tocode。"
+        case .registerFailed:
+            content.title = "无法开启开机自启"
+            content.body = "登记登录项失败，开关保持关闭。"
+        case .unregisterFailed:
+            content.title = "无法关闭开机自启"
+            content.body = "撤销登录项失败，请在系统设置中手动关闭。"
+        }
+        content.sound = .default
+        let request = UNNotificationRequest(
+            identifier: "tocode.launch-at-login.\(UUID().uuidString)",
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request) { _ in }
     }
 
     private func notifyRootChanged(_ path: String) {

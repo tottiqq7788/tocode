@@ -1020,6 +1020,105 @@ func testFinderCommandQServiceEffects() {
     expect(dismiss.calls == 0, "第一次不关窗")
 }
 
+final class MockLaunchAtLoginBackend: LaunchAtLoginBacking {
+    var registration: LaunchAtLoginRegistration = .notEnabled
+    var registerResult: Result<LaunchAtLoginRegistration, LaunchAtLoginError> = .success(.enabled)
+    var unregisterResult: Result<LaunchAtLoginRegistration, LaunchAtLoginError> = .success(.notEnabled)
+    var registerCalls = 0
+    var unregisterCalls = 0
+    var openSettingsCalls = 0
+
+    func register() -> Result<LaunchAtLoginRegistration, LaunchAtLoginError> {
+        registerCalls += 1
+        if case .success(let status) = registerResult {
+            registration = status
+        } else if case .failure(.needsApproval) = registerResult {
+            registration = .needsApproval
+        }
+        return registerResult
+    }
+
+    func unregister() -> Result<LaunchAtLoginRegistration, LaunchAtLoginError> {
+        unregisterCalls += 1
+        if case .success(let status) = unregisterResult {
+            registration = status
+        }
+        return unregisterResult
+    }
+
+    func openLoginItemsSettings() {
+        openSettingsCalls += 1
+    }
+}
+
+func testLaunchAtLoginService() {
+    expect(LaunchAtLoginService.menuTitle == "开机自启", "菜单标题为开机自启")
+
+    let backend = MockLaunchAtLoginBackend()
+    let service = LaunchAtLoginService(backend: backend)
+    expect(!service.isEnabled, "默认未登记则关闭")
+
+    if case .success = service.setEnabled(true) {
+        expect(true, "登记成功")
+    } else {
+        expect(false, "登记成功")
+    }
+    expect(service.isEnabled, "登记成功后显示开启")
+    expect(backend.registerCalls == 1, "开启时登记一次")
+
+    if case .success = service.setEnabled(true) {
+        expect(true, "已开启再开是空操作")
+    } else {
+        expect(false, "已开启再开是空操作")
+    }
+    expect(backend.registerCalls == 1, "已开启不再重复登记")
+
+    if case .success = service.setEnabled(false) {
+        expect(true, "撤销成功")
+    } else {
+        expect(false, "撤销成功")
+    }
+    expect(!service.isEnabled, "撤销后显示关闭")
+    expect(backend.unregisterCalls == 1, "关闭时撤销一次")
+
+    backend.registration = .notEnabled
+    backend.registerResult = .failure(.needsApproval)
+    if case .failure(.needsApproval) = service.setEnabled(true) {
+        expect(true, "待批准不得宣称开启")
+    } else {
+        expect(false, "待批准不得宣称开启")
+    }
+    expect(!service.isEnabled, "待批准时菜单保持关闭")
+    expect(backend.openSettingsCalls == 1, "待批准打开登录项设置")
+
+    backend.registration = .notEnabled
+    backend.registerResult = .failure(.registerFailed)
+    if case .failure(.registerFailed) = service.setEnabled(true) {
+        expect(true, "登记失败单独报告")
+    } else {
+        expect(false, "登记失败单独报告")
+    }
+    expect(!service.isEnabled, "登记失败保持关闭")
+
+    backend.registration = .enabled
+    backend.unregisterResult = .failure(.unregisterFailed)
+    if case .failure(.unregisterFailed) = service.setEnabled(false) {
+        expect(true, "撤销失败单独报告")
+    } else {
+        expect(false, "撤销失败单独报告")
+    }
+    expect(service.isEnabled, "撤销失败仍按系统权威显示开启")
+
+    backend.registration = .needsApproval
+    backend.unregisterResult = .success(.notEnabled)
+    if case .success = service.setEnabled(false) {
+        expect(true, "待批准也可撤销")
+    } else {
+        expect(false, "待批准也可撤销")
+    }
+    expect(!service.isEnabled, "撤销待批准后关闭")
+}
+
 @main
 struct TestRunnerMain {
     static func main() {
@@ -1039,6 +1138,7 @@ struct TestRunnerMain {
         testCommandQTargetResolver()
         testFinderDismissServiceFaults()
         testFinderCommandQServiceEffects()
+        testLaunchAtLoginService()
 
         if failures == 0 {
             print("\nALL TESTS PASSED")

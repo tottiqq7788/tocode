@@ -16,10 +16,12 @@ swiftc Tests/TestRunner.swift \
   Sources/CommandQTargetProvider.swift \
   Sources/FinderDismissService.swift \
   Sources/GlobalShortcutService.swift \
+  Sources/LaunchAtLoginService.swift \
   -o build/tests \
   -framework AppKit \
   -framework ApplicationServices \
   -framework CoreGraphics \
-  -framework UserNotifications
+  -framework UserNotifications \
+  -framework ServiceManagement
 
 ./build/tests

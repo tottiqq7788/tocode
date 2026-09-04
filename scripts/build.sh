@@ -10,7 +10,8 @@ swiftc -O Sources/*.swift \
   -framework AppKit \
   -framework ApplicationServices \
   -framework CoreGraphics \
-  -framework UserNotifications
+  -framework UserNotifications \
+  -framework ServiceManagement
 
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 
