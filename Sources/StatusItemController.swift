@@ -9,6 +9,8 @@ final class StatusItemController: NSObject {
     private let fs = FileSystemService()
     private let clipboard = ClipboardService()
     private let store = RootPathStore()
+    private let visibility = FinderVisibilityService()
+    private let finderSelection = FinderSelectionService()
 
     override init() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -40,7 +42,7 @@ final class StatusItemController: NSObject {
         menu.autoenablesItems = false
 
         let root = store.resolveRoot(isDirectory: { fs.isExistingDirectory($0) })
-        builder.fillRoot(menu, with: root)
+        builder.fillRoot(menu, with: root, includeHidden: visibility.currentShowAllFiles())
 
         addBottomSpacer(to: menu)
 
@@ -49,7 +51,7 @@ final class StatusItemController: NSObject {
         }
     }
 
-    /// 右键：弹出功能菜单（读取剪贴板、更改目录、重置初始目录、退出），每项左侧带图标。
+    /// 右键：功能菜单。条件显示「访达目录初始化」；「设置」含子项切换隐藏文件。
     private func showActionMenu() {
         let menu = NSMenu()
         menu.autoenablesItems = false
@@ -65,6 +67,26 @@ final class StatusItemController: NSObject {
         let resetRoot = menu.addItem(withTitle: "重置初始目录", action: #selector(resetRoot), keyEquivalent: "")
         resetRoot.target = self
         resetRoot.image = NSImage(systemSymbolName: "arrow.counterclockwise", accessibilityDescription: nil)
+
+        if case .success = finderSelection.resolveInitializationDirectory() {
+            let initRoot = menu.addItem(withTitle: "访达目录初始化", action: #selector(initRootFromFinder), keyEquivalent: "")
+            initRoot.target = self
+            initRoot.image = NSImage(systemSymbolName: "folder.badge.gearshape", accessibilityDescription: nil)
+        }
+
+        let settingsItem = menu.addItem(withTitle: "设置", action: nil, keyEquivalent: "")
+        settingsItem.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil)
+        let settings = NSMenu()
+        settings.autoenablesItems = false
+        let showAll = visibility.currentShowAllFiles()
+        let toggleTitle = showAll ? "隐藏隐藏文件" : "显示隐藏文件"
+        let toggle = settings.addItem(withTitle: toggleTitle, action: #selector(toggleHiddenVisibility), keyEquivalent: "")
+        toggle.target = self
+        toggle.image = NSImage(
+            systemSymbolName: showAll ? "eye.slash" : "eye",
+            accessibilityDescription: nil
+        )
+        settingsItem.submenu = settings
 
         menu.addItem(.separator())
 
@@ -106,6 +128,21 @@ final class StatusItemController: NSObject {
     @objc private func resetRoot() {
         store.reset()
         notifyRootChanged(RootPathStore.defaultRoot)
+    }
+
+    /// 按当前访达权威切换隐藏文件显示；失败则保持原状。
+    @objc private func toggleHiddenVisibility() {
+        let next = !visibility.currentShowAllFiles()
+        _ = visibility.setShowAllFiles(next)
+    }
+
+    /// 点击时重新解析访达单选项；失效则不改写根目录。
+    @objc private func initRootFromFinder() {
+        guard case .success(let directory) = finderSelection.resolveInitializationDirectory() else {
+            return
+        }
+        store.save(directory)
+        notifyRootChanged(directory)
     }
 
     // MARK: - 通知

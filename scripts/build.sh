@@ -25,7 +25,11 @@ for s in 16 32 128 256 512; do
 done
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 
-# ad-hoc 签名，让本地通知等系统服务能识别该应用
-codesign --force --deep --sign - "$APP" 2>/dev/null || true
+# 本地 ad-hoc 构建显式使用稳定 designated requirement。
+# 否则默认 DR 会绑定每次变化的 cdhash，重编译后 TCC 会静默拒绝旧的 Apple Events 授权。
+codesign --force --deep --sign - \
+  --identifier "com.tocode.app" \
+  --requirements '=designated => identifier "com.tocode.app"' \
+  "$APP"
 
 echo "Built $APP"

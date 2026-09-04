@@ -24,5 +24,7 @@
     <string>13.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Tocode 需要读取访达当前选中的文件或文件夹，以便将其设为目录树根目录。</string>
 </dict>
 </plist>

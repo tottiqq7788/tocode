@@ -6,11 +6,13 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
     private let fs = FileSystemService()
     private let clipboard = ClipboardService()
     private var menuDirectoryMap: [ObjectIdentifier: String] = [:]
+    private var includeHidden = true
 
     private static let placeholderTitle = "\u{2026}"
 
-    /// 立即填充根菜单（根目录内容在弹出前就绪）。
-    func fillRoot(_ menu: NSMenu, with directory: String) {
+    /// 立即填充根菜单（根目录内容在弹出前就绪）。子菜单沿用同一显示状态。
+    func fillRoot(_ menu: NSMenu, with directory: String, includeHidden: Bool = true) {
+        self.includeHidden = includeHidden
         fill(menu, with: directory)
     }
 
@@ -23,7 +25,7 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
     }
 
     private func fill(_ menu: NSMenu, with dir: String) {
-        let entries = fs.entries(in: dir)
+        let entries = fs.entries(in: dir, includeHidden: includeHidden)
         if entries.isEmpty {
             let empty = NSMenuItem(title: "（空）", action: nil, keyEquivalent: "")
             empty.isEnabled = false
