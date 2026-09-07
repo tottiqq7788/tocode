@@ -12,13 +12,16 @@ final class StatusItemController: NSObject {
     private let visibility = FinderVisibilityService()
     private let finderSelection = FinderSelectionService()
     private let shortcuts: GlobalShortcutService
+    private let mouseWheel: MouseWheelReverseService
     private let launchAtLogin: LaunchAtLoginControlling
 
     init(
         shortcuts: GlobalShortcutService,
+        mouseWheel: MouseWheelReverseService,
         launchAtLogin: LaunchAtLoginControlling = LaunchAtLoginService()
     ) {
         self.shortcuts = shortcuts
+        self.mouseWheel = mouseWheel
         self.launchAtLogin = launchAtLogin
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         super.init()
@@ -90,6 +93,18 @@ final class StatusItemController: NSObject {
             title: LaunchAtLoginService.menuTitle,
             enabled: launchAtLogin.isEnabled,
             action: #selector(toggleLaunchAtLogin(_:))
+        )
+        addShortcutToggle(
+            to: settings,
+            title: MouseWheelReverseStore.verticalTitle,
+            enabled: mouseWheel.isVerticalEffective,
+            action: #selector(toggleReverseVerticalWheel(_:))
+        )
+        addShortcutToggle(
+            to: settings,
+            title: MouseWheelReverseStore.horizontalTitle,
+            enabled: mouseWheel.isHorizontalEffective,
+            action: #selector(toggleReverseHorizontalWheel(_:))
         )
         let showAll = visibility.currentShowAllFiles()
         let toggleTitle = showAll ? "隐藏隐藏文件" : "显示隐藏文件"
@@ -168,6 +183,16 @@ final class StatusItemController: NSObject {
         if case .failure(let error) = result {
             notifyLaunchAtLoginFailure(error)
         }
+    }
+
+    @objc private func toggleReverseVerticalWheel(_ sender: NSMenuItem) {
+        _ = mouseWheel.setVerticalEnabled(!mouseWheel.isVerticalEffective)
+        ShortcutMenuAppearance.apply(to: sender, enabled: mouseWheel.isVerticalEffective)
+    }
+
+    @objc private func toggleReverseHorizontalWheel(_ sender: NSMenuItem) {
+        _ = mouseWheel.setHorizontalEnabled(!mouseWheel.isHorizontalEffective)
+        ShortcutMenuAppearance.apply(to: sender, enabled: mouseWheel.isHorizontalEffective)
     }
 
     @objc private func toggleHiddenVisibility() {

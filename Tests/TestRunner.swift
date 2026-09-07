@@ -1119,6 +1119,183 @@ func testLaunchAtLoginService() {
     expect(!service.isEnabled, "撤销待批准后关闭")
 }
 
+final class MockMouseWheelTap: MouseWheelTapControlling {
+    var isInstalled = false
+    var isEnabled = false
+    var installShouldFail = false
+    var reenableShouldFail = false
+    var installCount = 0
+    var removeCount = 0
+    var handler: ((CGEventType, CGEvent) -> Void)?
+
+    func install(handler: @escaping (CGEventType, CGEvent) -> Void) -> Bool {
+        if installShouldFail { return false }
+        self.handler = handler
+        isInstalled = true
+        isEnabled = true
+        installCount += 1
+        return true
+    }
+
+    func remove() {
+        isInstalled = false
+        isEnabled = false
+        handler = nil
+        removeCount += 1
+    }
+
+    func reenable() -> Bool {
+        if reenableShouldFail {
+            isEnabled = false
+            return false
+        }
+        isEnabled = true
+        return isInstalled
+    }
+}
+
+func makeWheelHarness(
+    accessibility: Bool = true,
+    tapShouldFail: Bool = false
+) -> (
+    MouseWheelReverseService,
+    MouseWheelReverseStore,
+    MockShortcutPermissions,
+    MockMouseWheelTap,
+    ManualScheduler,
+    MockAlerts
+) {
+    let suite = "tocode-wheel-\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defaults.removePersistentDomain(forName: suite)
+    let settings = MouseWheelReverseStore(defaults: defaults)
+    let permissions = MockShortcutPermissions()
+    permissions.accessibility = accessibility
+    let tap = MockMouseWheelTap()
+    tap.installShouldFail = tapShouldFail
+    let scheduler = ManualScheduler()
+    let alerts = MockAlerts()
+    let service = MouseWheelReverseService(
+        settings: settings,
+        permissions: permissions,
+        tap: tap,
+        scheduler: scheduler,
+        alerts: alerts
+    )
+    return (service, settings, permissions, tap, scheduler, alerts)
+}
+
+func testMouseWheelReverse() {
+    expect(MouseWheelReverseStore.verticalTitle == "对调垂直滚轮", "垂直菜单标题")
+    expect(MouseWheelReverseStore.horizontalTitle == "对调横向滚轮", "横向菜单标题")
+
+    let suite = "tocode-wheel-store-\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defaults.removePersistentDomain(forName: suite)
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let store = MouseWheelReverseStore(defaults: defaults)
+    expect(!store.reverseVerticalEnabled && !store.reverseHorizontalEnabled, "两键默认关闭")
+    store.reverseVerticalEnabled = true
+    expect(store.reverseVerticalEnabled && !store.reverseHorizontalEnabled, "垂直可单独开启")
+
+    let discrete = ScrollWheelSnapshot(
+        isContinuous: false,
+        line1: 3,
+        point1: 30,
+        fixed1: 1.5,
+        line2: 2,
+        point2: 20,
+        fixed2: 0.5
+    )
+    let continuous = ScrollWheelSnapshot(
+        isContinuous: true,
+        line1: 3,
+        point1: 30,
+        fixed1: 1.5,
+        line2: 2,
+        point2: 20,
+        fixed2: 0.5
+    )
+    expect(
+        MouseWheelReverse.apply(continuous, reverseVertical: true, reverseHorizontal: true) == continuous,
+        "连续滚动不改写"
+    )
+    let onlyV = MouseWheelReverse.apply(discrete, reverseVertical: true, reverseHorizontal: false)
+    expect(onlyV.line1 == -3 && onlyV.point1 == -30 && onlyV.fixed1 == -1.5, "只开垂直取反 Axis1")
+    expect(onlyV.line2 == 2 && onlyV.point2 == 20 && onlyV.fixed2 == 0.5, "只开垂直不改 Axis2")
+    let onlyH = MouseWheelReverse.apply(discrete, reverseVertical: false, reverseHorizontal: true)
+    expect(onlyH.line2 == -2 && onlyH.point2 == -20 && onlyH.fixed2 == -0.5, "只开横向取反 Axis2")
+    expect(onlyH.line1 == 3 && onlyH.point1 == 30 && onlyH.fixed1 == 1.5, "只开横向不改 Axis1")
+    let both = MouseWheelReverse.apply(discrete, reverseVertical: true, reverseHorizontal: true)
+    expect(both.line1 == -3 && both.line2 == -2, "双开两轴都取反")
+
+    do {
+        let (service, settings, _, tap, _, alerts) = makeWheelHarness()
+        service.applySavedSettings()
+        expect(!settings.reverseVerticalEnabled && !settings.reverseHorizontalEnabled, "启动默认关闭")
+        expect(!tap.isInstalled, "默认不安装滚动钩子")
+        expect(!service.isVerticalEffective && !service.isHorizontalEffective, "默认无效")
+        expect(alerts.titles.isEmpty, "默认关闭不提示")
+    }
+
+    do {
+        let (service, settings, permissions, tap, _, alerts) = makeWheelHarness(accessibility: false)
+        expect(!service.setVerticalEnabled(true), "无辅助功能时开启失败")
+        expect(!settings.reverseVerticalEnabled, "失败后垂直保持关闭")
+        expect(!service.isVerticalEffective, "失败后不显示开启")
+        expect(!tap.isInstalled, "无权限不安装滚动钩子")
+        expect(permissions.requests == 1, "只请求一次辅助功能授权")
+        expect(alerts.titles.contains("无法对调鼠标滚轮"), "无权限给出提示")
+    }
+
+    do {
+        let (service, settings, _, tap, _, alerts) = makeWheelHarness(tapShouldFail: true)
+        expect(!service.setHorizontalEnabled(true), "钩子创建失败则开启失败")
+        expect(!settings.reverseHorizontalEnabled, "钩子失败后横向关闭")
+        expect(!tap.isInstalled, "创建失败不保留滚动钩子")
+        expect(alerts.titles.contains("无法对调鼠标滚轮"), "钩子失败给出提示")
+    }
+
+    do {
+        let (service, _, _, tap, _, _) = makeWheelHarness()
+        expect(service.setVerticalEnabled(true), "权限与钩子可用时开启垂直")
+        expect(service.isVerticalEffective, "垂直生效后才算开启")
+        expect(tap.installCount == 1, "首次开启安装一次滚动钩子")
+        expect(service.setHorizontalEnabled(true), "横向复用同一滚动钩子")
+        expect(tap.installCount == 1, "共享滚动钩子不重复安装")
+        expect(service.isHorizontalEffective, "横向也生效")
+        expect(service.setVerticalEnabled(false), "关闭垂直")
+        expect(tap.isInstalled, "仍有横向时保留滚动钩子")
+        expect(!service.isVerticalEffective && service.isHorizontalEffective, "只关闭垂直")
+        expect(service.setHorizontalEnabled(false), "关闭最后一项")
+        expect(!tap.isInstalled, "全部关闭后移除滚动钩子")
+        expect(!service.isHorizontalEffective, "全部关闭会拆除滚动钩子")
+    }
+
+    do {
+        let (service, settings, _, tap, _, _) = makeWheelHarness()
+        settings.reverseVerticalEnabled = true
+        settings.reverseHorizontalEnabled = true
+        tap.installShouldFail = true
+        service.applySavedSettings()
+        expect(!settings.reverseVerticalEnabled && !settings.reverseHorizontalEnabled, "启动恢复失败则写回关闭")
+        expect(!service.isVerticalEffective && !service.isHorizontalEffective, "启动恢复失败不生效")
+    }
+
+    do {
+        let (service, settings, _, tap, scheduler, alerts) = makeWheelHarness()
+        expect(service.setVerticalEnabled(true), "开启垂直以便注入钩子停用")
+        tap.isEnabled = false
+        tap.reenableShouldFail = true
+        tap.handler?(.tapDisabledByTimeout, CGEvent(source: nil)!)
+        scheduler.runAll()
+        expect(!settings.reverseVerticalEnabled, "无法恢复时关闭滚轮开关")
+        expect(!service.isVerticalEffective, "无法恢复后不显示开启")
+        expect(!tap.isInstalled, "无法恢复后拆除滚动钩子")
+        expect(alerts.titles.contains("滚轮对调已关闭"), "无法恢复时提示并放行")
+    }
+}
+
 @main
 struct TestRunnerMain {
     static func main() {
@@ -1139,6 +1316,7 @@ struct TestRunnerMain {
         testFinderDismissServiceFaults()
         testFinderCommandQServiceEffects()
         testLaunchAtLoginService()
+        testMouseWheelReverse()
 
         if failures == 0 {
             print("\nALL TESTS PASSED")

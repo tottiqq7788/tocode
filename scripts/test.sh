@@ -17,6 +17,8 @@ swiftc Tests/TestRunner.swift \
   Sources/FinderDismissService.swift \
   Sources/GlobalShortcutService.swift \
   Sources/LaunchAtLoginService.swift \
+  Sources/MouseWheelReverseStore.swift \
+  Sources/MouseWheelReverseService.swift \
   -o build/tests \
   -framework AppKit \
   -framework ApplicationServices \
