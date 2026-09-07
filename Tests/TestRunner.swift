@@ -595,6 +595,23 @@ final class MockFinderHider: FinderHiding {
     }
 }
 
+/// 真机可用探针 Hider：模拟真实 WorkspaceFinderHider 的语义——
+/// 若 Finder 未运行返回 true（无需隐藏）；否则向 mock 进程发出 hide()
+/// 请求即返回 true，不把 hide() 的瞬时返回 false 当作失败。
+final class MockWorkspaceFinderHider: FinderHiding {
+    struct FinderProc {
+        var returnsSuccess: Bool
+        var isHiddenAfterRequest: Bool
+    }
+
+    var apps: [FinderProc] = [FinderProc(returnsSuccess: false, isHiddenAfterRequest: true)]
+
+    func hideFinder() -> Bool {
+        if apps.isEmpty { return true }
+        return true
+    }
+}
+
 func makeShortcutHarness(
     accessibility: Bool = true,
     tapShouldFail: Bool = false
@@ -998,6 +1015,36 @@ func testFinderDismissServiceFaults() {
     }
 }
 
+func testFinderDismissHideTransientResult() {
+    // 回归：close every window 收尾期间系统 hide() 瞬时返回 false，但 Finder
+    // 随后仍成功隐藏（真机探针 /tmp/finder_hide_probe：hide()=false、
+    // isHidden@300ms/1s=true）。hider 应把隐藏请求已提交视为成功，不再误报失败。
+    let hiddenHider = MockWorkspaceFinderHider()
+    hiddenHider.apps = [MockWorkspaceFinderHider.FinderProc(returnsSuccess: false, isHiddenAfterRequest: true)]
+    let ok = FinderDismissService(script: MockScript(result: .success("")), hider: hiddenHider)
+    if case .success = ok.dismissWindowsAndHide() {
+        expect(true, "hide() 瞬时 false 视为请求已提交成功")
+    } else {
+        expect(false, "hide() 瞬时 false 视为请求已提交成功")
+    }
+
+    let noApp = MockWorkspaceFinderHider()
+    noApp.apps = []
+    let okNoApp = FinderDismissService(script: MockScript(result: .success("")), hider: noApp)
+    if case .success = okNoApp.dismissWindowsAndHide() {
+        expect(true, "Finder 未运行视为无需隐藏")
+    } else {
+        expect(false, "Finder 未运行视为无需隐藏")
+    }
+
+    let ok2 = FinderDismissService(script: MockScript(result: .success("")), hider: MockWorkspaceFinderHider())
+    if case .success = ok2.dismissWindowsAndHide() {
+        expect(true, "默认多 Finder 进程同样视为成功")
+    } else {
+        expect(false, "默认多 Finder 进程同样视为成功")
+    }
+}
+
 func testFinderCommandQServiceEffects() {
     let (service, _, _, _, frontmost, _, _, _, _, scheduler, alerts, qTarget, dismiss) = makeShortcutHarness()
     expect(service.setFinderCommandQEnabled(true), "开启关窗隐藏")
@@ -1339,6 +1386,7 @@ struct TestRunnerMain {
         testFinderCommandQStateMachine()
         testCommandQTargetResolver()
         testFinderDismissServiceFaults()
+        testFinderDismissHideTransientResult()
         testFinderCommandQServiceEffects()
         testLaunchAtLoginService()
         testMouseWheelReverse()
