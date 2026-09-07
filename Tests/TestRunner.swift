@@ -1368,9 +1368,816 @@ func testMouseWheelReverse() {
     }
 }
 
+func dataFromHex(_ value: String) -> Data {
+    var data = Data()
+    var index = value.startIndex
+    while index < value.endIndex {
+        let next = value.index(index, offsetBy: 2)
+        data.append(UInt8(value[index..<next], radix: 16)!)
+        index = next
+    }
+    return data
+}
+
+func testWeChatModelsCryptoAndState() {
+    let voiceJSON = Data(#"{"type":3,"voice_item":{"text_item":{"text":"语音内容"}}}"#.utf8)
+    let voice = try! JSONDecoder().decode(WeChatItem.self, from: voiceJSON)
+    expect(voice.type == 3, "微信协议解析语音类型 3")
+    expect(voice.voiceItem?.transcription == "语音内容", "语音缺少顶层 text 时仍解析 ASR")
+
+    let qr = try! JSONDecoder().decode(
+        WeChatQRCode.self,
+        from: Data(#"{"qrcode":"poll-token"}"#.utf8)
+    )
+    expect(qr.qrcode == "poll-token", "二维码响应允许缺少 qrcode_img_content")
+    expect(qr.scanURLString.contains("qrcode=poll-token"), "二维码生成微信 LiteApp 扫码地址")
+
+    let trusted = [
+        "https://weixin.qq.com",
+        "https://ilinkai.weixin.qq.com/path",
+        "https://novac2c.cdn.weixin.qq.com"
+    ].compactMap(URL.init(string:))
+    expect(trusted.allSatisfy(WeChatTrustPolicy.isTrustedAPIURL), "可信策略接受 HTTPS 微信主域与子域")
+    expect(!WeChatTrustPolicy.isTrustedAPIURL(URL(string: "http://ilinkai.weixin.qq.com")!), "可信策略拒绝 HTTP")
+    expect(!WeChatTrustPolicy.isTrustedAPIURL(URL(string: "https://weixin.qq.com.evil.test")!), "可信策略拒绝伪装后缀域")
+
+    let keyHex = "000102030405060708090a0b0c0d0e0f"
+    let ciphertext = dataFromHex("2c7a167d0fbcc0fa829c3a02b4f9c9fc")
+    let expected = Data("hello wechat".utf8)
+    expect(try! WeChatCrypto.decryptAESData(ciphertext, key: keyHex) == expected, "AES 解密接受 32 位十六进制密钥")
+    let rawKeyBase64 = dataFromHex(keyHex).base64EncodedString()
+    expect(try! WeChatCrypto.decryptAESData(ciphertext, key: rawKeyBase64) == expected, "AES 解密接受 Base64 原始密钥")
+    let hexBase64 = Data(keyHex.utf8).base64EncodedString()
+    expect(try! WeChatCrypto.decryptAESData(ciphertext, key: hexBase64) == expected, "AES 解密接受 Base64 十六进制密钥")
+    do {
+        _ = try WeChatCrypto.decryptAESData(ciphertext, key: "short")
+        expect(false, "AES 拒绝错误长度密钥")
+    } catch {
+        expect(true, "AES 拒绝错误长度密钥")
+    }
+    do {
+        _ = try WeChatCrypto.decryptAESData(Data(ciphertext.dropLast()), key: keyHex)
+        expect(false, "AES 拒绝损坏密文")
+    } catch {
+        expect(true, "AES 拒绝损坏密文")
+    }
+
+    let message = WeChatMessage(
+        fromUserID: "sender",
+        contextToken: "secret-context-token",
+        messageID: "message-id",
+        createTime: 123,
+        items: [WeChatItem(type: 1, textItem: WeChatTextItem(text: "hello"))]
+    )
+    let contextKey = WeChatDeduplication.key(for: message)
+    expect(contextKey.hasPrefix("ctx:"), "去重优先使用 context_token 的哈希")
+    expect(!contextKey.contains("secret-context-token"), "持久去重键不泄露 context_token")
+    let msgKey = WeChatDeduplication.key(for: WeChatMessage(
+        fromUserID: "sender",
+        messageID: "message-id",
+        items: []
+    ))
+    expect(msgKey.hasPrefix("msg:"), "无 context_token 时使用 msg_id 哈希")
+    let fallbackKey = WeChatDeduplication.key(for: WeChatMessage(
+        fromUserID: "sender",
+        createTime: 123,
+        items: [WeChatItem(type: 1, textItem: WeChatTextItem(text: "hello"))]
+    ))
+    expect(fallbackKey.hasPrefix("content:"), "无协议 ID 时使用规范化内容摘要")
+
+    let stateDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("tocode-wechat-state-\(UUID().uuidString)", isDirectory: true)
+    let temp = stateDirectory.appendingPathComponent("state.json")
+    defer { try? FileManager.default.removeItem(at: stateDirectory) }
+    let stateStore = FileWeChatReceiveStateStore(fileURL: temp)
+    let oversized = (0...WeChatDeduplication.maximumKeys).map { "key-\($0)" }
+    try! stateStore.save(WeChatReceiveState(cursor: "cursor-a", recentKeys: oversized))
+    let loaded = stateStore.load()
+    expect(loaded.cursor == "cursor-a", "微信游标持久化后恢复")
+    expect(loaded.recentKeys.count == WeChatDeduplication.maximumKeys, "最近去重键限制为 2000 个")
+    expect(loaded.recentKeys.first == "key-1", "去重键超限时淘汰最旧项")
+    try! stateStore.reset()
+    expect(stateStore.load() == .empty, "重绑时重置游标与去重状态")
+}
+
+func testWeChatArchiveNaming() {
+    expect(
+        WeChatArchiveService.sanitizedFilename("../folder\\report.pdf", fallback: "file.bin") == "report.pdf",
+        "附件名去除路径分隔与上级目录"
+    )
+    expect(
+        WeChatArchiveService.sanitizedFilename("\u{0000}\u{0007}", fallback: "file.bin") == "file.bin",
+        "空或控制字符附件名使用回退名称"
+    )
+    let long = String(repeating: "a", count: 150) + ".txt"
+    let shortened = WeChatArchiveService.sanitizedFilename(long, fallback: "file.bin")
+    expect(shortened.count <= 120 && shortened.hasSuffix(".txt"), "附件名限长并保留扩展名")
+    expect(
+        WeChatArchiveService.sanitizedFilename("README", fallback: "file.bin") == "README",
+        "无扩展名附件保持原名"
+    )
+}
+
+func testWeChatBindingPage() {
+    let fm = FileManager.default
+    let directory = fm.temporaryDirectory.appendingPathComponent(
+        "tocode-wechat-page-\(UUID().uuidString)",
+        isDirectory: true
+    )
+    defer { try? fm.removeItem(at: directory) }
+    let writer = WeChatBindingPageWriter(directory: directory)
+    let page = try! writer.prepare(qrCode: WeChatQRCode(qrcode: "browser-qr-token"))
+    let png = directory.appendingPathComponent("qrcode.png")
+    var html = try! String(contentsOf: page, encoding: .utf8)
+    expect(fm.fileExists(atPath: png.path), "浏览器绑定生成本地二维码 PNG")
+    expect(html.contains("等待扫码") && html.contains("http-equiv=\"refresh\""), "等待页面每 2 秒自动刷新状态")
+    expect(!html.contains("bot_token") && !html.contains("Bearer"), "浏览器页面不包含微信凭据字段")
+    try! writer.update(.success)
+    html = try! String(contentsOf: page, encoding: .utf8)
+    expect(html.contains("微信绑定成功") && !html.contains("http-equiv=\"refresh\""), "成功页面停止刷新并提示可关闭")
+}
+
+func makeArchiveCalendar() -> Calendar {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.locale = Locale(identifier: "en_US_POSIX")
+    calendar.timeZone = TimeZone(identifier: "Asia/Shanghai")!
+    return calendar
+}
+
+func testWeChatArchive() async {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent(
+        "tocode-wechat-archive-\(UUID().uuidString)",
+        isDirectory: true
+    )
+    defer { try? fm.removeItem(at: root) }
+    let transport = MockWeChatTransport()
+    transport.mediaResult = .success(Data("decoded-media".utf8))
+    let archive = WeChatArchiveService(
+        root: root,
+        transport: transport,
+        calendarProvider: makeArchiveCalendar
+    )
+    let calendar = makeArchiveCalendar()
+    let receivedAt = calendar.date(from: DateComponents(
+        year: 2026,
+        month: 9,
+        day: 7,
+        hour: 8,
+        minute: 9,
+        second: 10,
+        nanosecond: 123_000_000
+    ))!
+    let media = WeChatMedia(
+        encryptQueryParameter: "encrypted-image",
+        aesKey: Data(repeating: 1, count: 16).base64EncodedString()
+    )
+    let quoted = WeChatQuotedItem(
+        type: 1,
+        textItem: WeChatTextItem(text: "引用内容"),
+        imageItem: nil,
+        voiceItem: nil,
+        fileItem: nil,
+        videoItem: nil
+    )
+    let message = WeChatMessage(
+        fromUserID: "sender`id",
+        contextToken: "must-not-appear",
+        groupID: "group-id",
+        messageID: "m-1",
+        items: [
+            WeChatItem(
+                type: 1,
+                textItem: WeChatTextItem(text: "# 标题\n第二行"),
+                reference: WeChatReference(messageItem: quoted)
+            ),
+            WeChatItem(type: 3, voiceItem: WeChatVoiceItem(
+                textItem: WeChatTextItem(text: "语音转写")
+            )),
+            WeChatItem(type: 2, imageItem: WeChatImageItem(
+                aesKey: "00112233445566778899aabbccddeeff",
+                media: media
+            )),
+            WeChatItem(type: 4, fileItem: WeChatFileItem(
+                fileName: "../folder\\报告.pdf",
+                media: media
+            )),
+            WeChatItem(type: 5, videoItem: WeChatVideoItem(media: media))
+        ]
+    )
+
+    try! await archive.archive(message, receivedAt: receivedAt)
+    try! await archive.archive(message, receivedAt: receivedAt)
+
+    let day = root.appendingPathComponent("260907", isDirectory: true)
+    let log = day.appendingPathComponent("wechat260907.md")
+    let markdown = try! String(contentsOf: log, encoding: .utf8)
+    expect(fm.fileExists(atPath: day.path), "归档按本机时区创建 yyMMdd 日期目录")
+    expect(markdown.components(separatedBy: "## 08:09:10").count - 1 == 2, "每条消息只有一个收到时间标题且既有文件追加")
+    expect(markdown.contains("- 会话：群聊"), "Markdown 记录群聊类型")
+    expect(markdown.contains("- 发送者：sender\\`id"), "Markdown 记录并转义发送者 iLink ID")
+    expect(markdown.contains("> # 标题\n> 第二行"), "多行正文逐行使用 Markdown 引用")
+    expect(markdown.contains("**语音转写**") && markdown.contains("> 语音转写"), "语音 ASR 写入 Markdown")
+    expect(markdown.contains("**引用消息**") && markdown.contains("引用内容"), "归档一层引用消息")
+    expect(markdown.contains("仅收到语音转写"), "无媒体描述时不伪造语音文件")
+    expect(!markdown.contains("must-not-appear"), "Markdown 不写入 context_token")
+
+    let names = (try! fm.contentsOfDirectory(atPath: day.path)).sorted()
+    expect(names.contains("wechat260907.md"), "每日文件命名为 wechat<yyMMdd>.md")
+    expect(names.contains { $0.hasPrefix("080910_123_01_image") && $0.hasSuffix(".jpg") }, "图片按接收时间和两位序号命名")
+    expect(names.contains { $0.hasPrefix("080910_123_02_报告") && $0.hasSuffix(".pdf") }, "文件保留清理后的原名和扩展")
+    expect(names.contains { $0.contains("_2.") }, "同名附件冲突时追加递增序号且不覆盖")
+    let mediaFiles = names.filter { $0 != "wechat260907.md" }
+    expect(mediaFiles.count == 6, "两次归档的三类媒体均保留")
+    expect(transport.mediaDescriptors.count == 6, "同条消息媒体全部下载")
+    expect(
+        transport.mediaDescriptors.contains { $0.aesKey == "00112233445566778899aabbccddeeff" },
+        "图片优先使用 image_item.aeskey"
+    )
+
+    let nextDay = calendar.date(from: DateComponents(
+        year: 2026, month: 9, day: 8, hour: 0, minute: 0, second: 1
+    ))!
+    try! await archive.archive(
+        WeChatMessage(fromUserID: "sender", items: [
+            WeChatItem(type: 1, textItem: WeChatTextItem(text: "跨日"))
+        ]),
+        receivedAt: nextDay
+    )
+    expect(
+        fm.fileExists(atPath: root.appendingPathComponent("260908/wechat260908.md").path),
+        "跨过本机日期边界后写入新的日期目录与每日文件"
+    )
+
+    let failingFS = FailingWeChatFileSystem()
+    failingFS.failAppend = true
+    let failingArchive = WeChatArchiveService(
+        root: root,
+        transport: transport,
+        fileSystem: failingFS,
+        calendarProvider: makeArchiveCalendar
+    )
+    do {
+        try await failingArchive.archive(
+            WeChatMessage(fromUserID: "sender", items: [
+                WeChatItem(type: 1, textItem: WeChatTextItem(text: "disk"))
+            ]),
+            receivedAt: receivedAt
+        )
+        expect(false, "Markdown 追加失败必须向监听器抛错")
+    } catch WeChatArchiveError.appendLog {
+        expect(true, "Markdown 追加失败必须向监听器抛错")
+    } catch {
+        expect(false, "Markdown 追加失败分类")
+    }
+
+    let rollbackRoot = root.appendingPathComponent("rollback")
+    let rollbackFS = FailingWeChatFileSystem()
+    rollbackFS.failAppend = true
+    let rollbackArchive = WeChatArchiveService(
+        root: rollbackRoot,
+        transport: transport,
+        fileSystem: rollbackFS,
+        calendarProvider: makeArchiveCalendar
+    )
+    do {
+        try await rollbackArchive.archive(
+            WeChatMessage(fromUserID: "sender", items: [
+                WeChatItem(type: 2, imageItem: WeChatImageItem(media: media))
+            ]),
+            receivedAt: receivedAt
+        )
+        expect(false, "带附件的 Markdown 失败应抛错")
+    } catch {
+        let rollbackDay = rollbackRoot.appendingPathComponent("260907")
+        let leftovers = (try? fm.contentsOfDirectory(atPath: rollbackDay.path)) ?? []
+        expect(leftovers.isEmpty, "Markdown 失败会清理本次已保存附件和临时文件")
+    }
+
+    let mediaFailTransport = MockWeChatTransport()
+    mediaFailTransport.mediaResult = .failure(TestWeChatError.forced)
+    let mediaFailRoot = root.appendingPathComponent("media-fail")
+    let mediaFailArchive = WeChatArchiveService(
+        root: mediaFailRoot,
+        transport: mediaFailTransport,
+        calendarProvider: makeArchiveCalendar
+    )
+    try! await mediaFailArchive.archive(
+        WeChatMessage(fromUserID: "sender", items: [
+            WeChatItem(type: 2, imageItem: WeChatImageItem(media: media))
+        ]),
+        receivedAt: receivedAt
+    )
+    let failedMarkdown = try! String(
+        contentsOf: mediaFailRoot
+            .appendingPathComponent("260907")
+            .appendingPathComponent("wechat260907.md"),
+        encoding: .utf8
+    )
+    expect(failedMarkdown.contains("下载或解密失败"), "媒体失败写入结果后仍可完成消息归档")
+}
+
+func testWeChatProtocolContract() async {
+    WeChatURLProtocol.reset()
+    defer { WeChatURLProtocol.reset() }
+    let session = makeWeChatTestSession()
+    let client = WeChatILinkClient(session: session, randomUIN: { 42 })
+    let updatesJSON = """
+    {
+      "ret": 0,
+      "get_updates_buf": "cursor-next",
+      "msgs": [{
+        "from_user_id": "user@im.wechat",
+        "to_user_id": "bot@im.wechat",
+        "context_token": "ctx",
+        "group_id": "",
+        "message_type": 1,
+        "msg_id": "msg-1",
+        "create_time": 123,
+        "item_list": [
+          {"type":1,"text_item":{"text":"hello"}},
+          {"type":2,"image_item":{"aeskey":"00112233445566778899aabbccddeeff","media":{"encrypt_query_param":"img"}}},
+          {"type":3,"voice_item":{"text_item":{"text":"asr"}}},
+          {"type":4,"file_item":{"file_name":"a.pdf","media":{"encrypt_query_param":"file","aes_key":"key"}}},
+          {"type":5,"video_item":{"media":{"encrypt_query_param":"video","aes_key":"key"}}}
+        ]
+      }]
+    }
+    """
+    WeChatURLProtocol.handler = { request in
+        switch request.url!.path {
+        case "/ilink/bot/get_bot_qrcode":
+            return (200, Data(#"{"qrcode":"qr-contract","qrcode_img_content":""}"#.utf8))
+        case "/ilink/bot/get_qrcode_status":
+            return (200, Data(#"{"status":"confirmed","bot_token":"token","baseurl":"https://ilinkai.weixin.qq.com"}"#.utf8))
+        case "/ilink/bot/getupdates":
+            return (200, Data(updatesJSON.utf8))
+        default:
+            return (404, Data())
+        }
+    }
+
+    let qr = try! await client.fetchQRCode()
+    expect(qr.qrcode == "qr-contract", "协议合同：解析 QR 响应")
+    let qrRequest = WeChatURLProtocol.requests[0]
+    expect(qrRequest.httpMethod == "GET", "协议合同：QR 使用 GET")
+    expect(URLComponents(url: qrRequest.url!, resolvingAgainstBaseURL: false)?.queryItems?.contains(
+        URLQueryItem(name: "bot_type", value: "3")
+    ) == true, "协议合同：QR 携带 bot_type=3")
+    expect(qrRequest.value(forHTTPHeaderField: "AuthorizationType") == "ilink_bot_token", "协议合同：QR 携带 AuthorizationType")
+    expect(qrRequest.value(forHTTPHeaderField: "X-WECHAT-UIN") == "NDI=", "协议合同：X-WECHAT-UIN 为随机数字 Base64")
+    expect(qrRequest.value(forHTTPHeaderField: "Authorization") == nil, "协议合同：未绑定请求不携带 Bearer")
+
+    let status = try! await client.fetchQRCodeStatus(qrcode: qr.qrcode)
+    expect(status.status == "confirmed" && status.botToken == "token", "协议合同：解析扫码确认与 Token")
+    let statusRequest = WeChatURLProtocol.requests[1]
+    expect(statusRequest.httpMethod == "GET", "协议合同：扫码状态使用 GET")
+    expect(statusRequest.url!.query?.contains("qrcode=qr-contract") == true, "协议合同：扫码状态携带 qrcode")
+
+    let credential = WeChatCredential(token: "secret", baseURL: WeChatILinkClient.officialBaseURL)
+    let updates = try! await client.getUpdates(credential: credential, cursor: "cursor-old")
+    expect(updates.cursor == "cursor-next", "协议合同：解析并返回 get_updates_buf")
+    expect(updates.messages.first?.items.map(\.type) == [1, 2, 3, 4, 5], "协议合同：解析 iLink 消息类型 1 至 5")
+    expect(updates.messages.first?.items[2].voiceItem?.transcription == "asr", "协议合同：类型 3 解析语音转写")
+    let updateRequest = WeChatURLProtocol.requests[2]
+    expect(updateRequest.httpMethod == "POST", "协议合同：getupdates 使用 POST")
+    expect(updateRequest.value(forHTTPHeaderField: "Authorization") == "Bearer secret", "协议合同：受信任地址携带 Bearer")
+    let body = try! JSONSerialization.jsonObject(with: updateRequest.httpBody!) as! [String: Any]
+    expect(body["get_updates_buf"] as? String == "cursor-old", "协议合同：getupdates 提交持久游标")
+    let baseInfo = body["base_info"] as! [String: Any]
+    expect(baseInfo["channel_version"] as? String == "2.0.1", "协议合同：getupdates 提交 channel_version")
+
+    let beforeUntrusted = WeChatURLProtocol.requests.count
+    do {
+        _ = try await client.getUpdates(
+            credential: WeChatCredential(
+                token: "must-not-send",
+                baseURL: URL(string: "https://attacker.example")!
+            ),
+            cursor: ""
+        )
+        expect(false, "不受信任 API 地址必须拒绝")
+    } catch WeChatTransportError.untrustedURL {
+        expect(true, "不受信任 API 地址必须拒绝")
+    } catch {
+        expect(false, "不受信任 API 地址错误分类")
+    }
+    expect(WeChatURLProtocol.requests.count == beforeUntrusted, "拒绝不受信任地址前不发出 Token 请求")
+
+    WeChatURLProtocol.handler = { _ in (401, Data()) }
+    do {
+        _ = try await client.getUpdates(credential: credential, cursor: "")
+        expect(false, "HTTP 401 应分类为授权失效")
+    } catch WeChatTransportError.unauthorized {
+        expect(true, "HTTP 401 应分类为授权失效")
+    } catch {
+        expect(false, "HTTP 401 授权错误分类")
+    }
+
+    WeChatURLProtocol.handler = { _ in (503, Data()) }
+    do {
+        _ = try await client.getUpdates(credential: credential, cursor: "")
+        expect(false, "HTTP 5xx 应分类为暂时服务故障")
+    } catch WeChatTransportError.serverFailure(503) {
+        expect(true, "HTTP 5xx 应分类为暂时服务故障")
+    } catch {
+        expect(false, "HTTP 5xx 错误分类")
+    }
+}
+
+@MainActor
+func testWeChatAssociationAndFaults() async {
+    let old = WeChatCredential(
+        token: "old-token",
+        baseURL: WeChatILinkClient.officialBaseURL
+    )
+
+    do {
+        let transport = MockWeChatTransport()
+        transport.statuses = [.success(WeChatQRCodeStatus(
+            status: "expired",
+            botToken: nil,
+            baseURL: nil
+        ))]
+        let credentials = MemoryWeChatCredentialStore(old)
+        let page = MockWeChatBindingPage()
+        let service = WeChatAssociationService(
+            transport: transport,
+            credentialStore: credentials,
+            stateStore: MemoryWeChatStateStore(),
+            archiver: MockWeChatArchiver(),
+            pageWriter: page,
+            opener: MockWeChatOpener(),
+            notifier: MockWeChatNotifier(),
+            sleeper: MockWeChatSleeper()
+        )
+        await service.performBinding()
+        expect(service.isBound && credentials.credential == old, "二维码过期不破坏旧绑定")
+        expect(page.statuses.last == .expired, "二维码过期更新浏览器状态")
+        service.stop()
+    }
+
+    do {
+        let transport = MockWeChatTransport()
+        transport.statuses = [.success(WeChatQRCodeStatus(
+            status: "confirmed",
+            botToken: "",
+            baseURL: "https://ilinkai.weixin.qq.com"
+        ))]
+        let credentials = MemoryWeChatCredentialStore(old)
+        let page = MockWeChatBindingPage()
+        let service = WeChatAssociationService(
+            transport: transport,
+            credentialStore: credentials,
+            stateStore: MemoryWeChatStateStore(),
+            archiver: MockWeChatArchiver(),
+            pageWriter: page,
+            opener: MockWeChatOpener(),
+            notifier: MockWeChatNotifier(),
+            sleeper: MockWeChatSleeper()
+        )
+        await service.performBinding()
+        expect(credentials.credential == old, "confirmed 空 Token 被拒绝且保留旧绑定")
+        expect(page.statuses.contains { if case .failed = $0 { return true }; return false }, "空 Token 在浏览器显示失败")
+        service.stop()
+    }
+
+    do {
+        let transport = MockWeChatTransport()
+        transport.statuses = [.success(WeChatQRCodeStatus(
+            status: "confirmed",
+            botToken: "new-token",
+            baseURL: "https://weixin.qq.com.evil.test"
+        ))]
+        let credentials = MemoryWeChatCredentialStore(old)
+        let service = WeChatAssociationService(
+            transport: transport,
+            credentialStore: credentials,
+            stateStore: MemoryWeChatStateStore(),
+            archiver: MockWeChatArchiver(),
+            pageWriter: MockWeChatBindingPage(),
+            opener: MockWeChatOpener(),
+            notifier: MockWeChatNotifier(),
+            sleeper: MockWeChatSleeper()
+        )
+        await service.performBinding()
+        expect(credentials.credential == old && credentials.saves.isEmpty, "不受信任 base URL 不写 Keychain")
+        service.stop()
+    }
+
+    do {
+        let transport = MockWeChatTransport()
+        transport.statuses = [.success(WeChatQRCodeStatus(
+            status: "confirmed",
+            botToken: "new-token",
+            baseURL: "https://ilinkai.weixin.qq.com"
+        ))]
+        let credentials = MemoryWeChatCredentialStore(old)
+        credentials.saveError = TestWeChatError.forced
+        let states = MemoryWeChatStateStore(WeChatReceiveState(cursor: "old-cursor", recentKeys: []))
+        let service = WeChatAssociationService(
+            transport: transport,
+            credentialStore: credentials,
+            stateStore: states,
+            archiver: MockWeChatArchiver(),
+            pageWriter: MockWeChatBindingPage(),
+            opener: MockWeChatOpener(),
+            notifier: MockWeChatNotifier(),
+            sleeper: MockWeChatSleeper()
+        )
+        await service.performBinding()
+        expect(credentials.credential == old, "Keychain 写入失败保留旧绑定")
+        expect(states.resetCount == 0, "Keychain 写入失败不重置旧游标")
+        service.stop()
+    }
+
+    do {
+        let transport = MockWeChatTransport()
+        transport.statuses = [.success(WeChatQRCodeStatus(
+            status: "confirmed",
+            botToken: "new-token",
+            baseURL: "https://ilinkai.weixin.qq.com"
+        ))]
+        transport.updates = [.failure(CancellationError())]
+        let credentials = MemoryWeChatCredentialStore(old)
+        let states = MemoryWeChatStateStore(WeChatReceiveState(cursor: "old-cursor", recentKeys: []))
+        states.resetError = TestWeChatError.forced
+        let page = MockWeChatBindingPage()
+        let service = WeChatAssociationService(
+            transport: transport,
+            credentialStore: credentials,
+            stateStore: states,
+            archiver: MockWeChatArchiver(),
+            pageWriter: page,
+            opener: MockWeChatOpener(),
+            notifier: MockWeChatNotifier(),
+            sleeper: MockWeChatSleeper()
+        )
+        await service.performBinding()
+        expect(credentials.credential == old && service.isBound, "重置接收状态失败时回滚旧 Keychain 凭据")
+        expect(credentials.saves == [
+            WeChatCredential(token: "new-token", baseURL: WeChatILinkClient.officialBaseURL),
+            old
+        ], "状态重置失败先写新凭据再原子恢复旧凭据")
+        expect(page.statuses.contains { if case .failed = $0 { return true }; return false }, "状态重置失败不宣称绑定成功")
+        service.stop()
+    }
+
+    do {
+        let transport = MockWeChatTransport()
+        transport.updates = [
+            .failure(WeChatTransportError.serverFailure(503)),
+            .failure(URLError(.notConnectedToInternet)),
+            .failure(CancellationError())
+        ]
+        let credentials = MemoryWeChatCredentialStore(old)
+        let sleeper = MockWeChatSleeper()
+        let service = WeChatAssociationService(
+            transport: transport,
+            credentialStore: credentials,
+            stateStore: MemoryWeChatStateStore(),
+            archiver: MockWeChatArchiver(),
+            pageWriter: MockWeChatBindingPage(),
+            opener: MockWeChatOpener(),
+            notifier: MockWeChatNotifier(),
+            sleeper: sleeper
+        )
+        service.startBoundListener()
+        _ = await waitUntil { sleeper.seconds.count >= 2 }
+        expect(Array(sleeper.seconds.prefix(2)) == [5, 10], "离线与 5xx 使用 5/10 秒指数退避")
+        expect(service.isBound && credentials.deleteCount == 0, "离线与 5xx 保留绑定勾选")
+        service.stop()
+    }
+
+    do {
+        let transport = MockWeChatTransport()
+        transport.updates = [.failure(WeChatTransportError.unauthorized)]
+        let credentials = MemoryWeChatCredentialStore(old)
+        let notifier = MockWeChatNotifier()
+        let service = WeChatAssociationService(
+            transport: transport,
+            credentialStore: credentials,
+            stateStore: MemoryWeChatStateStore(),
+            archiver: MockWeChatArchiver(),
+            pageWriter: MockWeChatBindingPage(),
+            opener: MockWeChatOpener(),
+            notifier: notifier,
+            sleeper: MockWeChatSleeper()
+        )
+        service.startBoundListener()
+        _ = await waitUntil { credentials.deleteCount == 1 }
+        expect(!service.isBound && credentials.credential == nil, "HTTP 401/403 清除 Token 并取消勾选")
+        expect(notifier.notifications.contains { $0.0 == "微信授权已失效" }, "授权失效通知重新绑定")
+        service.stop()
+    }
+
+    do {
+        let duplicate = WeChatMessage(
+            fromUserID: "sender",
+            contextToken: "same-context",
+            messageID: "m",
+            items: [WeChatItem(type: 1, textItem: WeChatTextItem(text: "hello"))]
+        )
+        let transport = MockWeChatTransport()
+        transport.updates = [
+            .success(WeChatUpdates(messages: [duplicate, duplicate], cursor: "cursor-new")),
+            .failure(CancellationError())
+        ]
+        let states = MemoryWeChatStateStore()
+        let archiver = MockWeChatArchiver()
+        let service = WeChatAssociationService(
+            transport: transport,
+            credentialStore: MemoryWeChatCredentialStore(old),
+            stateStore: states,
+            archiver: archiver,
+            pageWriter: MockWeChatBindingPage(),
+            opener: MockWeChatOpener(),
+            notifier: MockWeChatNotifier(),
+            sleeper: MockWeChatSleeper()
+        )
+        service.startBoundListener()
+        _ = await waitUntil { states.state.cursor == "cursor-new" }
+        expect(archiver.messages.count == 1, "同一响应中的重复消息只归档一次")
+        expect(states.state.recentKeys.count == 1, "成功归档后持久化去重键")
+        expect(states.state.cursor == "cursor-new", "全部消息成功后推进游标")
+        service.stop()
+    }
+
+    do {
+        let message = WeChatMessage(
+            fromUserID: "sender",
+            contextToken: "disk-fail",
+            items: [WeChatItem(type: 1, textItem: WeChatTextItem(text: "hello"))]
+        )
+        let transport = MockWeChatTransport()
+        transport.updates = [
+            .success(WeChatUpdates(messages: [message], cursor: "must-not-commit")),
+            .failure(CancellationError())
+        ]
+        let states = MemoryWeChatStateStore(WeChatReceiveState(cursor: "cursor-old", recentKeys: []))
+        let archiver = MockWeChatArchiver()
+        archiver.error = WeChatArchiveError.appendLog
+        let service = WeChatAssociationService(
+            transport: transport,
+            credentialStore: MemoryWeChatCredentialStore(old),
+            stateStore: states,
+            archiver: archiver,
+            pageWriter: MockWeChatBindingPage(),
+            opener: MockWeChatOpener(),
+            notifier: MockWeChatNotifier(),
+            sleeper: MockWeChatSleeper()
+        )
+        service.startBoundListener()
+        _ = await waitUntil { transport.updateCursors.count >= 2 }
+        expect(states.state.cursor == "cursor-old", "磁盘写入失败不推进 get_updates_buf")
+        expect(states.state.recentKeys.isEmpty, "磁盘写入失败不把消息标为已处理")
+        expect(transport.updateCursors.first == "cursor-old", "监听启动时从持久化游标恢复")
+        service.stop()
+    }
+
+    do {
+        let message = WeChatMessage(
+            fromUserID: "sender",
+            contextToken: "state-save-fail",
+            items: [WeChatItem(type: 1, textItem: WeChatTextItem(text: "saved archive"))]
+        )
+        let transport = MockWeChatTransport()
+        transport.updates = [
+            .success(WeChatUpdates(messages: [message], cursor: "state-must-not-commit")),
+            .failure(CancellationError())
+        ]
+        let states = MemoryWeChatStateStore(WeChatReceiveState(cursor: "state-old", recentKeys: []))
+        states.saveError = TestWeChatError.forced
+        let archiver = MockWeChatArchiver()
+        let service = WeChatAssociationService(
+            transport: transport,
+            credentialStore: MemoryWeChatCredentialStore(old),
+            stateStore: states,
+            archiver: archiver,
+            pageWriter: MockWeChatBindingPage(),
+            opener: MockWeChatOpener(),
+            notifier: MockWeChatNotifier(),
+            sleeper: MockWeChatSleeper()
+        )
+        service.startBoundListener()
+        _ = await waitUntil { transport.updateCursors.count >= 2 }
+        expect(archiver.messages.count == 1, "状态文件失败前消息归档本身已完成")
+        expect(states.state.cursor == "state-old", "状态文件保存失败不推进内存或磁盘游标")
+        expect(states.state.recentKeys.isEmpty, "状态文件保存失败不推进内存或磁盘去重集合")
+        service.stop()
+    }
+
+    do {
+        let transport = CancellationAwareWeChatTransport()
+        let service = WeChatAssociationService(
+            transport: transport,
+            credentialStore: MemoryWeChatCredentialStore(old),
+            stateStore: MemoryWeChatStateStore(),
+            archiver: MockWeChatArchiver(),
+            pageWriter: MockWeChatBindingPage(),
+            opener: MockWeChatOpener(),
+            notifier: MockWeChatNotifier(),
+            sleeper: MockWeChatSleeper()
+        )
+        service.startBoundListener()
+        await Task.yield()
+        service.stop()
+        _ = await waitUntil { transport.didCancel }
+        expect(transport.didCancel, "应用退出停止并取消正在等待的长轮询")
+    }
+}
+
+@MainActor
+func testWeChatBindingToArchiveIntegration() async {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent(
+        "tocode-wechat-integration-\(UUID().uuidString)",
+        isDirectory: true
+    )
+    defer { try? fm.removeItem(at: root) }
+    let transport = MockWeChatTransport()
+    transport.statuses = [.success(WeChatQRCodeStatus(
+        status: "confirmed",
+        botToken: "integration-token",
+        baseURL: "https://ilinkai.weixin.qq.com"
+    ))]
+    let media = WeChatMedia(
+        encryptQueryParameter: "encrypted-media",
+        aesKey: Data(repeating: 2, count: 16).base64EncodedString()
+    )
+    let message = WeChatMessage(
+        fromUserID: "integration-user@im.wechat",
+        contextToken: "integration-context",
+        messageID: "integration-message",
+        items: [
+            WeChatItem(type: 1, textItem: WeChatTextItem(text: "集成文字")),
+            WeChatItem(type: 3, voiceItem: WeChatVoiceItem(
+                textItem: WeChatTextItem(text: "集成语音转写"),
+                media: media
+            )),
+            WeChatItem(type: 2, imageItem: WeChatImageItem(media: media)),
+            WeChatItem(type: 4, fileItem: WeChatFileItem(fileName: "集成文件.dat", media: media)),
+            WeChatItem(type: 5, videoItem: WeChatVideoItem(media: media))
+        ]
+    )
+    transport.updates = [
+        .success(WeChatUpdates(messages: [message], cursor: "integration-cursor")),
+        .failure(CancellationError())
+    ]
+    transport.mediaResult = .success(Data("decrypted-integration-media".utf8))
+    let credentials = MemoryWeChatCredentialStore()
+    let states = MemoryWeChatStateStore()
+    let page = MockWeChatBindingPage()
+    let opener = MockWeChatOpener()
+    let notifier = MockWeChatNotifier()
+    let archive = WeChatArchiveService(
+        root: root,
+        transport: transport,
+        calendarProvider: makeArchiveCalendar
+    )
+    let fixedDate = makeArchiveCalendar().date(from: DateComponents(
+        year: 2026, month: 9, day: 7, hour: 12, minute: 34, second: 56
+    ))!
+    let service = WeChatAssociationService(
+        transport: transport,
+        credentialStore: credentials,
+        stateStore: states,
+        archiver: archive,
+        pageWriter: page,
+        opener: opener,
+        notifier: notifier,
+        sleeper: MockWeChatSleeper(),
+        now: { fixedDate },
+        archiveRoot: root
+    )
+
+    await service.performBinding()
+    _ = await waitUntil { states.state.cursor == "integration-cursor" }
+    service.stop()
+
+    expect(credentials.credential?.token == "integration-token", "集成：扫码 confirmed 后写入 Keychain 边界")
+    expect(states.resetCount == 1, "集成：新绑定重置旧游标")
+    expect(transport.updateCredentials.first?.token == "integration-token", "集成：绑定成功后自动启动长轮询")
+    expect(page.statuses.last == .success, "集成：浏览器页面显示绑定成功")
+    expect(opener.urls.first == page.url, "集成：使用默认浏览器打开绑定页面")
+    expect(notifier.notifications.contains { $0.0 == "微信绑定成功" }, "集成：绑定成功发送本地通知")
+
+    let day = root.appendingPathComponent("260907")
+    let markdown = try? String(
+        contentsOf: day.appendingPathComponent("wechat260907.md"),
+        encoding: .utf8
+    )
+    expect(markdown?.contains("集成文字") == true, "集成：文字实时追加到每日 Markdown")
+    expect(markdown?.contains("集成语音转写") == true, "集成：语音转写归档")
+    let files = (try? fm.contentsOfDirectory(atPath: day.path)) ?? []
+    expect(files.count == 5, "集成：Markdown 与语音/图片/文件/视频四类媒体落盘")
+    expect(transport.mediaDescriptors.count == 4, "集成：下载四类实际提供的媒体")
+    expect(states.state.recentKeys.count == 1, "集成：归档成功后保存去重键")
+}
+
 @main
 struct TestRunnerMain {
-    static func main() {
+    static func main() async {
         testFileSystemService()
         testRootPathStore()
         testClipboardService()
@@ -1390,6 +2197,13 @@ struct TestRunnerMain {
         testFinderCommandQServiceEffects()
         testLaunchAtLoginService()
         testMouseWheelReverse()
+        testWeChatModelsCryptoAndState()
+        testWeChatArchiveNaming()
+        testWeChatBindingPage()
+        await testWeChatArchive()
+        await testWeChatProtocolContract()
+        await testWeChatAssociationAndFaults()
+        await testWeChatBindingToArchiveIntegration()
 
         if failures == 0 {
             print("\nALL TESTS PASSED")

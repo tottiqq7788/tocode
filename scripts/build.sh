@@ -10,6 +10,8 @@ swiftc -O Sources/*.swift \
   -framework AppKit \
   -framework ApplicationServices \
   -framework CoreGraphics \
+  -framework CoreImage \
+  -framework Security \
   -framework UserNotifications \
   -framework ServiceManagement
 

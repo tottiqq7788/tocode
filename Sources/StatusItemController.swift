@@ -14,15 +14,18 @@ final class StatusItemController: NSObject {
     private let shortcuts: GlobalShortcutService
     private let mouseWheel: MouseWheelReverseService
     private let launchAtLogin: LaunchAtLoginControlling
+    private let weChat: WeChatAssociationControlling
 
     init(
         shortcuts: GlobalShortcutService,
         mouseWheel: MouseWheelReverseService,
-        launchAtLogin: LaunchAtLoginControlling = LaunchAtLoginService()
+        launchAtLogin: LaunchAtLoginControlling = LaunchAtLoginService(),
+        weChat: WeChatAssociationControlling
     ) {
         self.shortcuts = shortcuts
         self.mouseWheel = mouseWheel
         self.launchAtLogin = launchAtLogin
+        self.weChat = weChat
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         super.init()
         if let button = statusItem.button {
@@ -83,6 +86,29 @@ final class StatusItemController: NSObject {
             initRoot.target = self
             initRoot.image = NSImage(systemSymbolName: "folder.badge.gearshape", accessibilityDescription: nil)
         }
+
+        let weChatItem = menu.addItem(withTitle: "微信关联", action: nil, keyEquivalent: "")
+        weChatItem.image = NSImage(systemSymbolName: "link", accessibilityDescription: nil)
+        let weChatMenu = NSMenu()
+        weChatMenu.autoenablesItems = false
+        let bindWeChat = weChatMenu.addItem(
+            withTitle: "绑定微信",
+            action: #selector(bindWeChat),
+            keyEquivalent: ""
+        )
+        bindWeChat.target = self
+        ShortcutMenuAppearance.apply(to: bindWeChat, enabled: weChat.isBound)
+        let openWeChatLocation = weChatMenu.addItem(
+            withTitle: "文件位置",
+            action: #selector(openWeChatLocation),
+            keyEquivalent: ""
+        )
+        openWeChatLocation.target = self
+        openWeChatLocation.image = NSImage(
+            systemSymbolName: "folder",
+            accessibilityDescription: nil
+        )
+        weChatItem.submenu = weChatMenu
 
         let settingsItem = menu.addItem(withTitle: "设置", action: nil, keyEquivalent: "")
         settingsItem.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil)
@@ -213,6 +239,14 @@ final class StatusItemController: NSObject {
     @objc private func toggleFinderCommandQ(_ sender: NSMenuItem) {
         _ = shortcuts.setFinderCommandQEnabled(!shortcuts.isFinderCommandQEffective)
         ShortcutMenuAppearance.apply(to: sender, enabled: shortcuts.isFinderCommandQEffective)
+    }
+
+    @objc private func bindWeChat() {
+        weChat.startBinding()
+    }
+
+    @objc private func openWeChatLocation() {
+        weChat.openArchiveLocation()
     }
 
     /// 点击时重新解析访达单选项；失效则不改写根目录。
