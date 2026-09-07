@@ -97,20 +97,25 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         let syncEnabled = codexSync.syncEnabled
         var manualRootItems: [NSMenuItem] = []
 
-        let readClip = menu.addItem(withTitle: "读取剪贴板", action: #selector(readClipboard), keyEquivalent: "")
+        let directoryItem = menu.addItem(withTitle: "目录", action: nil, keyEquivalent: "")
+        directoryItem.image = NSImage(systemSymbolName: "folder", accessibilityDescription: nil)
+        let directoryMenu = NSMenu()
+        directoryMenu.autoenablesItems = false
+
+        let readClip = directoryMenu.addItem(withTitle: "读取剪贴板", action: #selector(readClipboard), keyEquivalent: "")
         readClip.target = self
         readClip.image = NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: nil)
-        manualRootItems.append(readClip)
 
-        let changeDir = menu.addItem(withTitle: "更改目录", action: #selector(chooseRoot), keyEquivalent: "")
+        let changeDir = directoryMenu.addItem(withTitle: "更改目录", action: #selector(chooseRoot), keyEquivalent: "")
         changeDir.target = self
         changeDir.image = NSImage(systemSymbolName: "folder.badge.plus", accessibilityDescription: nil)
-        manualRootItems.append(changeDir)
 
-        let resetRoot = menu.addItem(withTitle: "重置初始目录", action: #selector(resetRoot), keyEquivalent: "")
+        let resetRoot = directoryMenu.addItem(withTitle: "重置初始目录", action: #selector(resetRoot), keyEquivalent: "")
         resetRoot.target = self
         resetRoot.image = NSImage(systemSymbolName: "arrow.counterclockwise", accessibilityDescription: nil)
-        manualRootItems.append(resetRoot)
+
+        directoryItem.submenu = directoryMenu
+        manualRootItems.append(directoryItem)
 
         if case .success = finderSelection.resolveInitializationDirectory() {
             let initRoot = menu.addItem(withTitle: "访达目录初始化", action: #selector(initRootFromFinder), keyEquivalent: "")
@@ -235,7 +240,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         let quit = menu.addItem(withTitle: "退出", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quit.image = NSImage(systemSymbolName: "power", accessibilityDescription: nil)
 
-        // 同步开启时，四项会改动手动根目录的功能均置灰；关闭时恢复。
+        // 同步开启时，「目录」父项与「访达目录初始化」置灰（父项禁用即无法展开下层）；关闭时恢复。
         for item in manualRootItems {
             item.isEnabled = !syncEnabled
         }
