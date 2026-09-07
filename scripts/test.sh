@@ -10,6 +10,8 @@ swiftc Tests/TestRunner.swift \
   Sources/RootPathStore.swift \
   Sources/CodexProjectService.swift \
   Sources/CodexSyncSettingsStore.swift \
+  Sources/CodexModelSwitchService.swift \
+  Sources/CodexApplicationRestarter.swift \
   Sources/FinderVisibilityService.swift \
   Sources/FinderSelectionService.swift \
   Sources/ShortcutSettingsStore.swift \
@@ -37,6 +39,7 @@ swiftc Tests/TestRunner.swift \
   -framework CoreImage \
   -framework Security \
   -framework UserNotifications \
-  -framework ServiceManagement
+  -framework ServiceManagement \
+  -lsqlite3
 
 ./build/tests

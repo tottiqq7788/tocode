@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import CoreGraphics
+import SQLite3
 
 var failures = 0
 
@@ -205,6 +206,368 @@ func testCodexSyncSettingsStore() {
     expect(store.syncEnabled == true, "CodexSyncSettingsStore 写入后读取 true")
     store.syncEnabled = false
     expect(store.syncEnabled == false, "CodexSyncSettingsStore 关闭后恢复 false")
+}
+
+private final class MockCodexModelURLProtocol: URLProtocol {
+    static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        do {
+            guard let handler = Self.handler else {
+                throw NSError(domain: "MockCodexModelURLProtocol", code: 1)
+            }
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+}
+
+private struct CodexModelFixture {
+    let root: URL
+    let databasePath: String
+    let configPath: String
+}
+
+private func makeCodexModelFixture() -> CodexModelFixture {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("codex-model-\(UUID().uuidString)")
+    try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let databasePath = root.appendingPathComponent("cc-switch.db").path
+    let configPath = root.appendingPathComponent("config.toml").path
+    let template = """
+    model_provider = "custom"
+    model = "v_model/gpt-5.5"
+    model_reasoning_effort = "high"
+
+    [model_providers.custom]
+    base_url = "https://ai-router.anker-in.com/v1"
+    experimental_bearer_token = "provider-managed"
+    """
+    let settings: [String: Any] = [
+        "auth": ["OPENAI_API_KEY": "unit-test-key"],
+        "config": template,
+        "untouched": ["enabled": true]
+    ]
+    let settingsData = try! JSONSerialization.data(withJSONObject: settings, options: [.sortedKeys])
+    let settingsJSON = String(data: settingsData, encoding: .utf8)!
+
+    var database: OpaquePointer?
+    expect(sqlite3_open(databasePath, &database) == SQLITE_OK, "模型切换夹具创建 SQLite")
+    let createSQL = """
+    CREATE TABLE providers (
+      id TEXT NOT NULL,
+      app_type TEXT NOT NULL,
+      name TEXT NOT NULL,
+      settings_config TEXT NOT NULL,
+      is_current BOOLEAN NOT NULL DEFAULT 0,
+      PRIMARY KEY (id, app_type)
+    );
+    """
+    expect(sqlite3_exec(database, createSQL, nil, nil, nil) == SQLITE_OK, "模型切换夹具创建 providers")
+    var statement: OpaquePointer?
+    let insertSQL = "INSERT INTO providers(id, app_type, name, settings_config, is_current) VALUES(?, 'codex', 'Anker AI Router', ?, 1)"
+    expect(sqlite3_prepare_v2(database, insertSQL, -1, &statement, nil) == SQLITE_OK, "模型切换夹具准备 Provider")
+    let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+    sqlite3_bind_text(statement, 1, "anker", -1, transient)
+    sqlite3_bind_text(statement, 2, settingsJSON, -1, transient)
+    expect(sqlite3_step(statement) == SQLITE_DONE, "模型切换夹具写入 Provider")
+    sqlite3_finalize(statement)
+    sqlite3_close(database)
+
+    let live = """
+    model_provider = "custom"
+    model = "v_model/gpt-5.5"
+    model_reasoning_effort = "high"
+
+    [desktop]
+    conversationDetailMode = "STEPS_PROSE"
+    """
+    try! live.write(toFile: configPath, atomically: true, encoding: .utf8)
+    try! FileManager.default.setAttributes(
+        [.posixPermissions: NSNumber(value: 0o600)],
+        ofItemAtPath: configPath
+    )
+    return CodexModelFixture(root: root, databasePath: databasePath, configPath: configPath)
+}
+
+private func readProviderSettings(at path: String) -> [String: Any] {
+    var database: OpaquePointer?
+    guard sqlite3_open_v2(path, &database, SQLITE_OPEN_READONLY, nil) == SQLITE_OK,
+          let database else {
+        return [:]
+    }
+    defer { sqlite3_close(database) }
+    var statement: OpaquePointer?
+    guard sqlite3_prepare_v2(
+        database,
+        "SELECT settings_config FROM providers WHERE id='anker' AND app_type='codex'",
+        -1,
+        &statement,
+        nil
+    ) == SQLITE_OK, let statement else {
+        return [:]
+    }
+    defer { sqlite3_finalize(statement) }
+    guard sqlite3_step(statement) == SQLITE_ROW,
+          let bytes = sqlite3_column_text(statement, 0),
+          let data = String(cString: bytes).data(using: .utf8),
+          let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        return [:]
+    }
+    return object
+}
+
+func testCodexModelTOMLAndCatalog() {
+    let source = """
+    # model = "commented"
+    model_provider = "custom"
+    model = "v_model/gpt-5.5" # current
+
+    [desktop]
+    model = "nested"
+    """
+    expect(
+        (try? CodexTOMLModel.read(from: source, location: "test")) == "v_model/gpt-5.5",
+        "模型解析只读取唯一顶层 model"
+    )
+    let replaced = try! CodexTOMLModel.replacing(
+        in: source,
+        with: "v_model/gpt-6-astra",
+        location: "test"
+    )
+    expect(replaced.contains("model = \"v_model/gpt-6-astra\" # current"), "模型替换保留原行格式与注释")
+    expect(replaced.contains("model = \"nested\""), "模型替换不改表内同名键")
+    expect(
+        (try? CodexTOMLModel.read(from: "model = \"a\"\nmodel = \"b\"\n", location: "test")) == nil,
+        "重复顶层 model 被拒绝"
+    )
+    expect(
+        (try? CodexTOMLModel.read(from: "[desktop]\nmodel = \"nested\"\n", location: "test")) == nil,
+        "只有表内 model 时被拒绝"
+    )
+
+    let sol = CodexModelCatalog.descriptor(for: "v_model/gpt-5.5")
+    expect(sol.displayName == "GPT-5.6 Sol", "Sol 使用友好名称")
+    expect(sol.compatibility == .verified, "Sol 标记为已验证")
+    let appsKimi = CodexModelCatalog.descriptor(for: "apps/v_model/kimi")
+    expect(appsKimi.displayName == "Kimi · Apps", "重名模型显示来源")
+    if case .unsupported = CodexModelCatalog.descriptor(for: "apps/v_model/glm-image").compatibility {
+        expect(true, "图片模型标记为不可选择")
+    } else {
+        expect(false, "图片模型标记为不可选择")
+    }
+    if case .unsupported = CodexModelCatalog.descriptor(for: "anthropic/v_model/deepseek-v4-pro").compatibility {
+        expect(true, "已知 /responses 不兼容模型被禁用")
+    } else {
+        expect(false, "已知 /responses 不兼容模型被禁用")
+    }
+    let deduplicated = CodexModelCatalog.descriptors(for: [
+        "apps/v_model/kimi", "apps/v_model/kimi", "v_model/gpt-5.5"
+    ])
+    expect(deduplicated.count == 2, "实时模型目录按 ID 去重")
+}
+
+func testCodexModelSwitchIntegrationAndFaults() {
+    let fixture = makeCodexModelFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let service = CodexModelSwitchService(
+        databasePath: fixture.databasePath,
+        liveConfigPath: fixture.configPath
+    )
+    let initial = try! service.currentState()
+    expect(initial.liveModelID == "v_model/gpt-5.5", "模型状态读取实时配置")
+    expect(initial.providerModelID == "v_model/gpt-5.5", "模型状态读取 Provider 模板")
+    expect(initial.isConsistent, "初始双配置一致")
+
+    try! service.switchModel(to: "v_model/gpt-6-astra")
+    let switched = try! service.currentState()
+    expect(switched.liveModelID == "v_model/gpt-6-astra", "切换写入 Codex 实时配置")
+    expect(switched.providerModelID == "v_model/gpt-6-astra", "切换写入 CC Switch Provider 模板")
+    let live = try! String(contentsOfFile: fixture.configPath, encoding: .utf8)
+    expect(live.contains("model_reasoning_effort = \"high\""), "实时配置非 model 内容保持")
+    expect(live.contains("conversationDetailMode = \"STEPS_PROSE\""), "实时配置表内容保持")
+    let liveAttributes = try! FileManager.default.attributesOfItem(atPath: fixture.configPath)
+    expect(
+        (liveAttributes[.posixPermissions] as? NSNumber)?.intValue == 0o600,
+        "原子替换保持 Codex 配置 0600 权限"
+    )
+    let settings = readProviderSettings(at: fixture.databasePath)
+    let auth = settings["auth"] as? [String: Any]
+    expect(auth?["OPENAI_API_KEY"] as? String == "unit-test-key", "Provider 凭据保持不变")
+    let untouched = settings["untouched"] as? [String: Any]
+    expect(untouched?["enabled"] as? Bool == true, "Provider JSON 其他字段保持不变")
+
+    let failedWriter = CodexModelSwitchService(
+        databasePath: fixture.databasePath,
+        liveConfigPath: fixture.configPath,
+        fileWriter: { _, _ in
+            throw NSError(domain: "intentional-write-failure", code: 1)
+        }
+    )
+    expect(
+        (try? failedWriter.switchModel(to: "v_model/gpt-5.5")) == nil,
+        "实时配置写入失败时切换失败"
+    )
+    let afterFailure = try! service.currentState()
+    expect(afterFailure.liveModelID == "v_model/gpt-6-astra", "写入失败后实时配置保持原值")
+    expect(afterFailure.providerModelID == "v_model/gpt-6-astra", "写入失败后数据库事务回滚")
+
+    let validLive = live
+    try! "model = \"a\"\nmodel = \"b\"\n".write(
+        toFile: fixture.configPath,
+        atomically: true,
+        encoding: .utf8
+    )
+    expect((try? service.switchModel(to: "v_model/gpt")) == nil, "歧义实时配置拒绝切换")
+    try! validLive.write(toFile: fixture.configPath, atomically: true, encoding: .utf8)
+
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [MockCodexModelURLProtocol.self]
+    let networkService = CodexModelSwitchService(
+        databasePath: fixture.databasePath,
+        liveConfigPath: fixture.configPath,
+        session: URLSession(configuration: configuration)
+    )
+    var requestedURL: URL?
+    var authorization: String?
+    MockCodexModelURLProtocol.handler = { request in
+        requestedURL = request.url
+        authorization = request.value(forHTTPHeaderField: "Authorization")
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: nil
+        )!
+        let data = Data(#"{"data":[{"id":"v_model/gpt-5.5"},{"id":"apps/v_model/glm-image"},{"id":"v_model/gpt-5.5"}]}"#.utf8)
+        return (response, data)
+    }
+    let loaded = DispatchSemaphore(value: 0)
+    var loadedModels: [CodexModelDescriptor] = []
+    networkService.fetchModels { result in
+        if case .success(let models) = result {
+            loadedModels = models
+        }
+        loaded.signal()
+    }
+    _ = loaded.wait(timeout: .now() + 2)
+    expect(requestedURL?.absoluteString == "https://ai-router.anker-in.com/v1/models", "目录只请求固定 Anker HTTPS 地址")
+    expect(authorization == "Bearer unit-test-key", "目录使用当前 Provider 凭据")
+    expect(loadedModels.count == 2, "目录响应解析并去重")
+
+    func catalogRequestFails(status: Int, body: String) -> Bool {
+        MockCodexModelURLProtocol.handler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: status,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            return (response, Data(body.utf8))
+        }
+        let semaphore = DispatchSemaphore(value: 0)
+        var failed = false
+        networkService.fetchModels { result in
+            if case .failure = result { failed = true }
+            semaphore.signal()
+        }
+        _ = semaphore.wait(timeout: .now() + 2)
+        return failed
+    }
+    expect(catalogRequestFails(status: 401, body: ""), "目录 HTTP 401 明确失败")
+    expect(catalogRequestFails(status: 500, body: ""), "目录 HTTP 500 明确失败")
+    expect(catalogRequestFails(status: 200, body: "not-json"), "目录畸形 JSON 明确失败")
+    expect(catalogRequestFails(status: 200, body: #"{"data":[]}"#), "目录空列表明确失败")
+    MockCodexModelURLProtocol.handler = nil
+}
+
+func testCodexApplicationRestarter() {
+    var alive = Set<pid_t>([101, 202])
+    var signaled: [pid_t] = []
+    var scheduledDelay: TimeInterval?
+    var scheduledWork: (() -> Void)?
+    var launchCount = 0
+    var completionSucceeded = false
+    let restarter = CodexApplicationRestarter(
+        pidProvider: { Array(alive).sorted() },
+        signalSender: { pid in
+            signaled.append(pid)
+            alive.remove(pid)
+            return CodexSignalResult(status: .sent)
+        },
+        processChecker: { alive.contains($0) },
+        scheduler: { delay, work in
+            scheduledDelay = delay
+            scheduledWork = work
+        },
+        launcher: { completion in
+            launchCount += 1
+            completion(.success(()))
+        }
+    )
+    restarter.forceRestart(after: 2) { result in
+        if case .success = result { completionSucceeded = true }
+    }
+    expect(scheduledDelay == 2, "Codex 强制重启固定延迟两秒")
+    expect(signaled.isEmpty, "两秒到达前不发送终止信号")
+    expect(launchCount == 0, "两秒到达前不启动新 Codex")
+    scheduledWork?()
+    expect(signaled == [101, 202], "两秒后向全部 Codex PID 发送强杀")
+    expect(launchCount == 1, "旧 PID 消失后只启动一个 Codex")
+    expect(completionSucceeded, "强制重启成功回调")
+
+    var immediateLaunches = 0
+    let notRunning = CodexApplicationRestarter(
+        pidProvider: { [] },
+        scheduler: { _, _ in expect(false, "Codex 未运行时不应等待") },
+        launcher: { completion in
+            immediateLaunches += 1
+            completion(.success(()))
+        }
+    )
+    notRunning.forceRestart(after: 2) { _ in }
+    expect(immediateLaunches == 1, "Codex 未运行时直接启动")
+
+    var permissionLaunches = 0
+    var permissionFailure = false
+    let denied = CodexApplicationRestarter(
+        pidProvider: { [303] },
+        signalSender: { _ in CodexSignalResult(status: .failed(EPERM)) },
+        processChecker: { _ in true },
+        scheduler: { delay, work in
+            expect(delay == 2, "权限失败路径仍先等待两秒")
+            work()
+        },
+        launcher: { _ in permissionLaunches += 1 }
+    )
+    denied.forceRestart(after: 2) { result in
+        if case .failure = result { permissionFailure = true }
+    }
+    expect(permissionFailure, "SIGKILL 权限失败被报告")
+    expect(permissionLaunches == 0, "SIGKILL 权限失败不重启")
+
+    var esrchLaunches = 0
+    let alreadyExited = CodexApplicationRestarter(
+        pidProvider: { [404] },
+        signalSender: { _ in CodexSignalResult(status: .alreadyExited) },
+        processChecker: { _ in false },
+        scheduler: { _, work in work() },
+        launcher: { completion in
+            esrchLaunches += 1
+            completion(.success(()))
+        }
+    )
+    alreadyExited.forceRestart(after: 2) { _ in }
+    expect(esrchLaunches == 1, "ESRCH 视为已退出并重新启动")
 }
 
 final class MockVisibilityStore: FinderVisibilityStore {
@@ -2266,6 +2629,9 @@ struct TestRunnerMain {
         testClipboardService()
         testCodexProjectService()
         testCodexSyncSettingsStore()
+        testCodexModelTOMLAndCatalog()
+        testCodexModelSwitchIntegrationAndFaults()
+        testCodexApplicationRestarter()
         testFinderVisibilityService()
         testFinderSelectionService()
         testShortcutSettingsStoreDefaults()

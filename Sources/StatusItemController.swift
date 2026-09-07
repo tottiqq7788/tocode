@@ -3,7 +3,7 @@ import UserNotifications
 
 /// 菜单栏图标控制器：左键弹目录树，右键弹功能菜单。
 @MainActor
-final class StatusItemController: NSObject {
+final class StatusItemController: NSObject, NSMenuDelegate {
     private let statusItem: NSStatusItem
     private let builder = MenuBuilder()
     private let fs = FileSystemService()
@@ -17,6 +17,14 @@ final class StatusItemController: NSObject {
     private let weChat: WeChatAssociationControlling
     private let codex: CodexProjectService
     private let codexSync: CodexSyncSettingsStore
+    private let codexModels: CodexModelSwitching
+    private let codexRestarter: CodexApplicationRestarting
+    private var activeModelMenu: NSMenu?
+    private var activeModelParentItem: NSMenuItem?
+    private var currentModelID: String?
+    private var modelDescriptors: [String: CodexModelDescriptor] = [:]
+    private var modelLoadGeneration = UUID()
+    private var isSwitchingModel = false
 
     init(
         shortcuts: GlobalShortcutService,
@@ -24,7 +32,9 @@ final class StatusItemController: NSObject {
         launchAtLogin: LaunchAtLoginControlling = LaunchAtLoginService(),
         weChat: WeChatAssociationControlling,
         codex: CodexProjectService = CodexProjectService(),
-        codexSync: CodexSyncSettingsStore = CodexSyncSettingsStore()
+        codexSync: CodexSyncSettingsStore = CodexSyncSettingsStore(),
+        codexModels: CodexModelSwitching = CodexModelSwitchService(),
+        codexRestarter: CodexApplicationRestarting = CodexApplicationRestarter()
     ) {
         self.shortcuts = shortcuts
         self.mouseWheel = mouseWheel
@@ -32,6 +42,8 @@ final class StatusItemController: NSObject {
         self.weChat = weChat
         self.codex = codex
         self.codexSync = codexSync
+        self.codexModels = codexModels
+        self.codexRestarter = codexRestarter
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         super.init()
         if let button = statusItem.button {
@@ -124,6 +136,25 @@ final class StatusItemController: NSObject {
         let syncItem = codexMenu.addItem(withTitle: "同步项目夹", action: #selector(toggleCodexProjectSync(_:)), keyEquivalent: "")
         syncItem.target = self
         ShortcutMenuAppearance.apply(to: syncItem, enabled: syncEnabled)
+
+        codexMenu.addItem(.separator())
+        let modelState = try? codexModels.currentState()
+        currentModelID = modelState?.liveModelID
+        let modelTitle = modelState.map {
+            CodexModelCatalog.displayName(for: $0.liveModelID)
+        } ?? "模型不可用"
+        let modelItem = codexMenu.addItem(withTitle: modelTitle, action: nil, keyEquivalent: "")
+        modelItem.image = NSImage(systemSymbolName: "cpu", accessibilityDescription: nil)
+        if let modelState, !modelState.isConsistent {
+            modelItem.toolTip = "Codex 实时配置与 CC Switch Provider 模板当前不一致"
+        }
+        let modelMenu = NSMenu()
+        modelMenu.autoenablesItems = false
+        modelMenu.delegate = self
+        addModelStatusItem("悬停后实时加载", to: modelMenu)
+        modelItem.submenu = modelMenu
+        activeModelMenu = modelMenu
+        activeModelParentItem = modelItem
         codexItem.submenu = codexMenu
 
         let weChatItem = menu.addItem(withTitle: "微信关联", action: nil, keyEquivalent: "")
@@ -252,6 +283,167 @@ final class StatusItemController: NSObject {
         ShortcutMenuAppearance.apply(to: sender, enabled: codexSync.syncEnabled)
     }
 
+    func menuWillOpen(_ menu: NSMenu) {
+        guard menu === activeModelMenu else { return }
+        loadCodexModels(into: menu)
+    }
+
+    private func loadCodexModels(into menu: NSMenu) {
+        guard !isSwitchingModel else {
+            menu.removeAllItems()
+            addModelStatusItem("正在切换模型…", to: menu)
+            return
+        }
+
+        menu.removeAllItems()
+        addModelStatusItem("正在从 Anker 加载…", to: menu)
+        let generation = UUID()
+        modelLoadGeneration = generation
+
+        if let state = try? codexModels.currentState() {
+            currentModelID = state.liveModelID
+            activeModelParentItem?.title = CodexModelCatalog.displayName(for: state.liveModelID)
+            activeModelParentItem?.toolTip = state.isConsistent
+                ? nil
+                : "Codex 实时配置与 CC Switch Provider 模板当前不一致"
+        }
+
+        codexModels.fetchModels { [weak self, weak menu] result in
+            DispatchQueue.main.async {
+                guard let self,
+                      let menu,
+                      menu === self.activeModelMenu,
+                      generation == self.modelLoadGeneration else {
+                    return
+                }
+                switch result {
+                case .success(let models):
+                    self.renderCodexModels(models, in: menu)
+                case .failure(let error):
+                    self.renderModelLoadFailure(error, in: menu)
+                }
+            }
+        }
+    }
+
+    private func renderCodexModels(_ models: [CodexModelDescriptor], in menu: NSMenu) {
+        menu.removeAllItems()
+        modelDescriptors = Dictionary(uniqueKeysWithValues: models.map { ($0.id, $0) })
+        let grouped = Dictionary(grouping: models, by: \.source)
+
+        for source in CodexModelSource.allCases {
+            guard let sourceModels = grouped[source], !sourceModels.isEmpty else { continue }
+            if !menu.items.isEmpty {
+                menu.addItem(.separator())
+            }
+            let header = menu.addItem(withTitle: source.rawValue, action: nil, keyEquivalent: "")
+            header.isEnabled = false
+
+            for model in sourceModels {
+                let item = menu.addItem(
+                    withTitle: model.displayName,
+                    action: #selector(selectCodexModel(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = model.id
+                item.toolTip = model.id
+
+                if model.id == currentModelID {
+                    item.state = .on
+                    item.isEnabled = false
+                    item.toolTip = "\(model.id)\n当前模型"
+                    continue
+                }
+                switch model.compatibility {
+                case .verified:
+                    item.isEnabled = true
+                case .unverified:
+                    item.isEnabled = true
+                    item.image = NSImage(
+                        systemSymbolName: "exclamationmark.triangle",
+                        accessibilityDescription: "未验证"
+                    )
+                    item.toolTip = "\(model.id)\n尚未验证 Codex /responses 与工具调用兼容性"
+                case .unsupported(let reason):
+                    item.isEnabled = false
+                    item.image = NSImage(
+                        systemSymbolName: "nosign",
+                        accessibilityDescription: "不可作为主模型"
+                    )
+                    item.toolTip = "\(model.id)\n\(reason)"
+                }
+            }
+        }
+    }
+
+    private func renderModelLoadFailure(_ error: Error, in menu: NSMenu) {
+        menu.removeAllItems()
+        addModelStatusItem(error.localizedDescription, to: menu)
+        let retry = menu.addItem(
+            withTitle: "重试",
+            action: #selector(retryCodexModelLoad),
+            keyEquivalent: ""
+        )
+        retry.target = self
+        retry.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: nil)
+    }
+
+    private func addModelStatusItem(_ title: String, to menu: NSMenu) {
+        let item = menu.addItem(withTitle: title, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+    }
+
+    @objc private func retryCodexModelLoad() {
+        guard let menu = activeModelMenu else { return }
+        loadCodexModels(into: menu)
+    }
+
+    @objc private func selectCodexModel(_ sender: NSMenuItem) {
+        guard !isSwitchingModel,
+              let modelID = sender.representedObject as? String,
+              let descriptor = modelDescriptors[modelID],
+              modelID != currentModelID else {
+            return
+        }
+
+        if descriptor.compatibility == .unverified {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "该模型尚未验证"
+            alert.informativeText = "\(descriptor.displayName) 可能不兼容 Codex /responses、工具调用或模型 metadata。仍要切换并在 2 秒后强制重启 Codex吗？"
+            alert.addButton(withTitle: "继续切换")
+            alert.addButton(withTitle: "取消")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+
+        isSwitchingModel = true
+        activeModelMenu?.items.forEach { $0.isEnabled = false }
+        DispatchQueue.global(qos: .userInitiated).async { [codexModels] in
+            let result = Result { try codexModels.switchModel(to: modelID) }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                switch result {
+                case .success:
+                    self.currentModelID = modelID
+                    self.activeModelParentItem?.title = descriptor.displayName
+                    self.notifyCodexModelSwitchScheduled(descriptor.displayName)
+                    self.codexRestarter.forceRestart(after: 2) { restartResult in
+                        DispatchQueue.main.async {
+                            self.isSwitchingModel = false
+                            if case .failure(let error) = restartResult {
+                                self.notifyCodexModelFailure(error.localizedDescription)
+                            }
+                        }
+                    }
+                case .failure(let error):
+                    self.isSwitchingModel = false
+                    self.notifyCodexModelFailure(error.localizedDescription)
+                }
+            }
+        }
+    }
+
     /// 按当前访达权威切换隐藏文件显示；失败则保持原状。
     @objc private func toggleLaunchAtLogin(_ sender: NSMenuItem) {
         let result = launchAtLogin.setEnabled(!launchAtLogin.isEnabled)
@@ -358,6 +550,32 @@ final class StatusItemController: NSObject {
 
         let request = UNNotificationRequest(
             identifier: UUID().uuidString,
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request) { _ in }
+    }
+
+    private func notifyCodexModelSwitchScheduled(_ displayName: String) {
+        let content = UNMutableNotificationContent()
+        content.title = "Codex 模型已切换"
+        content.body = "\(displayName)；2 秒后将强制重启 Codex。"
+        content.sound = .default
+        let request = UNNotificationRequest(
+            identifier: "tocode.codex-model.\(UUID().uuidString)",
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request) { _ in }
+    }
+
+    private func notifyCodexModelFailure(_ message: String) {
+        let content = UNMutableNotificationContent()
+        content.title = "Codex 模型切换失败"
+        content.body = message
+        content.sound = .default
+        let request = UNNotificationRequest(
+            identifier: "tocode.codex-model.failure.\(UUID().uuidString)",
             content: content,
             trigger: nil
         )

@@ -13,7 +13,8 @@ swiftc -O Sources/*.swift \
   -framework CoreImage \
   -framework Security \
   -framework UserNotifications \
-  -framework ServiceManagement
+  -framework ServiceManagement \
+  -lsqlite3
 
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 
