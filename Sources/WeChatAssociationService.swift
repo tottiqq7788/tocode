@@ -51,6 +51,7 @@ final class WeChatAssociationService: WeChatAssociationControlling {
     private let pageWriter: WeChatBindingPageWriting
     private let opener: WeChatURLOpening
     private let notifier: WeChatNotifying
+    var commandExecutor: TocodeCommandExecutor?
     private let sleeper: WeChatSleeping
     private let now: () -> Date
     private let archiveRoot: URL
@@ -68,6 +69,7 @@ final class WeChatAssociationService: WeChatAssociationControlling {
         pageWriter: WeChatBindingPageWriting = WeChatBindingPageWriter(),
         opener: WeChatURLOpening = WorkspaceWeChatURLOpener(),
         notifier: WeChatNotifying = UserNotificationWeChatNotifier(),
+        commandExecutor: TocodeCommandExecutor? = nil,
         sleeper: WeChatSleeping = SystemWeChatSleeper(),
         now: @escaping () -> Date = Date.init,
         archiveRoot: URL = WeChatArchiveService.defaultRoot,
@@ -81,6 +83,7 @@ final class WeChatAssociationService: WeChatAssociationControlling {
         self.pageWriter = pageWriter
         self.opener = opener
         self.notifier = notifier
+        self.commandExecutor = commandExecutor
         self.sleeper = sleeper
         self.now = now
         self.archiveRoot = archiveRoot
@@ -248,6 +251,18 @@ final class WeChatAssociationService: WeChatAssociationControlling {
                         continue
                     }
 
+                    if let body = TocodeWeChatCommandGate.commandBody(from: message) {
+                        try consumeCommand(
+                            message: message,
+                            key: key,
+                            body: body,
+                            cursor: updates.cursor,
+                            state: &state,
+                            known: &known
+                        )
+                        continue
+                    }
+
                     try await archiver.archive(message, receivedAt: now())
                     try Task.checkCancellation()
                     var committed = state
@@ -281,6 +296,41 @@ final class WeChatAssociationService: WeChatAssociationControlling {
                 }
                 backoff = min(backoff * 2, 120)
             }
+        }
+    }
+
+    /// 命令消息消费语义：执行前先写入去重 key 并推进游标；不归档、不保存附件、不回微信。
+    private func consumeCommand(
+        message: WeChatMessage,
+        key: String,
+        body: String,
+        cursor: String,
+        state: inout WeChatReceiveState,
+        known: inout Set<String>
+    ) throws {
+        var committed = state
+        committed.recentKeys.append(key)
+        committed.recentKeys = Array(
+            committed.recentKeys.suffix(WeChatDeduplication.maximumKeys)
+        )
+        if !cursor.isEmpty {
+            committed.cursor = cursor
+        }
+        try stateStore.save(committed)
+        state = committed
+        known.insert(key)
+
+        let result: TocodeCommandResult
+        if let executor = commandExecutor {
+            result = executor.execute(body)
+        } else {
+            result = .failure(.operationFailed("命令执行器未就绪"))
+        }
+        switch result {
+        case .success:
+            notifier.notify(title: "命令已执行", body: body)
+        case .failure(let error):
+            notifier.notify(title: "命令执行失败", body: error.message)
         }
     }
 

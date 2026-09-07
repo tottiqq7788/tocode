@@ -51,6 +51,33 @@ macOS 菜单栏文件管理器，Swift/AppKit 原生实现。
 
 微信 iLink 目前可能受内测资格与服务端协议变化限制。无法扫码或账号没有入口时，不代表 Tocode 能绕过资格读取普通微信聊天。
 
+## 命令层（CLI 与微信 `.` 前缀）
+
+Tocode 提供两层统一命令入口，共享同一个白名单执行器（不做任意 shell 执行）。
+
+### CLI
+
+```bash
+bash scripts/build.sh        # 同时产出 build/Tocode.app 与 build/tocode
+./build/tocode help          # 打印命令表
+./build/tocode status        # 汇总根目录、开关、微信、Codex 状态
+```
+
+CLI 通过本机 Unix domain socket 转发给**常驻 Tocode 进程**执行；Tocode 未运行时打印明确错误并以非零退出码结束。socket 位于 `~/Library/Application Support/com.tocode.app/tocode.sock`，权限 `0600`，仅本用户可用。
+
+主要命令：`root get|set|choose|reset|init-from-finder`、`codex status|sync|model|model list|model set`、`wechat status|bind|location`、`blackout`、`login on|off|toggle`、`wheel vertical|horizontal on|off|toggle`、`hidden on|off|toggle`、`shortcut finder-move|double-cmdq|finder-cmdq on|off|toggle`、`quit`。开关类命令的 `on|off|toggle` 可互换使用。
+
+### 微信 `.` 前缀命令
+
+微信监听循环中，若一条消息**第一项是文本且 trim 后以 `.` 开头**，则整条消息被判定为命令：
+
+- 命令体复用 CLI 解析器；`.lshp` 是 `blackout` 的别名，完整动词名（如 `.blackout`）同样可用。
+- 命令消息**不写入 `wechat*.md`、不保存附件**；执行结果仅通过 macOS 系统通知反馈，不回微信。
+- 未知命令、参数错误或执行器失败会被静默消费并本地通知，不打断监听循环，也不重试。
+- 命令去重键与普通消息同一来源，执行成功或失败都不重复执行。
+
+微信能力保持 receive-only：不调用 `sendmessage`、不回复、不调模型。
+
 ## 权限
 
 首次使用「访达目录初始化」时，系统可能请求「控制访达」。请允许；拒绝后该选项不会出现。

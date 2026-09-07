@@ -5,16 +5,48 @@ cd "$(dirname "$0")/.."
 APP="build/Tocode.app"
 mkdir -p "$APP/Contents/MacOS"
 
-swiftc -O Sources/*.swift \
-  -o "$APP/Contents/MacOS/Tocode" \
-  -framework AppKit \
-  -framework ApplicationServices \
-  -framework CoreGraphics \
-  -framework CoreImage \
-  -framework Security \
-  -framework UserNotifications \
-  -framework ServiceManagement \
+FRAMEWORKS=(
+  -framework AppKit
+  -framework ApplicationServices
+  -framework CoreGraphics
+  -framework CoreImage
+  -framework Security
+  -framework UserNotifications
+  -framework ServiceManagement
+  -framework Network
   -lsqlite3
+)
+
+# App 与 CLI 各自一个 @main，分两次编译避免入口冲突。
+APP_SOURCES=()
+CLI_SOURCES=()
+for file in Sources/*.swift; do
+  base="$(basename "$file")"
+  case "$base" in
+    TocodeCLI.swift)
+      CLI_SOURCES+=("$file")
+      ;;
+    TocodeApp.swift|AppDelegate.swift|StatusItemController.swift|MenuBuilder.swift)
+      APP_SOURCES+=("$file")
+      ;;
+    TocodeCLIRunner.swift)
+      CLI_SOURCES+=("$file")
+      ;;
+    *)
+      APP_SOURCES+=("$file")
+      CLI_SOURCES+=("$file")
+      ;;
+  esac
+done
+
+swiftc -O "${APP_SOURCES[@]}" \
+  -o "$APP/Contents/MacOS/Tocode" \
+  "${FRAMEWORKS[@]}"
+
+mkdir -p build
+swiftc -O "${CLI_SOURCES[@]}" \
+  -o build/tocode \
+  "${FRAMEWORKS[@]}"
 
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 
@@ -40,3 +72,4 @@ codesign --force --deep --sign - \
   "$APP"
 
 echo "Built $APP"
+echo "Built build/tocode"

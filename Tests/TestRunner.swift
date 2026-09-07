@@ -2663,6 +2663,359 @@ func testWeChatBindingToArchiveIntegration() async {
     expect(states.state.recentKeys.count == 1, "集成：归档成功后保存去重键")
 }
 
+
+// MARK: - Tocode 命令层测试
+
+func testTocodeCommandParser() {
+    expect(TocodeCommandParser.parse(" help ") == .success(.help), "命令解析 trim + 大小写 + help")
+    expect(TocodeCommandParser.parse("STATUS") == .success(.status), "命令解析大小写不敏感 status")
+    expect(TocodeCommandParser.parse("root") == .success(.root(.get)), "root 无子命令默认 get")
+    expect(TocodeCommandParser.parse("root get") == .success(.root(.get)), "root get")
+    expect(TocodeCommandParser.parse("root set /tmp/a b") == .success(.root(.set("/tmp/a b"))), "root set 保留空格路径")
+    expect(TocodeCommandParser.parse("root choose") == .success(.root(.choose)), "root choose")
+    expect(TocodeCommandParser.parse("root reset") == .success(.root(.reset)), "root reset")
+    expect(TocodeCommandParser.parse("root init-from-finder") == .success(.root(.initFromFinder)), "root init-from-finder")
+
+    expect(TocodeCommandParser.parse("codex") == .success(.codex(.status)), "codex 默认 status")
+    expect(TocodeCommandParser.parse("codex status") == .success(.codex(.status)), "codex status")
+    expect(TocodeCommandParser.parse("codex sync on") == .success(.codex(.sync(.on))), "codex sync on")
+    expect(TocodeCommandParser.parse("codex sync OFF") == .success(.codex(.sync(.off))), "codex sync off")
+    expect(TocodeCommandParser.parse("codex sync toggle") == .success(.codex(.sync(.toggle))), "codex sync toggle")
+    expect(TocodeCommandParser.parse("codex model") == .success(.codex(.model)), "codex model")
+    expect(TocodeCommandParser.parse("codex model list") == .success(.codex(.modelList)), "codex model list")
+    expect(TocodeCommandParser.parse("codex model set v_model/gpt-6-astra") == .success(.codex(.modelSet("v_model/gpt-6-astra"))), "codex model set")
+
+    expect(TocodeCommandParser.parse("wechat") == .success(.wechat(.status)), "wechat 默认 status")
+    expect(TocodeCommandParser.parse("wechat status") == .success(.wechat(.status)), "wechat status")
+    expect(TocodeCommandParser.parse("wechat bind") == .success(.wechat(.bind)), "wechat bind")
+    expect(TocodeCommandParser.parse("wechat location") == .success(.wechat(.location)), "wechat location")
+
+    expect(TocodeCommandParser.parse("blackout") == .success(.blackout), "blackout")
+    expect(TocodeCommandParser.parse(".lshp") == .success(.blackout), "别名 .lshp 映射 blackout")
+    expect(TocodeCommandParser.parse("login on") == .success(.login(.on)), "login on")
+    expect(TocodeCommandParser.parse("wheel vertical toggle") == .success(.wheel(.vertical, .toggle)), "wheel vertical toggle")
+    expect(TocodeCommandParser.parse("wheel horizontal off") == .success(.wheel(.horizontal, .off)), "wheel horizontal off")
+    expect(TocodeCommandParser.parse("hidden on") == .success(.hidden(.on)), "hidden on")
+    expect(TocodeCommandParser.parse("shortcut finder-move on") == .success(.shortcut(.finderMove, .on)), "shortcut finder-move")
+    expect(TocodeCommandParser.parse("shortcut double-cmdq on") == .success(.shortcut(.doubleCmdQ, .on)), "shortcut double-cmdq")
+    expect(TocodeCommandParser.parse("shortcut finder-cmdq on") == .success(.shortcut(.finderCmdQ, .on)), "shortcut finder-cmdq")
+    expect(TocodeCommandParser.parse("quit") == .success(.quit), "quit")
+
+    if case .failure(.unknownCommand("nope")) = TocodeCommandParser.parse("nope") {
+        expect(true, "未知命令")
+    } else {
+        expect(false, "未知命令")
+    }
+    if case .failure(.invalidToggle("maybe")) = TocodeCommandParser.parse("hidden maybe") {
+        expect(true, "无效 toggle")
+    } else {
+        expect(false, "无效 toggle")
+    }
+}
+
+func testTocodeWeChatCommandGate() {
+    let cmd = WeChatMessage(
+        fromUserID: "u",
+        contextToken: "ctx",
+        messageID: "m",
+        items: [WeChatItem(type: 1, textItem: WeChatTextItem(text: "  .lshp  "))]
+    )
+    expect(TocodeWeChatCommandGate.commandBody(from: cmd) == "lshp", "微信命令判定 trim 后去点号")
+
+    let plain = WeChatMessage(
+        fromUserID: "u",
+        contextToken: "ctx",
+        messageID: "m",
+        items: [WeChatItem(type: 1, textItem: WeChatTextItem(text: "hello"))]
+    )
+    expect(TocodeWeChatCommandGate.commandBody(from: plain) == nil, "普通文本不是命令")
+
+    let firstImage = WeChatMessage(
+        fromUserID: "u",
+        contextToken: "ctx",
+        messageID: "m",
+        items: [WeChatItem(type: 2, imageItem: WeChatImageItem(media: WeChatMedia()))]
+    )
+    expect(TocodeWeChatCommandGate.commandBody(from: firstImage) == nil, "首项非文本不是命令")
+}
+
+@MainActor
+func testTocodeCommandExecutorMapping() {
+    let wheel = MockTocodeWheel()
+    let shortcuts = MockTocodeShortcuts()
+    let visibility = MockTocodeVisibility()
+    let chooser = MockTocodeRootChooser()
+    let finder = MockTocodeFinderSelection()
+    let launch = MockTocodeLaunchAtLogin()
+    let wechat = MockTocodeWeChat()
+    let models = MockTocodeCodexModels()
+    let blackout = MockTocodeScreenBlackout()
+
+    let fs = FileSystemService()
+    let rootDir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("tocode-root-\(UUID().uuidString)", isDirectory: true)
+    try! FileManager.default.createDirectory(at: rootDir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: rootDir) }
+
+    let store = RootPathStore()
+    store.save(rootDir.path)
+
+    let codexJSON = """
+    {"selected-project":{"type":"local","projectId":"p1"},"local-projects":{"p1":{"id":"p1","name":"fixture-project","rootPaths":["\(rootDir.path)"]}}}
+    """
+    let codex = CodexProjectService(
+        home: "/tmp",
+        fs: fs,
+        reader: { _ in Data(codexJSON.utf8) }
+    )
+
+    let executor = TocodeCommandExecutor(
+        fs: fs,
+        store: store,
+        chooser: chooser,
+        finderSelection: finder,
+        visibility: visibility,
+        launchAtLogin: launch,
+        mouseWheel: wheel,
+        shortcuts: shortcuts,
+        codex: codex,
+        codexModels: models,
+        weChat: wechat,
+        screenBlackout: ScreenBlackoutService(overlay: blackout),
+        notify: { _, _ in }
+    )
+
+    // status 汇总
+    if case .success(let output) = executor.execute("status") {
+        expect(output.text.contains("根目录：\(rootDir.path)"), "status 含根目录")
+    } else {
+        expect(false, "status 成功")
+    }
+
+    // root
+    if case .success(let output) = executor.execute("root get") {
+        expect(output.text == rootDir.path, "root get 返回根目录")
+    } else {
+        expect(false, "root get")
+    }
+    let newRoot = rootDir.appendingPathComponent("sub", isDirectory: true)
+    try! FileManager.default.createDirectory(at: newRoot, withIntermediateDirectories: true)
+    expect(executor.execute("root set \(newRoot.path)").isSuccess, "root set 存在目录成功")
+    expect(store.resolveRoot(isDirectory: fs.isExistingDirectory) == newRoot.path, "root set 持久化")
+    if case .failure(.rootNotFound) = executor.execute("root set /definitely/missing") {
+        expect(true, "root set 不存在目录失败")
+    } else {
+        expect(false, "root set 不存在目录失败")
+    }
+    chooser.result = "/tmp/chosen"
+    expect(executor.execute("root choose").isSuccess, "root choose 成功")
+    expect(executor.execute("root reset").isSuccess, "root reset 成功")
+
+    // wechat
+    wechat.bound = true
+    expect(executor.execute("wechat status").isSuccess, "wechat status")
+    executor.execute("wechat bind")
+    expect(wechat.bindCalls == 1, "wechat bind 触发扫码")
+    executor.execute("wechat location")
+    expect(wechat.locationCalls == 1, "wechat location 打开归档目录")
+
+    // blackout
+    expect(executor.execute("blackout").isSuccess, "blackout 成功")
+    expect(blackout.activateCount == 1, "blackout 调用激活一次")
+
+    // login
+    executor.execute("login on")
+    expect(launch.enabled, "login on")
+    executor.execute("login off")
+    expect(!launch.enabled, "login off")
+
+    // wheel
+    executor.execute("wheel vertical on")
+    expect(wheel.vertical, "wheel vertical on")
+    executor.execute("wheel vertical off")
+    expect(!wheel.vertical, "wheel vertical off")
+
+    // hidden
+    visibility.showAll = false
+    executor.execute("hidden toggle")
+    expect(visibility.showAll, "hidden toggle")
+
+    // shortcut
+    executor.execute("shortcut finder-move on")
+    expect(shortcuts.finderMove, "shortcut finder-move on")
+
+    // codex
+    if case .success(let output) = executor.execute("codex status") {
+        expect(output.text.contains("fixture-project"), "codex status 返回项目名")
+    } else {
+        expect(false, "codex status 返回项目名")
+    }
+    executor.execute("codex sync on")
+    // model
+    expect(executor.execute("codex model").isSuccess, "codex model")
+    expect(executor.execute("codex model set v_model/gpt-6-astra").isSuccess, "codex model set")
+    expect(models.switchedIDs == ["v_model/gpt-6-astra"], "codex model set 调用切换")
+}
+
+func testTocodeCLIRunnerAndIPC() {
+    let okResponse = TocodeIPCResponse(id: "1", ok: true, data: "ok-data", error: nil)
+    let transport = MemoryTocodeTransport(response: okResponse)
+    var stdoutLines: [String] = []
+    var stderrLines: [String] = []
+    let code = TocodeCLIRunner.run(
+        arguments: ["status"],
+        transport: transport,
+        stdout: { stdoutLines.append($0) },
+        stderr: { stderrLines.append($0) }
+    )
+    expect(code == 0, "CLI 成功退出码 0")
+    expect(stdoutLines == ["ok-data"], "CLI 输出响应 data")
+    expect(transport.requests.first?.command == "status", "CLI 发送 command")
+
+    let failTransport = MemoryTocodeTransport(
+        response: TocodeIPCResponse(id: "2", ok: false, data: nil, error: "boom")
+    )
+    let failCode = TocodeCLIRunner.run(
+        arguments: ["quit"],
+        transport: failTransport,
+        stdout: { _ in },
+        stderr: { stderrLines.append($0) }
+    )
+    expect(failCode != 0, "CLI 失败退出码非 0")
+    expect(stderrLines.contains("boom"), "CLI 失败输出 error")
+
+    let notRunning = MemoryTocodeTransport(response: okResponse)
+    notRunning.error = .notRunning
+    let notRunningCode = TocodeCLIRunner.run(
+        arguments: ["status"],
+        transport: notRunning,
+        stdout: { _ in },
+        stderr: { stderrLines.append($0) }
+    )
+    expect(notRunningCode != 0, "未连接退出码非 0")
+    expect(stderrLines.contains { $0.contains("未运行") }, "未连接错误提示")
+
+    // IPC 编解码
+    let request = TocodeIPCRequest(id: "r1", command: "root", args: ["get"])
+    let data = try! TocodeIPCFraming.encodeRequest(request)
+    let decoded = try! JSONDecoder().decode(TocodeIPCRequest.self, from: data)
+    expect(decoded == request, "IPC 请求单行 JSON 编解码")
+    let response = TocodeIPCResponse(id: "r1", ok: true, data: "/tmp", error: nil)
+    let responseData = try! JSONEncoder().encode(response)
+    expect(TocodeIPCFraming.decodeResponse(responseData) == response, "IPC 响应编解码")
+}
+
+extension Result where Failure == TocodeCommandError {
+    var isSuccess: Bool {
+        if case .success = self { return true }
+        return false
+    }
+}
+
+
+@MainActor
+func testWeChatCommandConsumption() async {
+    // 命令消息：首项文本 `.lshp`，应执行命令但不归档。
+    let commandMessage = WeChatMessage(
+        fromUserID: "u",
+        contextToken: "ctx-command",
+        messageType: 1,
+        messageID: "msg-command",
+        items: [WeChatItem(type: 1, textItem: WeChatTextItem(text: "  .lshp  "))]
+    )
+
+    do {
+        let transport = MockWeChatTransport()
+        transport.updates = [
+            .success(WeChatUpdates(
+                ret: 0,
+                messages: [commandMessage],
+                cursor: "cursor-command"
+            )),
+            .failure(CancellationError())
+        ]
+        let archiver = MockWeChatArchiver()
+        let states = MemoryWeChatStateStore()
+        let notifier = MockWeChatNotifier()
+        let blackout = MockTocodeScreenBlackout()
+        let executor = TocodeCommandExecutor(
+            launchAtLogin: MockTocodeLaunchAtLogin(),
+            mouseWheel: MockTocodeWheel(),
+            shortcuts: MockTocodeShortcuts(),
+            codexModels: MockTocodeCodexModels(),
+            weChat: MockTocodeWeChat(),
+            screenBlackout: ScreenBlackoutService(overlay: blackout),
+            notify: { _, _ in }
+        )
+        let service = WeChatAssociationService(
+            transport: transport,
+            credentialStore: MemoryWeChatCredentialStore(
+                WeChatCredential(token: "t", baseURL: WeChatILinkClient.officialBaseURL)
+            ),
+            stateStore: states,
+            archiver: archiver,
+            pageWriter: MockWeChatBindingPage(),
+            opener: MockWeChatOpener(),
+            notifier: notifier,
+            commandExecutor: executor,
+            sleeper: MockWeChatSleeper()
+        )
+        service.startBoundListener()
+        _ = await waitUntil { states.state.cursor == "cursor-command" }
+        expect(archiver.messages.isEmpty, "命令消息不写入归档")
+        expect(states.state.recentKeys.count == 1, "命令消息计入去重键")
+        expect(blackout.activateCount == 1, "`.lshp` 命令执行临时黑屏")
+        service.stop()
+    }
+
+    // 未知命令：静默消费 + 本地通知，不归档，游标推进。
+    let unknownMessage = WeChatMessage(
+        fromUserID: "u",
+        contextToken: "ctx-unknown",
+        messageType: 1,
+        messageID: "msg-unknown",
+        items: [WeChatItem(type: 1, textItem: WeChatTextItem(text: ".nope"))]
+    )
+    do {
+        let transport = MockWeChatTransport()
+        transport.updates = [
+            .success(WeChatUpdates(ret: 0, messages: [unknownMessage], cursor: "cursor-unknown")),
+            .failure(CancellationError())
+        ]
+        let archiver = MockWeChatArchiver()
+        let states = MemoryWeChatStateStore()
+        let notifier = MockWeChatNotifier()
+        let executor = TocodeCommandExecutor(
+            launchAtLogin: MockTocodeLaunchAtLogin(),
+            mouseWheel: MockTocodeWheel(),
+            shortcuts: MockTocodeShortcuts(),
+            codexModels: MockTocodeCodexModels(),
+            weChat: MockTocodeWeChat(),
+            screenBlackout: ScreenBlackoutService(overlay: MockTocodeScreenBlackout()),
+            notify: { _, _ in }
+        )
+        let service = WeChatAssociationService(
+            transport: transport,
+            credentialStore: MemoryWeChatCredentialStore(
+                WeChatCredential(token: "t", baseURL: WeChatILinkClient.officialBaseURL)
+            ),
+            stateStore: states,
+            archiver: archiver,
+            pageWriter: MockWeChatBindingPage(),
+            opener: MockWeChatOpener(),
+            notifier: notifier,
+            commandExecutor: executor,
+            sleeper: MockWeChatSleeper()
+        )
+        service.startBoundListener()
+        _ = await waitUntil { states.state.cursor == "cursor-unknown" }
+        expect(archiver.messages.isEmpty, "未知命令不写入归档")
+        expect(states.state.recentKeys.count == 1, "未知命令仍计入去重并推进游标")
+        expect(notifier.notifications.contains { $0.0 == "命令执行失败" }, "未知命令本地通知")
+        service.stop()
+    }
+}
+
 @main
 struct TestRunnerMain {
     static func main() async {
@@ -2698,6 +3051,11 @@ struct TestRunnerMain {
         await testWeChatProtocolContract()
         await testWeChatAssociationAndFaults()
         await testWeChatBindingToArchiveIntegration()
+        await testWeChatCommandConsumption()
+        testTocodeCommandParser()
+        testTocodeWeChatCommandGate()
+        await testTocodeCommandExecutorMapping()
+        testTocodeCLIRunnerAndIPC()
 
         if failures == 0 {
             print("\nALL TESTS PASSED")
