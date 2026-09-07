@@ -1825,6 +1825,48 @@ func dataFromHex(_ value: String) -> Data {
     return data
 }
 
+@MainActor
+final class MockScreenBlackoutOverlay: ScreenBlackoutOverlaying {
+    var isPresented = false
+    var showCount = 0
+    var dismissCount = 0
+
+    func show() {
+        isPresented = true
+        showCount += 1
+    }
+
+    func dismiss() {
+        isPresented = false
+        dismissCount += 1
+    }
+}
+
+@MainActor
+func testScreenBlackoutService() {
+    let overlay = MockScreenBlackoutOverlay()
+    let service = ScreenBlackoutService(overlay: overlay)
+
+    expect(!service.isPresented, "黑屏初始状态未呈现")
+    expect(overlay.showCount == 0, "黑屏初始未调用 show")
+
+    service.activate()
+    expect(service.isPresented, "activate 后处于呈现状态")
+    expect(overlay.showCount == 1, "activate 调用一次 show")
+
+    service.activate()
+    expect(service.isPresented, "再次 activate 仍处于呈现状态")
+    expect(overlay.showCount == 1, "再次 activate 是 no-op 不重复 show")
+
+    service.dismiss()
+    expect(!service.isPresented, "dismiss 清除呈现状态")
+    expect(overlay.dismissCount == 1, "dismiss 调用一次 overlay.dismiss")
+
+    service.activate()
+    expect(service.isPresented, "dismiss 后可再次 activate")
+    expect(overlay.showCount == 2, "再次 activate 重新 show")
+}
+
 func testWeChatModelsCryptoAndState() {
     let voiceJSON = Data(#"{"type":3,"voice_item":{"text_item":{"text":"语音内容"}}}"#.utf8)
     let voice = try! JSONDecoder().decode(WeChatItem.self, from: voiceJSON)
@@ -2648,6 +2690,7 @@ struct TestRunnerMain {
         testFinderCommandQServiceEffects()
         testLaunchAtLoginService()
         testMouseWheelReverse()
+        testScreenBlackoutService()
         testWeChatModelsCryptoAndState()
         testWeChatArchiveNaming()
         testWeChatBindingPage()

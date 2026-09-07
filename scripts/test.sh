@@ -24,6 +24,7 @@ swiftc Tests/TestRunner.swift \
   Sources/LaunchAtLoginService.swift \
   Sources/MouseWheelReverseStore.swift \
   Sources/MouseWheelReverseService.swift \
+  Sources/ScreenBlackoutService.swift \
   Sources/WeChatModels.swift \
   Sources/WeChatCrypto.swift \
   Sources/WeChatILinkClient.swift \

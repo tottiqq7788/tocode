@@ -19,6 +19,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private let codexSync: CodexSyncSettingsStore
     private let codexModels: CodexModelSwitching
     private let codexRestarter: CodexApplicationRestarting
+    private let screenBlackout: ScreenBlackoutService
     private var activeModelMenu: NSMenu?
     private var activeModelParentItem: NSMenuItem?
     private var currentModelID: String?
@@ -34,7 +35,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         codex: CodexProjectService = CodexProjectService(),
         codexSync: CodexSyncSettingsStore = CodexSyncSettingsStore(),
         codexModels: CodexModelSwitching = CodexModelSwitchService(),
-        codexRestarter: CodexApplicationRestarting = CodexApplicationRestarter()
+        codexRestarter: CodexApplicationRestarting = CodexApplicationRestarter(),
+        screenBlackout: ScreenBlackoutService? = nil
     ) {
         self.shortcuts = shortcuts
         self.mouseWheel = mouseWheel
@@ -44,6 +46,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         self.codexSync = codexSync
         self.codexModels = codexModels
         self.codexRestarter = codexRestarter
+        self.screenBlackout = screenBlackout ?? ScreenBlackoutService(overlay: ScreenBlackoutOverlay())
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         super.init()
         if let button = statusItem.button {
@@ -234,6 +237,20 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             action: #selector(toggleFinderCommandQ(_:))
         )
         settingsItem.submenu = settings
+
+        // mac 子菜单：自包含的全屏临时黑屏叠加层，任意按键或鼠标点击解除。
+        let macItem = menu.addItem(withTitle: "mac", action: nil, keyEquivalent: "")
+        macItem.image = NSImage(systemSymbolName: "display", accessibilityDescription: nil)
+        let macMenu = NSMenu()
+        macMenu.autoenablesItems = false
+        let blackoutItem = macMenu.addItem(
+            withTitle: "临时黑屏",
+            action: #selector(activateScreenBlackout),
+            keyEquivalent: ""
+        )
+        blackoutItem.target = self
+        blackoutItem.image = NSImage(systemSymbolName: "display.trianglebadge.exclamationmark", accessibilityDescription: nil)
+        macItem.submenu = macMenu
 
         menu.addItem(.separator())
 
@@ -494,6 +511,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     @objc private func openWeChatLocation() {
         weChat.openArchiveLocation()
+    }
+
+    /// 显示临时黑屏；再次点击时若已显示则为 no-op。
+    @objc private func activateScreenBlackout() {
+        screenBlackout.activate()
     }
 
     /// 点击时重新解析访达单选项；失效则不改写根目录。
