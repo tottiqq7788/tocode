@@ -110,6 +110,9 @@ private final class ScreenBlackoutContentView: NSView {
 
     override var acceptsFirstResponder: Bool { true }
 
+    // 覆盖窗口可能不是关键窗口：首次点击应立即送达 mouseDown，而不是仅用于激活窗口。
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
     override func keyDown(with event: NSEvent) {
         onEvent?()
     }
