@@ -802,13 +802,24 @@ func testFinderCutProbeAndQuitEffects() {
 
     frontmost.app = safariApp
     clock.current = t0
+    alerts.titles.removeAll()
     let firstQ = service.handleSnapshot(snapshot(ShortcutKeyClassifier.keyQ, down: true))
     expect(firstQ.action == .suppress, "服务层第一次 ⌘Q 吞掉")
-    scheduler.runAll()
-    expect(alerts.titles.contains("再次按 ⌘Q 退出 Safari"), "第一次提示退出当前应用")
+    expect(alerts.titles.isEmpty, "第一次按下后不立即通知（静默待命）")
     clock.current = t0.addingTimeInterval(1)
     let secondQ = service.handleSnapshot(snapshot(ShortcutKeyClassifier.keyQ, down: true))
     expect(secondQ == .pass, "同 PID 时间窗内第二次放行")
+    scheduler.runAll()
+    expect(!alerts.titles.contains("再次按 ⌘Q 退出 Safari"), "窗口内确认退出后撤销补发通知")
+    expect(service.isDoubleCommandQEffective, "确认退出后开关仍生效")
+
+    // 只按一次、2 秒后无第二次 → 超时才补发一条通知。
+    alerts.titles.removeAll()
+    clock.current = t0.addingTimeInterval(10)
+    _ = service.handleSnapshot(snapshot(ShortcutKeyClassifier.keyQ, down: true))
+    expect(alerts.titles.isEmpty, "新一轮第一次仍静默")
+    scheduler.runAll()
+    expect(alerts.titles == ["再次按 ⌘Q 退出 Safari"], "超时未二次按下仅补发一次通知")
 }
 
 func testShortcutMenuAppearance() {
@@ -1013,11 +1024,25 @@ func testFinderCommandQServiceEffects() {
     expect(service.setDoubleCommandQEnabled(true), "同时开启双击")
     dismiss.result = .success(())
     dismiss.calls = 0
+    alerts.titles.removeAll()
     let first = service.handleSnapshot(snapshot(ShortcutKeyClassifier.keyQ, down: true))
     expect(first.effect == .notifyQuitArmed(appName: "Finder", finderDismiss: true), "服务层双开第一次提示关窗")
-    scheduler.runAll()
-    expect(alerts.titles.contains("再次按 ⌘Q 强关访达"), "提示文案针对 Finder 关窗")
+    expect(alerts.titles.isEmpty, "服务层第一次按下静默待命")
     expect(dismiss.calls == 0, "第一次不关窗")
+    let second = service.handleSnapshot(snapshot(ShortcutKeyClassifier.keyQ, down: true))
+    expect(second.effect == .dismissFinderWindows, "窗口内第二次关窗隐藏")
+    scheduler.runAll()
+    expect(dismiss.calls == 1, "第二次异步执行关窗隐藏")
+    expect(!alerts.titles.contains("再次按 ⌘Q 强关访达"), "窗口内确认关窗后撤销补发通知")
+
+    // 只按一次、超时未再按 → 才补发一次针对 Finder 关窗的提示。
+    alerts.titles.removeAll()
+    dismiss.calls = 0
+    _ = service.handleSnapshot(snapshot(ShortcutKeyClassifier.keyQ, down: true))
+    expect(alerts.titles.isEmpty, "新一轮第一次静默")
+    scheduler.runAll()
+    expect(alerts.titles == ["再次按 ⌘Q 强关访达"], "超时未二次按下仅补发一次关窗提示")
+    expect(dismiss.calls == 0, "超时补发提示不关窗")
 }
 
 final class MockLaunchAtLoginBackend: LaunchAtLoginBacking {

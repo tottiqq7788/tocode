@@ -269,14 +269,19 @@ final class GlobalShortcutService {
                 self?.runFinderCutProbe()
             }
         case .notifyQuitArmed(let name, let finderDismiss):
-            scheduler.async { [weak self] in
+            // 首按不立即通知：等 quitWindow 内没有第二次按下，才补发一次提示。
+            // 用触发时捕获的 arm 与回调时当前 engine.quitArm 比对，已确认放行、
+            // 已关窗隐藏或已切换目标/超时重新武装都会使旧回调失效。
+            guard let armed = engine.quitArm else { return }
+            scheduler.asyncAfter(GlobalShortcutEngine.quitWindow) { [weak self] in
+                guard let self, self.engine.quitArm == armed else { return }
                 if finderDismiss {
-                    self?.alerts.notify(
+                    self.alerts.notify(
                         title: "再次按 ⌘Q 强关访达",
                         body: "2 秒内再次按下才会关闭全部窗口并隐藏访达。切换应用或超时后需重新双击。"
                     )
                 } else {
-                    self?.alerts.notify(
+                    self.alerts.notify(
                         title: "再次按 ⌘Q 退出 \(name)",
                         body: "2 秒内再次按下才会退出。切换应用或超时后需重新双击。"
                     )
