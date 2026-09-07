@@ -124,6 +124,89 @@ func testClipboardService() {
     expect(clip.read() == "「/Users/test/folder」", "ClipboardService.copyPath 用「」包裹路径")
 }
 
+func testCodexProjectService() {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory
+        .appendingPathComponent("codex-root-\(UUID().uuidString)").path
+    try! fm.createDirectory(atPath: root, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(atPath: root) }
+
+    func stateJSON(selectedType: String?, projectID: String?, projects: String) -> String {
+        var selected = "null"
+        if let selectedType = selectedType, let projectID = projectID {
+            selected = "{\"type\":\"\(selectedType)\",\"projectId\":\"\(projectID)\"}"
+        }
+        return "{\"selected-project\":\(selected),\"local-projects\":\(projects)}"
+    }
+
+    let goodProjects = """
+    {"p1":{"id":"p1","name":"tocode","rootPaths":["\(root)"]}}
+    """
+    let fs = FileSystemService()
+
+    // 成功解析项目名与根目录
+    let success = CodexProjectService(
+        home: "/tmp",
+        fs: fs,
+        reader: { _ in Data(stateJSON(selectedType: "local", projectID: "p1", projects: goodProjects).utf8) }
+    )
+    let project = success.resolveProject()
+    expect(project?.name == "tocode", "Codex 成功解析项目名")
+    expect(project?.rootPath == root, "Codex 成功解析根目录并标准化")
+
+    // 文件缺失
+    let missing = CodexProjectService(home: "/tmp", fs: fs, reader: { _ in nil })
+    expect(missing.resolveProject() == nil, "Codex 文件缺失返回 nil")
+
+    // JSON 损坏
+    let corrupt = CodexProjectService(home: "/tmp", fs: fs, reader: { _ in Data("not json".utf8) })
+    expect(corrupt.resolveProject() == nil, "Codex JSON 损坏返回 nil")
+
+    // 无 selected-project
+    let noSelected = CodexProjectService(home: "/tmp", fs: fs, reader: { _ in
+        Data("{\"local-projects\":\(goodProjects)}".utf8)
+    })
+    expect(noSelected.resolveProject() == nil, "Codex 无 selected-project 返回 nil")
+
+    // type != local
+    let remote = CodexProjectService(home: "/tmp", fs: fs, reader: { _ in
+        Data(stateJSON(selectedType: "cloud", projectID: "p1", projects: goodProjects).utf8)
+    })
+    expect(remote.resolveProject() == nil, "Codex type != local 返回 nil")
+
+    // 项目 ID 未注册
+    let unregistered = CodexProjectService(home: "/tmp", fs: fs, reader: { _ in
+        Data(stateJSON(selectedType: "local", projectID: "p2", projects: goodProjects).utf8)
+    })
+    expect(unregistered.resolveProject() == nil, "Codex 项目 ID 未注册返回 nil")
+
+    // rootPaths 为空
+    let emptyRoot = CodexProjectService(home: "/tmp", fs: fs, reader: { _ in
+        Data(stateJSON(selectedType: "local", projectID: "p1", projects: "{\"p1\":{\"id\":\"p1\",\"name\":\"x\",\"rootPaths\":[]}}").utf8)
+    })
+    expect(emptyRoot.resolveProject() == nil, "Codex rootPaths 为空返回 nil")
+
+    // 根目录不存在
+    let noDir = CodexProjectService(home: "/tmp", fs: fs, reader: { _ in
+        Data(stateJSON(selectedType: "local", projectID: "p1", projects: "{\"p1\":{\"id\":\"p1\",\"name\":\"x\",\"rootPaths\":[\"/tmp/definitely-missing-\(UUID().uuidString)]}}").utf8)
+    })
+    expect(noDir.resolveProject() == nil, "Codex 根目录不存在返回 nil")
+}
+
+func testCodexSyncSettingsStore() {
+    let suite = "tocode-test-\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defaults.removePersistentDomain(forName: suite)
+    defer { defaults.removePersistentDomain(forName: suite) }
+
+    let store = CodexSyncSettingsStore(defaults: defaults)
+    expect(store.syncEnabled == false, "CodexSyncSettingsStore 默认 false")
+    store.syncEnabled = true
+    expect(store.syncEnabled == true, "CodexSyncSettingsStore 写入后读取 true")
+    store.syncEnabled = false
+    expect(store.syncEnabled == false, "CodexSyncSettingsStore 关闭后恢复 false")
+}
+
 final class MockVisibilityStore: FinderVisibilityStore {
     var value: Bool?
     var writeShouldFail = false
@@ -2181,6 +2264,8 @@ struct TestRunnerMain {
         testFileSystemService()
         testRootPathStore()
         testClipboardService()
+        testCodexProjectService()
+        testCodexSyncSettingsStore()
         testFinderVisibilityService()
         testFinderSelectionService()
         testShortcutSettingsStoreDefaults()

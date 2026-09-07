@@ -8,6 +8,8 @@ swiftc Tests/TestRunner.swift \
   Sources/FileSystemService.swift \
   Sources/ClipboardService.swift \
   Sources/RootPathStore.swift \
+  Sources/CodexProjectService.swift \
+  Sources/CodexSyncSettingsStore.swift \
   Sources/FinderVisibilityService.swift \
   Sources/FinderSelectionService.swift \
   Sources/ShortcutSettingsStore.swift \

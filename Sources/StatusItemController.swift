@@ -15,17 +15,23 @@ final class StatusItemController: NSObject {
     private let mouseWheel: MouseWheelReverseService
     private let launchAtLogin: LaunchAtLoginControlling
     private let weChat: WeChatAssociationControlling
+    private let codex: CodexProjectService
+    private let codexSync: CodexSyncSettingsStore
 
     init(
         shortcuts: GlobalShortcutService,
         mouseWheel: MouseWheelReverseService,
         launchAtLogin: LaunchAtLoginControlling = LaunchAtLoginService(),
-        weChat: WeChatAssociationControlling
+        weChat: WeChatAssociationControlling,
+        codex: CodexProjectService = CodexProjectService(),
+        codexSync: CodexSyncSettingsStore = CodexSyncSettingsStore()
     ) {
         self.shortcuts = shortcuts
         self.mouseWheel = mouseWheel
         self.launchAtLogin = launchAtLogin
         self.weChat = weChat
+        self.codex = codex
+        self.codexSync = codexSync
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         super.init()
         if let button = statusItem.button {
@@ -49,12 +55,20 @@ final class StatusItemController: NSObject {
         }
     }
 
+    /// 左键根目录解析：同步开启且 Codex 项目有效时跟随，否则用手动根目录。
+    private func resolveDirectoryRoot() -> String {
+        if codexSync.syncEnabled, let project = codex.resolveProject() {
+            return project.rootPath
+        }
+        return store.resolveRoot(isDirectory: { fs.isExistingDirectory($0) })
+    }
+
     /// 左键：弹出目录树（路径选择框），不含功能项。
     private func showDirectoryMenu() {
         let menu = NSMenu()
         menu.autoenablesItems = false
 
-        let root = store.resolveRoot(isDirectory: { fs.isExistingDirectory($0) })
+        let root = resolveDirectoryRoot()
         builder.fillRoot(menu, with: root, includeHidden: visibility.currentShowAllFiles())
 
         addBottomSpacer(to: menu)
@@ -68,24 +82,49 @@ final class StatusItemController: NSObject {
     private func showActionMenu() {
         let menu = NSMenu()
         menu.autoenablesItems = false
+        let syncEnabled = codexSync.syncEnabled
+        var manualRootItems: [NSMenuItem] = []
 
         let readClip = menu.addItem(withTitle: "读取剪贴板", action: #selector(readClipboard), keyEquivalent: "")
         readClip.target = self
         readClip.image = NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: nil)
+        manualRootItems.append(readClip)
 
         let changeDir = menu.addItem(withTitle: "更改目录", action: #selector(chooseRoot), keyEquivalent: "")
         changeDir.target = self
         changeDir.image = NSImage(systemSymbolName: "folder.badge.plus", accessibilityDescription: nil)
+        manualRootItems.append(changeDir)
 
         let resetRoot = menu.addItem(withTitle: "重置初始目录", action: #selector(resetRoot), keyEquivalent: "")
         resetRoot.target = self
         resetRoot.image = NSImage(systemSymbolName: "arrow.counterclockwise", accessibilityDescription: nil)
+        manualRootItems.append(resetRoot)
 
         if case .success = finderSelection.resolveInitializationDirectory() {
             let initRoot = menu.addItem(withTitle: "访达目录初始化", action: #selector(initRootFromFinder), keyEquivalent: "")
             initRoot.target = self
             initRoot.image = NSImage(systemSymbolName: "folder.badge.gearshape", accessibilityDescription: nil)
+            manualRootItems.append(initRoot)
         }
+
+        // codex 子菜单：状态展示 + 「同步项目夹」开关。
+        let codexItem = menu.addItem(withTitle: "codex", action: nil, keyEquivalent: "")
+        codexItem.image = NSImage(systemSymbolName: "terminal", accessibilityDescription: nil)
+        let codexMenu = NSMenu()
+        codexMenu.autoenablesItems = false
+        if let project = codex.resolveProject() {
+            let nameRow = codexMenu.addItem(withTitle: "项目：\(project.name)", action: nil, keyEquivalent: "")
+            nameRow.isEnabled = false
+            let rootRow = codexMenu.addItem(withTitle: project.rootPath, action: nil, keyEquivalent: "")
+            rootRow.isEnabled = false
+        } else {
+            let missingRow = codexMenu.addItem(withTitle: "未检测到 Codex 项目", action: nil, keyEquivalent: "")
+            missingRow.isEnabled = false
+        }
+        let syncItem = codexMenu.addItem(withTitle: "同步项目夹", action: #selector(toggleCodexProjectSync(_:)), keyEquivalent: "")
+        syncItem.target = self
+        ShortcutMenuAppearance.apply(to: syncItem, enabled: syncEnabled)
+        codexItem.submenu = codexMenu
 
         let weChatItem = menu.addItem(withTitle: "微信关联", action: nil, keyEquivalent: "")
         weChatItem.image = NSImage(systemSymbolName: "link", accessibilityDescription: nil)
@@ -165,6 +204,11 @@ final class StatusItemController: NSObject {
         let quit = menu.addItem(withTitle: "退出", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quit.image = NSImage(systemSymbolName: "power", accessibilityDescription: nil)
 
+        // 同步开启时，四项会改动手动根目录的功能均置灰；关闭时恢复。
+        for item in manualRootItems {
+            item.isEnabled = !syncEnabled
+        }
+
         addBottomSpacer(to: menu)
 
         if let button = statusItem.button {
@@ -200,6 +244,12 @@ final class StatusItemController: NSObject {
     @objc private func resetRoot() {
         store.reset()
         notifyRootChanged(RootPathStore.defaultRoot)
+    }
+
+    /// 切换「同步项目夹」开关并更新勾选圆。
+    @objc private func toggleCodexProjectSync(_ sender: NSMenuItem) {
+        codexSync.syncEnabled = !codexSync.syncEnabled
+        ShortcutMenuAppearance.apply(to: sender, enabled: codexSync.syncEnabled)
     }
 
     /// 按当前访达权威切换隐藏文件显示；失败则保持原状。
