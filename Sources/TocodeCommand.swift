@@ -162,6 +162,49 @@ enum TocodeCommandParser {
         quit                                退出 Tocode
     """
 
+    /// 微信 .help 使用的命令表：每条命令以 . 开头、单独用代码框包裹，便于逐条复制。
+    static let weChatHelpCommands: [(command: String, description: String)] = [
+        ("help", "打印命令表"),
+        ("status", "根目录、各开关、微信与 Codex 状态汇总"),
+        ("root get", "返回当前根目录"),
+        ("root set <path>", "校验后设置根目录"),
+        ("root choose", "弹出系统目录选择器"),
+        ("root reset", "重置为默认目录"),
+        ("root init-from-finder", "以访达当前单选项初始化"),
+        ("codex status", "当前项目名 + 根目录"),
+        ("codex sync on|off|toggle", "同步项目夹开关"),
+        ("codex model", "当前模型与一致性"),
+        ("codex model list", "实时拉取 Anker 模型列表"),
+        ("codex model set <id>", "切换模型并强制重启 Codex"),
+        ("wechat status", "是否已绑定"),
+        ("wechat bind", "触发扫码绑定"),
+        ("wechat location", "创建并在访达打开归档目录"),
+        ("blackout", "mac → 临时黑屏（别名 .lshp）"),
+        ("login on|off|toggle", "开机自启"),
+        ("wheel vertical on|off|toggle", "对调垂直滚轮"),
+        ("wheel horizontal on|off|toggle", "对调横向滚轮"),
+        ("hidden on|off|toggle", "显示/隐藏隐藏文件"),
+        ("shortcut finder-move on|off|toggle", "x/v 移动文件"),
+        ("shortcut double-cmdq on|off|toggle", "双击 ⌘Q"),
+        ("shortcut finder-cmdq on|off|toggle", "⌘Q 强关访达"),
+        ("quit", "退出 Tocode")
+    ]
+
+    static var weChatHelpText: String {
+        var lines: [String] = ["tocode 微信命令表：", ""]
+        for entry in weChatHelpCommands {
+            lines.append("```\n.\(entry.command)\n```")
+            lines.append(entry.description)
+            lines.append("")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    static func isHelpCommand(_ body: String) -> Bool {
+        let normalized = body.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return normalized == "help" || normalized == "commands"
+    }
+
     static func parse(_ input: String) -> Result<TocodeCommand, TocodeCommandError> {
         let tokens = input
             .trimmingCharacters(in: .whitespacesAndNewlines)

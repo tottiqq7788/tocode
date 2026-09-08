@@ -3148,6 +3148,14 @@ func testWeChatCommandConsumption() async {
     }
 }
 
+@MainActor
+func testWeChatHelpFormatting() {
+    let text = TocodeCommandParser.weChatHelpText
+    expect(text.contains("```\n.help\n```"), "微信 help 每条命令用代码框包裹")
+    expect(text.contains("```\n.status\n```"), "微信 help 的 status 以 . 开头")
+    expect(text.contains(".blackout"), "微信 help 包含 blackout 命令")
+}
+
 @main
 struct TestRunnerMain {
     static func main() async {
@@ -3186,6 +3194,7 @@ struct TestRunnerMain {
         await testWeChatAssociationAndFaults()
         await testWeChatBindingToArchiveIntegration()
         await testWeChatCommandConsumption()
+        testWeChatHelpFormatting()
         testTocodeCommandParser()
         testTocodeWeChatCommandGate()
         await testTocodeCommandExecutorMapping()

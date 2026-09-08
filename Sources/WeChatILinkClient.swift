@@ -139,9 +139,12 @@ final class WeChatILinkClient: WeChatILinkTransporting, @unchecked Sendable {
             request(url: url, method: "POST", token: credential.token, body: encoded),
             timeout: 20
         )
-        let outbound = try decoder.decode(OutboundResponse.self, from: data)
-        guard outbound.ret == 0 else {
-            throw WeChatTransportError.apiFailure(outbound.ret)
+        // 微信实际成功响应可能不返回 ret 字段（或返回空体/额外字段）。
+        // 缺失 ret 视为成功，仅显式非零 ret 才视为业务失败，避免“已送达却误报失败”。
+        if let outbound = try? decoder.decode(OutboundResponse.self, from: data) {
+            guard outbound.ret == 0 else {
+                throw WeChatTransportError.apiFailure(outbound.ret)
+            }
         }
     }
 
@@ -272,10 +275,11 @@ final class WeChatILinkClient: WeChatILinkTransporting, @unchecked Sendable {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             if let ret = try container.decodeIfPresent(Int.self, forKey: .ret) {
                 self.ret = ret
+            } else if let raw = try container.decodeIfPresent(String.self, forKey: .ret), let parsed = Int(raw) {
+                self.ret = parsed
             } else {
-                // iLink 历史响应中 ret 曾作为字符串返回。
-                let raw = try container.decodeIfPresent(String.self, forKey: .ret) ?? ""
-                self.ret = Int(raw) ?? -1
+                // 缺失 ret 字段按成功处理；由调用方决定是否解析成功。
+                self.ret = 0
             }
         }
     }
