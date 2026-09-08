@@ -26,6 +26,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private var modelDescriptors: [String: CodexModelDescriptor] = [:]
     private var modelLoadGeneration = UUID()
     private var isSwitchingModel = false
+    private var commandPollingTimer: Timer?
 
     init(
         shortcuts: GlobalShortcutService,
@@ -79,8 +80,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     /// 左键：弹出目录树（路径选择框），不含功能项。
-    /// 每个条目与底部动作都带原生 alternate 项：菜单打开期间按住 Command 时，
-    /// 「新增」自动变为「清空」，条目点击从复制路径切换为删除；松开即恢复。
+    /// 菜单打开期间用 eventTracking 模式的定时器轮询 Command 键状态，
+    /// 实时在普通模式与删除模式之间切换；松开后恢复。
     private func showDirectoryMenu() {
         let menu = NSMenu()
         menu.autoenablesItems = false
@@ -90,9 +91,32 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
         addBottomSpacer(to: menu)
 
+        startCommandPolling()
+
         if let button = statusItem.button {
             menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
         }
+
+        stopCommandPolling()
+    }
+
+    /// 在菜单跟踪期间轮询 Command 修饰键状态并同步到菜单构建器。
+    private func startCommandPolling() {
+        stopCommandPolling()
+        let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let isDelete = NSEvent.modifierFlags.contains(.command)
+                self.builder.setDeleteMode(isDelete)
+            }
+        }
+        RunLoop.current.add(timer, forMode: .eventTracking)
+        commandPollingTimer = timer
+    }
+
+    private func stopCommandPolling() {
+        commandPollingTimer?.invalidate()
+        commandPollingTimer = nil
     }
 
     /// 右键：功能菜单。条件显示「访达目录初始化」；「设置」含子项切换隐藏文件。

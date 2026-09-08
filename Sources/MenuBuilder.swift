@@ -1,22 +1,50 @@
 import AppKit
 
 /// 目录树菜单构建器：把目录内容渲染为 NSMenu 树，子文件夹惰性递归展开。
-/// 每个条目与底部动作都带原生 alternate 项：菜单打开期间按住 Command 时，
-/// 「新增」自动变为「清空」，条目点击从复制路径切换为删除；松开即恢复。
+/// 普通模式点击条目复制路径；按住 Command 进入删除模式，点击条目改为删除，
+/// 且每个目录菜单底部的「新增」实时变为「清空」。松开 Command 后恢复。
 @MainActor
 final class MenuBuilder: NSObject, NSMenuDelegate {
     private let fs = FileSystemService()
     private let clipboard = ClipboardService()
     private var menuDirectoryMap: [ObjectIdentifier: String] = [:]
     private var includeHidden = true
+    private var deleteMode = false
+
+    /// 已渲染、需要在 Command 切换时改动的项（直接保存强引用）。
+    private var entryItems: [EntryItem] = []
+    private var bottomItems: [BottomItem] = []
 
     private static let placeholderTitle = "\u{2026}"
     private static let newTitle = "新增"
     private static let clearTitle = "清空"
 
+    private final class EntryItem {
+        weak var item: NSMenuItem?
+        let path: String
+        let submenu: NSMenu?
+        init(item: NSMenuItem, path: String, submenu: NSMenu?) {
+            self.item = item
+            self.path = path
+            self.submenu = submenu
+        }
+    }
+
+    private final class BottomItem {
+        weak var item: NSMenuItem?
+        let directory: String
+        init(item: NSMenuItem, directory: String) {
+            self.item = item
+            self.directory = directory
+        }
+    }
+
     /// 立即填充根菜单（根目录内容在弹出前就绪）。子菜单沿用同一显示状态。
     func fillRoot(_ menu: NSMenu, with directory: String, includeHidden: Bool = true) {
         self.includeHidden = includeHidden
+        self.deleteMode = false
+        entryItems.removeAll()
+        bottomItems.removeAll()
         fill(menu, with: directory)
     }
 
@@ -28,6 +56,45 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
         fill(menu, with: dir)
     }
 
+    /// 由外部（Command 轮询）在菜单打开期间实时切换模式。
+    func setDeleteMode(_ isDelete: Bool) {
+        guard isDelete != deleteMode else { return }
+        deleteMode = isDelete
+
+        for wrapper in entryItems {
+            guard let item = wrapper.item else { continue }
+            if isDelete {
+                item.submenu = nil
+                item.action = #selector(deleteItem(_:))
+                item.image = NSImage(systemSymbolName: "trash", accessibilityDescription: "删除")
+            } else {
+                item.submenu = wrapper.submenu
+                item.action = #selector(copyItem(_:))
+                item.image = nil
+            }
+            notifyChanged(item)
+        }
+
+        for wrapper in bottomItems {
+            guard let item = wrapper.item else { continue }
+            if isDelete {
+                item.title = Self.clearTitle
+                item.action = #selector(clearDirectory(_:))
+                item.image = NSImage(systemSymbolName: "trash", accessibilityDescription: "清空")
+            } else {
+                item.title = Self.newTitle
+                item.action = #selector(newItem(_:))
+                item.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "新增")
+            }
+            notifyChanged(item)
+        }
+    }
+
+    private func notifyChanged(_ item: NSMenuItem) {
+        item.menu?.itemChanged(item)
+        item.menu?.update()
+    }
+
     private func fill(_ menu: NSMenu, with dir: String) {
         let entries = fs.entries(in: dir, includeHidden: includeHidden)
         if entries.isEmpty {
@@ -36,58 +103,44 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
             menu.addItem(empty)
         } else {
             for entry in entries {
-                addEntryItems(for: entry, to: menu)
+                menu.addItem(makeItem(for: entry))
             }
         }
         menu.addItem(.separator())
-        addBottomActionItems(for: dir, to: menu)
+        menu.addItem(makeBottomActionItem(for: dir))
     }
 
-    /// 每个条目添加「复制路径」主项 + Command 下的「删除」alternate 项。
-    private func addEntryItems(for entry: FileSystemService.Entry, to menu: NSMenu) {
-        let primary = NSMenuItem(title: entry.name, action: #selector(copyItem(_:)), keyEquivalent: "")
-        primary.target = self
-        primary.representedObject = entry.path
+    private func makeItem(for entry: FileSystemService.Entry) -> NSMenuItem {
+        let item = NSMenuItem(title: entry.name, action: #selector(copyItem(_:)), keyEquivalent: "")
+        item.target = self
+        item.representedObject = entry.path
 
+        var submenu: NSMenu? = nil
         if entry.kind == .directory {
-            let submenu = NSMenu()
-            submenu.autoenablesItems = false
-            submenu.delegate = self
+            let menu = NSMenu()
+            menu.autoenablesItems = false
+            menu.delegate = self
 
             let placeholder = NSMenuItem(title: Self.placeholderTitle, action: nil, keyEquivalent: "")
             placeholder.isEnabled = false
-            submenu.addItem(placeholder)
+            menu.addItem(placeholder)
 
-            menuDirectoryMap[ObjectIdentifier(submenu)] = entry.path
-            primary.submenu = submenu
+            menuDirectoryMap[ObjectIdentifier(menu)] = entry.path
+            submenu = menu
+            item.submenu = menu
         }
 
-        let alternate = NSMenuItem(title: entry.name, action: #selector(deleteItem(_:)), keyEquivalent: "")
-        alternate.target = self
-        alternate.representedObject = entry.path
-        alternate.isAlternate = true
-        alternate.keyEquivalentModifierMask = [.command]
-
-        menu.addItem(primary)
-        menu.addItem(alternate)
+        entryItems.append(EntryItem(item: item, path: entry.path, submenu: submenu))
+        return item
     }
 
-    /// 底部动作：普通「新增」主项 + Command 下的「清空」alternate 项。
-    private func addBottomActionItems(for directory: String, to menu: NSMenu) {
-        let primary = NSMenuItem(title: Self.newTitle, action: #selector(newItem(_:)), keyEquivalent: "")
-        primary.target = self
-        primary.representedObject = directory
-        primary.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "新增")
-
-        let alternate = NSMenuItem(title: Self.clearTitle, action: #selector(clearDirectory(_:)), keyEquivalent: "")
-        alternate.target = self
-        alternate.representedObject = directory
-        alternate.isAlternate = true
-        alternate.keyEquivalentModifierMask = [.command]
-        alternate.image = NSImage(systemSymbolName: "trash", accessibilityDescription: "清空")
-
-        menu.addItem(primary)
-        menu.addItem(alternate)
+    private func makeBottomActionItem(for directory: String) -> NSMenuItem {
+        let item = NSMenuItem(title: Self.newTitle, action: #selector(newItem(_:)), keyEquivalent: "")
+        item.target = self
+        item.representedObject = directory
+        item.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "新增")
+        bottomItems.append(BottomItem(item: item, directory: directory))
+        return item
     }
 
     // MARK: - 普通模式
