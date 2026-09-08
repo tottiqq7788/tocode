@@ -2691,6 +2691,7 @@ func testTocodeCommandParser() {
     expect(TocodeCommandParser.parse("wechat location") == .success(.wechat(.location)), "wechat location")
 
     expect(TocodeCommandParser.parse("blackout") == .success(.blackout), "blackout")
+    expect(TocodeCommandParser.parse("commands") == .success(.help), "commands 别名映射 help")
     expect(TocodeCommandParser.parse(".lshp") == .success(.blackout), "别名 .lshp 映射 blackout")
     expect(TocodeCommandParser.parse("login on") == .success(.login(.on)), "login on")
     expect(TocodeCommandParser.parse("wheel vertical toggle") == .success(.wheel(.vertical, .toggle)), "wheel vertical toggle")
@@ -2794,7 +2795,7 @@ func testTocodeCommandExecutorMapping() {
 
     // root
     if case .success(let output) = executor.execute("root get") {
-        expect(output.text == rootDir.path, "root get 返回根目录")
+        expect(output.text.contains(rootDir.path), "root get 返回根目录")
     } else {
         expect(false, "root get")
     }
@@ -2869,6 +2870,15 @@ func testTocodeCLIRunnerAndIPC() {
         stderr: { stderrLines.append($0) }
     )
     expect(code == 0, "CLI 成功退出码 0")
+
+    var helpOut: [String] = []
+    let helpCode = TocodeCLIRunner.run(
+        arguments: ["help"],
+        transport: MemoryTocodeTransport(response: okResponse),
+        stdout: { helpOut.append($0) },
+        stderr: { _ in }
+    )
+    expect(helpCode == 0 && helpOut.first?.contains("tocode 命令") == true, "help 本地返回命令表")
     expect(stdoutLines == ["ok-data"], "CLI 输出响应 data")
     expect(transport.requests.first?.command == "status", "CLI 发送 command")
 
@@ -2965,6 +2975,8 @@ func testWeChatCommandConsumption() async {
         expect(archiver.messages.isEmpty, "命令消息不写入归档")
         expect(states.state.recentKeys.count == 1, "命令消息计入去重键")
         expect(blackout.activateCount == 1, "`.lshp` 命令执行临时黑屏")
+        expect(transport.sentTexts.count == 1, "命令结果回复到微信")
+        expect(transport.sentTexts.first?.text.contains("已触发临时黑屏") == true, "命令回复包含执行结果")
         service.stop()
     }
 
@@ -3011,7 +3023,8 @@ func testWeChatCommandConsumption() async {
         _ = await waitUntil { states.state.cursor == "cursor-unknown" }
         expect(archiver.messages.isEmpty, "未知命令不写入归档")
         expect(states.state.recentKeys.count == 1, "未知命令仍计入去重并推进游标")
-        expect(notifier.notifications.contains { $0.0 == "命令执行失败" }, "未知命令本地通知")
+        expect(transport.sentTexts.count == 1, "未知命令回复到微信")
+        expect(transport.sentTexts.first?.text.contains("未知命令") == true, "未知命令回复包含错误信息")
         service.stop()
     }
 }

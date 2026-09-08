@@ -63,3 +63,12 @@ struct FileSystemService {
         return fm.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
     }
 }
+
+
+extension FileManager {
+    func removeItemIfExists(at path: String) throws {
+        if fileExists(atPath: path) {
+            try removeItem(atPath: path)
+        }
+    }
+}

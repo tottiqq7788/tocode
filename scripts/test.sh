@@ -30,6 +30,7 @@ swiftc Tests/TestRunner.swift \
   Sources/WeChatCrypto.swift \
   Sources/WeChatILinkClient.swift \
   Sources/WeChatCredentialStore.swift \
+  Sources/WeChatFileCredentialStore.swift \
   Sources/WeChatStateStore.swift \
   Sources/WeChatArchiveService.swift \
   Sources/WeChatBindingPage.swift \

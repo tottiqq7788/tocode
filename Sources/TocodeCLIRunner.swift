@@ -15,6 +15,12 @@ struct TocodeCLIRunner {
             return 2
         }
 
+        // help/commands 属于命令表查询，本地即可返回，不依赖常驻进程。
+        if first.lowercased() == "help" || first.lowercased() == "commands" {
+            stdout(TocodeCommandParser.helpText)
+            return 0
+        }
+
         let request = TocodeIPCRequest(
             id: UUID().uuidString,
             command: first,

@@ -43,6 +43,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSLog("Tocode IPC server 启动失败: %@", error.localizedDescription)
         }
 
+        // 启动后把 CLI 安装/刷新到用户 PATH（~/.local/bin/tocode）。
+        installCLI()
+
         let weChat = WeChatAssociationService()
         self.weChat = weChat
         executor.attachWeChat(weChat)
@@ -57,6 +60,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
 
         weChat.startBoundListener()
+    }
+
+    private func installCLI() {
+        let targetDirectory = NSHomeDirectory() + "/.local/bin"
+        let targetPath = targetDirectory + "/tocode"
+        let sourcePath = Bundle.main.bundleURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("tocode")
+            .path
+
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: sourcePath) else { return }
+
+        do {
+            try fm.createDirectory(
+                atPath: targetDirectory,
+                withIntermediateDirectories: true
+            )
+            if let existing = try? Data(contentsOf: URL(fileURLWithPath: targetPath)),
+               let source = try? Data(contentsOf: URL(fileURLWithPath: sourcePath)),
+               existing == source {
+                return
+            }
+            try fm.removeItemIfExists(at: targetPath)
+            try fm.copyItem(atPath: sourcePath, toPath: targetPath)
+            try fm.setAttributes(
+                [.posixPermissions: NSNumber(value: 0o755)],
+                ofItemAtPath: targetPath
+            )
+        } catch {
+            NSLog("Tocode CLI 安装到 PATH 失败: %@", error.localizedDescription)
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {

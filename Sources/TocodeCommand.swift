@@ -120,7 +120,8 @@ typealias TocodeCommandResult = Result<TocodeCommandOutput, TocodeCommandError>
 
 enum TocodeCommandParser {
     static let aliases: [String: String] = [
-        "lshp": "blackout"
+        "lshp": "blackout",
+        "commands": "help"
     ]
 
     static let helpText = """

@@ -117,8 +117,11 @@ final class TocodeCommandExecutor {
         case .wechat(let subcommand):
             return executeWechat(subcommand)
         case .blackout:
+            let alreadyPresented = screenBlackout.isPresented
             screenBlackout.activate()
-            return .success(TocodeCommandOutput("已触发临时黑屏"))
+            return .success(TocodeCommandOutput(
+                alreadyPresented ? "✅ 黑屏已在显示中，无需重复触发" : "✅ 已触发临时黑屏，按任意键或点击恢复"
+            ))
         case .login(let toggle):
             return applyToggle(toggle, current: launchAtLogin.isEnabled) { [launchAtLogin] target in
                 launchAtLogin.setEnabled(target).mapError(TocodeCommandError.launchError)
@@ -151,7 +154,7 @@ final class TocodeCommandExecutor {
             DispatchQueue.main.async {
                 NSApp.terminate(nil)
             }
-            return .success(TocodeCommandOutput("已请求退出 Tocode"))
+            return .success(TocodeCommandOutput("✅ 已请求退出 Tocode"))
         }
     }
 
@@ -201,7 +204,7 @@ final class TocodeCommandExecutor {
         switch subcommand {
         case .get:
             return .success(TocodeCommandOutput(
-                store.resolveRoot(isDirectory: fs.isExistingDirectory)
+                "根目录：\(store.resolveRoot(isDirectory: fs.isExistingDirectory))"
             ))
         case .set(let path):
             let standardized = (path as NSString).standardizingPath
@@ -292,7 +295,7 @@ final class TocodeCommandExecutor {
             )
             codexRestarter.forceRestart(after: 2) { _ in }
             return .success(TocodeCommandOutput(
-                "已切换模型 \(id)；2 秒后强制重启 Codex"
+                "✅ 已切换模型 \(id)；2 秒后强制重启 Codex"
             ))
         }
     }
@@ -302,7 +305,9 @@ final class TocodeCommandExecutor {
     private func executeWechat(_ subcommand: TocodeWechatCommand) -> TocodeCommandResult {
         switch subcommand {
         case .status:
-            return .success(TocodeCommandOutput(weChat.isBound ? "微信已绑定" : "微信未绑定"))
+            return .success(TocodeCommandOutput(
+                weChat.isBound ? "✅ 微信已绑定" : "ℹ️ 微信未绑定，可执行 .wechat bind 触发扫码"
+            ))
         case .bind:
             weChat.startBinding()
             return .success(TocodeCommandOutput("已触发微信扫码绑定"))

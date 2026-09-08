@@ -16,6 +16,7 @@ protocol WeChatILinkTransporting: AnyObject {
     func fetchQRCodeStatus(qrcode: String) async throws -> WeChatQRCodeStatus
     func getUpdates(credential: WeChatCredential, cursor: String) async throws -> WeChatUpdates
     func downloadMedia(_ descriptor: WeChatMediaDescriptor) async throws -> Data
+    func sendText(credential: WeChatCredential, toUserID: String, contextToken: String, text: String) async throws
 }
 
 final class WeChatILinkClient: WeChatILinkTransporting, @unchecked Sendable {
@@ -116,6 +117,31 @@ final class WeChatILinkClient: WeChatILinkTransporting, @unchecked Sendable {
         return try WeChatCrypto.decryptAESData(data, key: descriptor.aesKey)
     }
 
+    func sendText(
+        credential: WeChatCredential,
+        toUserID: String,
+        contextToken: String,
+        text: String
+    ) async throws {
+        let url = credential.baseURL.appendingPathComponent("ilink/bot/sendmessage")
+        let message = OutboundMessage(
+            fromUserID: "",
+            toUserID: toUserID,
+            clientID: UUID().uuidString,
+            messageType: 2,
+            messageState: 2,
+            contextToken: contextToken,
+            items: [WeChatOutboundItem(type: 1, textItem: WeChatTextItem(text: text))]
+        )
+        let body = OutboundEnvelope(msg: message, baseInfo: BaseInfo(channelVersion: Self.channelVersion))
+        let encoded = try encoder.encode(body)
+        let data = try await perform(
+            request(url: url, method: "POST", token: credential.token, body: encoded),
+            timeout: 20
+        )
+        _ = try decoder.decode(OutboundResponse.self, from: data)
+    }
+
     func makeHeaders(token: String?) -> [String: String] {
         let uin = Data(String(randomUIN()).utf8).base64EncodedString()
         var headers = [
@@ -190,6 +216,50 @@ final class WeChatILinkClient: WeChatILinkTransporting, @unchecked Sendable {
         enum CodingKeys: String, CodingKey {
             case channelVersion = "channel_version"
         }
+    }
+
+    private struct OutboundEnvelope: Encodable {
+        let msg: OutboundMessage
+        let baseInfo: BaseInfo
+
+        enum CodingKeys: String, CodingKey {
+            case msg
+            case baseInfo = "base_info"
+        }
+    }
+
+    private struct OutboundMessage: Encodable {
+        let fromUserID: String
+        let toUserID: String
+        let clientID: String
+        let messageType: Int
+        let messageState: Int
+        let contextToken: String
+        let items: [WeChatOutboundItem]
+
+        enum CodingKeys: String, CodingKey {
+            case fromUserID = "from_user_id"
+            case toUserID = "to_user_id"
+            case clientID = "client_id"
+            case messageType = "message_type"
+            case messageState = "message_state"
+            case contextToken = "context_token"
+            case items = "item_list"
+        }
+    }
+
+    private struct WeChatOutboundItem: Encodable {
+        let type: Int
+        let textItem: WeChatTextItem
+
+        enum CodingKeys: String, CodingKey {
+            case type
+            case textItem = "text_item"
+        }
+    }
+
+    private struct OutboundResponse: Decodable {
+        let ret: Int
     }
 
     private static func makeProductionSession() -> URLSession {

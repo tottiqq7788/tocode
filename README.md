@@ -42,9 +42,9 @@ macOS 菜单栏文件管理器，Swift/AppKit 原生实现。
 ## 微信关联
 
 - 右键菜单栏图标 → **微信关联 → 绑定微信**：默认浏览器会打开扫码页面。使用具备 iLink Bot 资格的个人微信扫码并确认后，菜单项显示勾选。
-- 绑定凭据只保存在 macOS Keychain。应用启动时会自动恢复监听；普通断网、超时或微信服务暂时故障不会取消绑定，只有服务端明确返回 `401/403` 才会清除凭据并通知重新绑定。
+- 绑定凭据保存在应用数据目录 `~/Library/Application Support/com.tocode.app/wechat-credential.json`，权限 `0600`，仅当前用户可读，避免临时签名导致每次启动都触发钥匙串授权。应用启动时会自动恢复监听；普通断网、超时或微信服务暂时故障不会取消绑定，只有服务端明确返回 `401/403` 才会清除凭据并通知重新绑定。
 - 绑定后再次点击「绑定微信」可重新扫码。新绑定确认并安全保存前，旧绑定仍保持运行；扫码失败或过期不影响旧绑定。
-- Tocode 只接收**发给已授权 iLink Bot 的新消息**，不会读取个人微信账号里的其他私聊、群聊或历史记录，也不会调用模型、发送确认或自动回复。
+- Tocode 只接收**发给已授权 iLink Bot 的新消息**，不会读取个人微信账号里的其他私聊、群聊或历史记录；普通消息不调用模型、不自动回复，只有 `.` 前缀命令会按命令层约定回复执行结果。
 - 收到的文字、语音转写、图片、文件和视频会归档到固定位置 `/Users/admin/Documents/wechat`。只有 iLink 实际提供媒体下载描述时才保存原文件。
 - 每天使用一个 `yyMMdd` 目录和一个 Markdown 文件。例如 2026-09-07 写入 `260907/wechat260907.md`；附件按本机收到时间重新命名，既有文件永不覆盖。
 - **微信关联 → 文件位置**会创建并在访达打开归档目录。
@@ -63,20 +63,22 @@ bash scripts/build.sh        # 同时产出 build/Tocode.app 与 build/tocode
 ./build/tocode status        # 汇总根目录、开关、微信、Codex 状态
 ```
 
-CLI 通过本机 Unix domain socket 转发给**常驻 Tocode 进程**执行；Tocode 未运行时打印明确错误并以非零退出码结束。socket 位于 `~/Library/Application Support/com.tocode.app/tocode.sock`，权限 `0600`，仅本用户可用。
+CLI 通过本机 Unix domain socket 转发给**常驻 Tocode 进程**执行；Tocode 未运行时打印明确错误并以非零退出码结束。socket 位于 `~/Library/Application Support/com.tocode.app/tocode.sock`，权限 `0600`，仅本用户可用。`help` / `commands` 是本地命令，无需常驻进程。
 
-主要命令：`root get|set|choose|reset|init-from-finder`、`codex status|sync|model|model list|model set`、`wechat status|bind|location`、`blackout`、`login on|off|toggle`、`wheel vertical|horizontal on|off|toggle`、`hidden on|off|toggle`、`shortcut finder-move|double-cmdq|finder-cmdq on|off|toggle`、`quit`。开关类命令的 `on|off|toggle` 可互换使用。
+Tocode 首次启动后，会自动把 CLI 安装到 `~/.local/bin/tocode`（该目录已在 PATH 中），之后可直接在终端运行 `tocode ...`。
+
+主要命令：`help`（同 `commands`）、`status`、`root get|set|choose|reset|init-from-finder`、`codex status|sync|model|model list|model set`、`wechat status|bind|location`、`blackout`、`login on|off|toggle`、`wheel vertical|horizontal on|off|toggle`、`hidden on|off|toggle`、`shortcut finder-move|double-cmdq|finder-cmdq on|off|toggle`、`quit`。开关类命令的 `on|off|toggle` 可互换使用；每条命令都会返回结果，不静默执行。
 
 ### 微信 `.` 前缀命令
 
 微信监听循环中，若一条消息**第一项是文本且 trim 后以 `.` 开头**，则整条消息被判定为命令：
 
-- 命令体复用 CLI 解析器；`.lshp` 是 `blackout` 的别名，完整动词名（如 `.blackout`）同样可用。
-- 命令消息**不写入 `wechat*.md`、不保存附件**；执行结果仅通过 macOS 系统通知反馈，不回微信。
-- 未知命令、参数错误或执行器失败会被静默消费并本地通知，不打断监听循环，也不重试。
+- 命令体复用 CLI 解析器；`.lshp` 是 `blackout` 的别名，`.commands` / `.help` 可查询全部命令。
+- 命令消息**不写入 `wechat*.md`、不保存附件**；执行结果通过 `sendmessage` 回复到原会话，回复信息同样不作为正式归档记录。
+- 未知命令、参数错误或执行器失败会回复错误信息并正常消费，不打断监听循环，也不重试。
 - 命令去重键与普通消息同一来源，执行成功或失败都不重复执行。
 
-微信能力保持 receive-only：不调用 `sendmessage`、不回复、不调模型。
+普通微信消息仍保持只接收、不回复、不调模型；只有 `.` 前缀命令会按上述约定回复执行结果。
 
 ## 权限
 

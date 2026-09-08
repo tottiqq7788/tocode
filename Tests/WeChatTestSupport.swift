@@ -16,6 +16,7 @@ final class MockWeChatTransport: WeChatILinkTransporting, @unchecked Sendable {
     var updateCredentials: [WeChatCredential] = []
     var updateCursors: [String] = []
     var mediaDescriptors: [WeChatMediaDescriptor] = []
+    var sentTexts: [(credential: WeChatCredential, toUserID: String, contextToken: String, text: String)] = []
 
     func fetchQRCode() async throws -> WeChatQRCode {
         fetchedQRCodes += 1
@@ -39,6 +40,10 @@ final class MockWeChatTransport: WeChatILinkTransporting, @unchecked Sendable {
     func downloadMedia(_ descriptor: WeChatMediaDescriptor) async throws -> Data {
         record(descriptor)
         return try mediaResult.get()
+    }
+
+    func sendText(credential: WeChatCredential, toUserID: String, contextToken: String, text: String) async throws {
+        sentTexts.append((credential, toUserID, contextToken, text))
     }
 
     private func record(_ descriptor: WeChatMediaDescriptor) {
@@ -76,6 +81,10 @@ final class CancellationAwareWeChatTransport: WeChatILinkTransporting, @unchecke
     }
 
     func downloadMedia(_ descriptor: WeChatMediaDescriptor) async throws -> Data {
+        throw TestWeChatError.forced
+    }
+
+    func sendText(credential: WeChatCredential, toUserID: String, contextToken: String, text: String) async throws {
         throw TestWeChatError.forced
     }
 

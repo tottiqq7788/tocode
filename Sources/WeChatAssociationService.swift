@@ -96,7 +96,7 @@ final class WeChatAssociationService: WeChatAssociationControlling {
         let transport = WeChatILinkClient()
         self.init(
             transport: transport,
-            credentialStore: KeychainWeChatCredentialStore(),
+            credentialStore: FileWeChatCredentialStore(),
             stateStore: FileWeChatReceiveStateStore(),
             archiver: WeChatArchiveService(transport: transport)
         )
@@ -252,7 +252,7 @@ final class WeChatAssociationService: WeChatAssociationControlling {
                     }
 
                     if let body = TocodeWeChatCommandGate.commandBody(from: message) {
-                        try consumeCommand(
+                        try await consumeCommand(
                             message: message,
                             key: key,
                             body: body,
@@ -299,7 +299,8 @@ final class WeChatAssociationService: WeChatAssociationControlling {
         }
     }
 
-    /// 命令消息消费语义：执行前先写入去重 key 并推进游标；不归档、不保存附件、不回微信。
+    /// 命令消息消费语义：执行前先写入去重 key 并推进游标；不归档、不保存附件。
+    /// 执行结果通过 sendmessage 回复到原会话，且该回复不入正式归档（由上游发消息时判定为命令）。
     private func consumeCommand(
         message: WeChatMessage,
         key: String,
@@ -307,7 +308,7 @@ final class WeChatAssociationService: WeChatAssociationControlling {
         cursor: String,
         state: inout WeChatReceiveState,
         known: inout Set<String>
-    ) throws {
+    ) async throws {
         var committed = state
         committed.recentKeys.append(key)
         committed.recentKeys = Array(
@@ -326,11 +327,25 @@ final class WeChatAssociationService: WeChatAssociationControlling {
         } else {
             result = .failure(.operationFailed("命令执行器未就绪"))
         }
+
+        let reply: String
         switch result {
-        case .success:
-            notifier.notify(title: "命令已执行", body: body)
+        case .success(let output):
+            reply = "✅ \(output.text)"
         case .failure(let error):
-            notifier.notify(title: "命令执行失败", body: error.message)
+            reply = "❌ \(error.message)"
+        }
+
+        guard let credential else { return }
+        do {
+            try await transport.sendText(
+                credential: credential,
+                toUserID: message.fromUserID,
+                contextToken: message.contextToken,
+                text: reply
+            )
+        } catch {
+            notifier.notify(title: "命令结果发送失败", body: reply)
         }
     }
 
