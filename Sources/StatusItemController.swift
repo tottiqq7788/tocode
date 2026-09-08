@@ -119,13 +119,13 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         commandPollingTimer = nil
     }
 
-    /// 右键：功能菜单。条件显示「访达目录初始化」；「设置」含子项切换隐藏文件。
+    /// 右键：功能菜单。目录子菜单含「访达目录初始化」；「设置」含子项切换隐藏文件。
     private func showActionMenu() {
         let menu = NSMenu()
         menu.autoenablesItems = false
         let syncEnabled = codexSync.syncEnabled
-        var manualRootItems: [NSMenuItem] = []
 
+        // 目录：读取剪贴板、更改目录、访达目录初始化、重置初始目录。
         let directoryItem = menu.addItem(withTitle: "目录", action: nil, keyEquivalent: "")
         directoryItem.image = NSImage(systemSymbolName: "folder", accessibilityDescription: nil)
         let directoryMenu = NSMenu()
@@ -139,19 +139,17 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         changeDir.target = self
         changeDir.image = NSImage(systemSymbolName: "folder.badge.plus", accessibilityDescription: nil)
 
+        if case .success = finderSelection.resolveInitializationDirectory() {
+            let initRoot = directoryMenu.addItem(withTitle: "访达目录初始化", action: #selector(initRootFromFinder), keyEquivalent: "")
+            initRoot.target = self
+            initRoot.image = NSImage(systemSymbolName: "folder.badge.gearshape", accessibilityDescription: nil)
+        }
+
         let resetRoot = directoryMenu.addItem(withTitle: "重置初始目录", action: #selector(resetRoot), keyEquivalent: "")
         resetRoot.target = self
         resetRoot.image = NSImage(systemSymbolName: "arrow.counterclockwise", accessibilityDescription: nil)
 
         directoryItem.submenu = directoryMenu
-        manualRootItems.append(directoryItem)
-
-        if case .success = finderSelection.resolveInitializationDirectory() {
-            let initRoot = menu.addItem(withTitle: "访达目录初始化", action: #selector(initRootFromFinder), keyEquivalent: "")
-            initRoot.target = self
-            initRoot.image = NSImage(systemSymbolName: "folder.badge.gearshape", accessibilityDescription: nil)
-            manualRootItems.append(initRoot)
-        }
 
         // codex 子菜单：状态展示 + 「同步项目夹」开关。
         let codexItem = menu.addItem(withTitle: "codex", action: nil, keyEquivalent: "")
@@ -214,6 +212,20 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         )
         weChatItem.submenu = weChatMenu
 
+        // mac 子菜单：自包含的全屏临时黑屏叠加层，任意按键或鼠标点击解除。
+        let macItem = menu.addItem(withTitle: "mac", action: nil, keyEquivalent: "")
+        macItem.image = NSImage(systemSymbolName: "display", accessibilityDescription: nil)
+        let macMenu = NSMenu()
+        macMenu.autoenablesItems = false
+        let blackoutItem = macMenu.addItem(
+            withTitle: "临时黑屏",
+            action: #selector(activateScreenBlackout),
+            keyEquivalent: ""
+        )
+        blackoutItem.target = self
+        blackoutItem.image = NSImage(systemSymbolName: "display.trianglebadge.exclamationmark", accessibilityDescription: nil)
+        macItem.submenu = macMenu
+
         let settingsItem = menu.addItem(withTitle: "设置", action: nil, keyEquivalent: "")
         settingsItem.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil)
         let settings = NSMenu()
@@ -264,29 +276,13 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         )
         settingsItem.submenu = settings
 
-        // mac 子菜单：自包含的全屏临时黑屏叠加层，任意按键或鼠标点击解除。
-        let macItem = menu.addItem(withTitle: "mac", action: nil, keyEquivalent: "")
-        macItem.image = NSImage(systemSymbolName: "display", accessibilityDescription: nil)
-        let macMenu = NSMenu()
-        macMenu.autoenablesItems = false
-        let blackoutItem = macMenu.addItem(
-            withTitle: "临时黑屏",
-            action: #selector(activateScreenBlackout),
-            keyEquivalent: ""
-        )
-        blackoutItem.target = self
-        blackoutItem.image = NSImage(systemSymbolName: "display.trianglebadge.exclamationmark", accessibilityDescription: nil)
-        macItem.submenu = macMenu
-
         menu.addItem(.separator())
 
         let quit = menu.addItem(withTitle: "退出", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quit.image = NSImage(systemSymbolName: "power", accessibilityDescription: nil)
 
-        // 同步开启时，「目录」父项与「访达目录初始化」置灰（父项禁用即无法展开下层）；关闭时恢复。
-        for item in manualRootItems {
-            item.isEnabled = !syncEnabled
-        }
+        // 同步开启时，「目录」父项置灰（父项禁用即无法展开下层）；关闭时恢复。
+        directoryItem.isEnabled = !syncEnabled
 
         addBottomSpacer(to: menu)
 
