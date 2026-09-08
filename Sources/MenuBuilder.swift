@@ -66,12 +66,11 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
             if isDelete {
                 item.submenu = nil
                 item.action = #selector(deleteItem(_:))
-                item.image = NSImage(systemSymbolName: "trash", accessibilityDescription: "删除")
             } else {
                 item.submenu = wrapper.submenu
                 item.action = #selector(copyItem(_:))
-                item.image = nil
             }
+            // 条目不设置图标：避免给每行加图标导致标题列整体右移/抖动。
             notifyChanged(item)
         }
 
