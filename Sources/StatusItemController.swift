@@ -26,6 +26,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private var modelDescriptors: [String: CodexModelDescriptor] = [:]
     private var modelLoadGeneration = UUID()
     private var isSwitchingModel = false
+    private var activeDirectoryMenu: NSMenu?
+    private var directoryMenuMonitor: Any?
 
     init(
         shortcuts: GlobalShortcutService,
@@ -79,7 +81,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     /// 左键：弹出目录树（路径选择框），不含功能项。
-    /// 按住 Command 打开时进入删除模式：点击条目删除，底部「新增」变为「清空」。
+    /// 菜单打开期间按住/松开 Command 会实时在普通模式与删除模式之间切换，
+    /// 底部「新增」与「清空」也会实时互换。
     private func showDirectoryMenu() {
         let menu = NSMenu()
         menu.autoenablesItems = false
@@ -92,8 +95,31 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
         addBottomSpacer(to: menu)
 
+        activeDirectoryMenu = menu
+        beginDirectoryMenuModifierMonitoring()
+
         if let button = statusItem.button {
             menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
+        }
+
+        endDirectoryMenuModifierMonitoring()
+        activeDirectoryMenu = nil
+    }
+
+    /// 菜单弹出期间跟踪 Command 键状态，实时切换目录菜单模式。
+    private func beginDirectoryMenuModifierMonitoring() {
+        directoryMenuMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+            guard let self, self.activeDirectoryMenu != nil else { return event }
+            let isDelete = event.modifierFlags.contains(.command)
+            self.builder.setMode(isDelete ? .delete : .copy)
+            return event
+        }
+    }
+
+    private func endDirectoryMenuModifierMonitoring() {
+        if let monitor = directoryMenuMonitor {
+            NSEvent.removeMonitor(monitor)
+            directoryMenuMonitor = nil
         }
     }
 
