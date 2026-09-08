@@ -133,10 +133,15 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
     }
 
     private func makeBottomActionItem(for directory: String) -> NSMenuItem {
-        let item = NSMenuItem(title: Self.newTitle, action: #selector(newItem(_:)), keyEquivalent: "")
+        let title = deleteMode ? Self.clearTitle : Self.newTitle
+        let action: Selector = deleteMode ? #selector(clearDirectory(_:)) : #selector(newItem(_:))
+        let symbol = deleteMode ? "trash" : "plus"
+        let description = deleteMode ? "清空" : "新增"
+
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
         item.target = self
         item.representedObject = directory
-        item.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "新增")
+        item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: description)
         bottomItems.append(BottomItem(item: item, directory: directory))
         return item
     }
