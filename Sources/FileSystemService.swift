@@ -1,6 +1,6 @@
 import Foundation
 
-/// 文件系统访问服务：枚举目录、判断条目类型与路径存在性。
+/// 文件系统访问服务：枚举目录、判断条目类型与路径存在性，以及新增/删除文件。
 struct FileSystemService {
     let fm: FileManager
 
@@ -62,8 +62,99 @@ struct FileSystemService {
         var isDir: ObjCBool = false
         return fm.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
     }
+
+    /// 在目录中创建指定格式的空文件，返回创建后的完整路径。
+    /// 文件名已包含扩展名时以输入为准；否则追加所选格式的扩展名。
+    func createFile(in directory: String, name rawName: String, format: FileFormat) throws -> String {
+        guard let fileName = FileFormat.resolveFileName(rawName, format: format) else {
+            throw FileSystemServiceError.emptyFileName
+        }
+        let path = (directory as NSString).appendingPathComponent(fileName)
+        guard !fm.fileExists(atPath: path) else {
+            throw FileSystemServiceError.fileAlreadyExists(fileName)
+        }
+        guard fm.createFile(atPath: path, contents: Data(), attributes: nil) else {
+            throw FileSystemServiceError.createFailed(fileName)
+        }
+        return path
+    }
+
+    /// 把路径移入废纸篓（可恢复）。
+    func trashItem(at path: String) throws {
+        var resultingURL: NSURL?
+        do {
+            try fm.trashItem(at: URL(fileURLWithPath: path), resultingItemURL: &resultingURL)
+        } catch {
+            throw FileSystemServiceError.deleteFailed((path as NSString).lastPathComponent)
+        }
+    }
+
+    /// 清空目录内全部内容（含隐藏项），逐项移入废纸篓。
+    func trashContents(of directory: String) throws {
+        for entry in entries(in: directory, includeHidden: true) {
+            try trashItem(at: entry.path)
+        }
+    }
 }
 
+/// 常见新增文件格式。
+enum FileFormat: String, CaseIterable {
+    case txt
+    case md
+    case csv
+    case json
+    case docx
+    case xlsx
+    case pptx
+    case pdf
+
+    var fileExtension: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .txt: return "纯文本"
+        case .md: return "Markdown"
+        case .csv: return "CSV 表格"
+        case .json: return "JSON"
+        case .docx: return "Word 文档"
+        case .xlsx: return "Excel 表格"
+        case .pptx: return "PPT 演示"
+        case .pdf: return "PDF 文档"
+        }
+    }
+
+    /// 规整文件名：空白返回 nil；去掉目录前缀；无扩展名时追加所选格式扩展名，已有扩展名时以输入为准。
+    static func resolveFileName(_ rawName: String, format: FileFormat) -> String? {
+        let trimmed = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let base = (trimmed as NSString).lastPathComponent
+        guard !base.isEmpty else { return nil }
+        if (base as NSString).pathExtension.isEmpty {
+            return base + "." + format.fileExtension
+        }
+        return base
+    }
+}
+
+enum FileSystemServiceError: LocalizedError {
+    case emptyFileName
+    case fileAlreadyExists(String)
+    case createFailed(String)
+    case deleteFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .emptyFileName:
+            return "文件名不能为空"
+        case .fileAlreadyExists(let name):
+            return "文件已存在：\(name)"
+        case .createFailed(let name):
+            return "无法创建文件：\(name)"
+        case .deleteFailed(let name):
+            return "无法删除：\(name)"
+        }
+    }
+}
 
 extension FileManager {
     func removeItemIfExists(at path: String) throws {

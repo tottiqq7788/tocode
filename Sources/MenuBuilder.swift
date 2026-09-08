@@ -1,18 +1,29 @@
 import AppKit
 
 /// 目录树菜单构建器：把目录内容渲染为 NSMenu 树，子文件夹惰性递归展开。
+/// 普通模式点击条目复制路径；按住 Command 进入删除模式，点击条目改为删除，
+/// 且每个目录菜单底部的「新增」变为「清空」。
 @MainActor
 final class MenuBuilder: NSObject, NSMenuDelegate {
     private let fs = FileSystemService()
     private let clipboard = ClipboardService()
     private var menuDirectoryMap: [ObjectIdentifier: String] = [:]
     private var includeHidden = true
+    private var deleteMode = false
 
     private static let placeholderTitle = "\u{2026}"
+    private static let newTitle = "新增"
+    private static let clearTitle = "清空"
+
+    enum Mode {
+        case copy
+        case delete
+    }
 
     /// 立即填充根菜单（根目录内容在弹出前就绪）。子菜单沿用同一显示状态。
-    func fillRoot(_ menu: NSMenu, with directory: String, includeHidden: Bool = true) {
+    func fillRoot(_ menu: NSMenu, with directory: String, includeHidden: Bool = true, mode: Mode = .copy) {
         self.includeHidden = includeHidden
+        self.deleteMode = (mode == .delete)
         fill(menu, with: directory)
     }
 
@@ -30,15 +41,26 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
             let empty = NSMenuItem(title: "（空）", action: nil, keyEquivalent: "")
             empty.isEnabled = false
             menu.addItem(empty)
-            return
+        } else {
+            for entry in entries {
+                menu.addItem(makeItem(for: entry))
+            }
         }
-        for entry in entries {
-            menu.addItem(makeItem(for: entry))
-        }
+        menu.addItem(.separator())
+        menu.addItem(makeBottomActionItem(for: dir))
     }
 
     private func makeItem(for entry: FileSystemService.Entry) -> NSMenuItem {
-        let item = NSMenuItem(title: entry.name, action: #selector(copyItem(_:)), keyEquivalent: "")
+        let action: Selector
+        let title: String
+        if deleteMode {
+            action = #selector(deleteItem(_:))
+            title = entry.name
+        } else {
+            action = #selector(copyItem(_:))
+            title = entry.name
+        }
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
         item.target = self
         item.representedObject = entry.path
 
@@ -47,7 +69,8 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
             submenu.autoenablesItems = false
             submenu.delegate = self
 
-            // 占位（惰性加载子项）；点击文件夹本身已直接复制路径，无需再放「复制路径」项
+            // 占位（惰性加载子项）；点击文件夹本身在普通模式直接复制路径，
+            // 删除模式点击文件夹本身删除该文件夹（其子菜单仅在悬停展开时加载）。
             let placeholder = NSMenuItem(title: Self.placeholderTitle, action: nil, keyEquivalent: "")
             placeholder.isEnabled = false
             submenu.addItem(placeholder)
@@ -58,9 +81,140 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
         return item
     }
 
+    private func makeBottomActionItem(for directory: String) -> NSMenuItem {
+        let item: NSMenuItem
+        if deleteMode {
+            item = NSMenuItem(title: Self.clearTitle, action: #selector(clearDirectory(_:)), keyEquivalent: "")
+            item.image = NSImage(systemSymbolName: "trash", accessibilityDescription: "清空")
+        } else {
+            item = NSMenuItem(title: Self.newTitle, action: #selector(newItem(_:)), keyEquivalent: "")
+            item.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "新增")
+        }
+        item.target = self
+        item.representedObject = directory
+        return item
+    }
+
+    // MARK: - 普通模式
+
     @objc private func copyItem(_ sender: NSMenuItem) {
         if let path = sender.representedObject as? String {
             clipboard.copyPath(path)
         }
+    }
+
+    // MARK: - 新增
+
+    @objc private func newItem(_ sender: NSMenuItem) {
+        guard let directory = sender.representedObject as? String else { return }
+        guard let input = NewFilePrompt.prompt(in: directory) else { return }
+        do {
+            _ = try fs.createFile(in: directory, name: input.name, format: input.format)
+        } catch {
+            presentError(error, title: "新增失败")
+        }
+    }
+
+    // MARK: - 删除模式
+
+    @objc private func deleteItem(_ sender: NSMenuItem) {
+        guard let path = sender.representedObject as? String else { return }
+        let name = (path as NSString).lastPathComponent
+        guard DestructionConfirmation.confirm(
+            title: "删除「\(name)」？",
+            message: "将把「\(name)」移入废纸篓。此操作可恢复。"
+        ) else { return }
+        do {
+            try fs.trashItem(at: path)
+        } catch {
+            presentError(error, title: "删除失败")
+        }
+    }
+
+    @objc private func clearDirectory(_ sender: NSMenuItem) {
+        guard let directory = sender.representedObject as? String else { return }
+        let name = (directory as NSString).lastPathComponent
+        guard DestructionConfirmation.confirm(
+            title: "清空「\(name)」？",
+            message: "将把「\(name)」内的全部内容移入废纸篓。此操作可恢复。"
+        ) else { return }
+        do {
+            try fs.trashContents(of: directory)
+        } catch {
+            presentError(error, title: "清空失败")
+        }
+    }
+
+    private func presentError(_ error: Error, title: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = title
+        alert.informativeText = error.localizedDescription
+        alert.addButton(withTitle: "好")
+        alert.runModal()
+    }
+}
+
+/// 新增文件小窗口：输入文件名并选择常见格式。
+@MainActor
+enum NewFilePrompt {
+    static func prompt(in directory: String) -> (name: String, format: FileFormat)? {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "新增文件"
+        alert.informativeText = "在「\((directory as NSString).lastPathComponent)」中新建一个空文件。"
+        alert.addButton(withTitle: "创建")
+        alert.addButton(withTitle: "取消")
+
+        let nameField = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        nameField.placeholderString = "文件名（可省略扩展名）"
+
+        let formatPopUp = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 260, height: 24), pullsDown: false)
+        for format in FileFormat.allCases {
+            formatPopUp.addItem(withTitle: "\(format.displayName)（.\(format.fileExtension)）")
+            formatPopUp.lastItem?.representedObject = format.rawValue
+        }
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+        let nameLabel = NSTextField(labelWithString: "文件名")
+        let formatLabel = NSTextField(labelWithString: "格式")
+        nameLabel.translatesAutoresizingMaskIntoConstraints = false
+        formatLabel.translatesAutoresizingMaskIntoConstraints = false
+        nameField.translatesAutoresizingMaskIntoConstraints = false
+        formatPopUp.translatesAutoresizingMaskIntoConstraints = false
+        stack.addArrangedSubview(nameLabel)
+        stack.addArrangedSubview(nameField)
+        stack.addArrangedSubview(formatLabel)
+        stack.addArrangedSubview(formatPopUp)
+        NSLayoutConstraint.activate([
+            nameField.widthAnchor.constraint(equalToConstant: 260),
+            formatPopUp.widthAnchor.constraint(equalToConstant: 260)
+        ])
+        stack.frame = NSRect(x: 0, y: 0, width: 260, height: 110)
+
+        alert.accessoryView = stack
+        alert.window.initialFirstResponder = nameField
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        let selected = formatPopUp.selectedItem?.representedObject as? String
+        let format = selected.flatMap { FileFormat(rawValue: $0) } ?? .txt
+        return (nameField.stringValue, format)
+    }
+}
+
+/// 删除/清空前的确认窗口。
+@MainActor
+enum DestructionConfirmation {
+    static func confirm(title: String, message: String) -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: "删除")
+        alert.addButton(withTitle: "取消")
+        return alert.runModal() == .alertFirstButtonReturn
     }
 }

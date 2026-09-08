@@ -73,6 +73,49 @@ func testFileSystemService() {
     expect(hiddenOn.contains { $0.name == "flagged.txt" && $0.isHidden }, "includeHidden=true 保留 hidden 属性文件")
 }
 
+func testFileCreationAndTrash() {
+    let fm = FileManager.default
+    let tmp = fm.temporaryDirectory
+        .appendingPathComponent("tocode-test-create-\(UUID().uuidString)").path
+    try! fm.createDirectory(atPath: tmp, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(atPath: tmp) }
+
+    let fs = FileSystemService()
+
+    // 文件名解析
+    expect(FileFormat.resolveFileName("hello", format: .md) == "hello.md", "无扩展名追加格式扩展名")
+    expect(FileFormat.resolveFileName("hello.txt", format: .md) == "hello.txt", "已有扩展名保留输入扩展名")
+    expect(FileFormat.resolveFileName("", format: .txt) == nil, "空文件名返回 nil")
+    expect(FileFormat.resolveFileName("  ", format: .txt) == nil, "空白文件名返回 nil")
+    expect(FileFormat.resolveFileName("/etc/passwd", format: .txt) == "passwd.txt", "文件名去掉目录前缀并追加扩展名")
+
+    // 创建文件
+    let created = try! fs.createFile(in: tmp, name: "note", format: .md)
+    expect(created == (tmp as NSString).appendingPathComponent("note.md"), "创建 note.md")
+    expect(fm.fileExists(atPath: created), "note.md 存在")
+
+    let withExt = try! fs.createFile(in: tmp, name: "data.json", format: .txt)
+    expect(withExt == (tmp as NSString).appendingPathComponent("data.json"), "已有扩展名按输入创建")
+
+    do {
+        _ = try fs.createFile(in: tmp, name: "note", format: .md)
+        expect(false, "重复文件名应抛错")
+    } catch let error as FileSystemServiceError {
+        if case .fileAlreadyExists = error { expect(true, "重复文件名抛 fileAlreadyExists") }
+        else { expect(false, "重复文件名抛 fileAlreadyExists") }
+    } catch {
+        expect(false, "重复文件名应抛 FileSystemServiceError")
+    }
+
+    // 删除单个文件到废纸篓
+    try! fs.trashItem(at: withExt)
+    expect(!fm.fileExists(atPath: withExt), "trashItem 后文件从原路径移除")
+
+    // 清空目录
+    try! fs.trashContents(of: tmp)
+    expect(fs.entries(in: tmp).isEmpty, "清空后目录为空")
+}
+
 func testRootPathStore() {
     let suite = "tocode-test-\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suite)!
@@ -3109,6 +3152,7 @@ func testWeChatCommandConsumption() async {
 struct TestRunnerMain {
     static func main() async {
         testFileSystemService()
+        testFileCreationAndTrash()
         testRootPathStore()
         testClipboardService()
         testCodexProjectService()

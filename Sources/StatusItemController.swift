@@ -79,12 +79,16 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     /// 左键：弹出目录树（路径选择框），不含功能项。
+    /// 按住 Command 打开时进入删除模式：点击条目删除，底部「新增」变为「清空」。
     private func showDirectoryMenu() {
         let menu = NSMenu()
         menu.autoenablesItems = false
 
         let root = resolveDirectoryRoot()
-        builder.fillRoot(menu, with: root, includeHidden: visibility.currentShowAllFiles())
+        let mode: MenuBuilder.Mode = (NSApp.currentEvent?.modifierFlags.contains(.command) == true)
+            ? .delete
+            : .copy
+        builder.fillRoot(menu, with: root, includeHidden: visibility.currentShowAllFiles(), mode: mode)
 
         addBottomSpacer(to: menu)
 
