@@ -31,7 +31,7 @@ final class ScreenBlackoutService {
     }
 }
 
-/// 实际的全屏黑色无边框覆盖窗口：每个显示器一个，任意按键或鼠标点击解除。
+/// 实际的全屏黑色无边框覆盖窗口：每个显示器一个，纯黑且不渲染任何提示文字，任意按键或鼠标点击解除。
 @MainActor
 final class ScreenBlackoutOverlay: ScreenBlackoutOverlaying {
     private var windows: [ScreenBlackoutWindow] = []
@@ -59,23 +59,6 @@ final class ScreenBlackoutOverlay: ScreenBlackoutOverlaying {
             let content = ScreenBlackoutContentView(frame: screen.frame)
             content.wantsLayer = true
             content.layer?.backgroundColor = NSColor.black.cgColor
-
-            let label = ScreenBlackoutLabel()
-            label.stringValue = "点击恢复"
-            label.font = .systemFont(ofSize: 44, weight: .medium)
-            label.textColor = NSColor(calibratedWhite: 0.6, alpha: 1.0)
-            label.alignment = .center
-            label.isEditable = false
-            label.isSelectable = false
-            label.isBordered = false
-            label.drawsBackground = false
-            label.translatesAutoresizingMaskIntoConstraints = false
-            content.addSubview(label)
-
-            NSLayoutConstraint.activate([
-                label.centerXAnchor.constraint(equalTo: content.centerXAnchor),
-                label.centerYAnchor.constraint(equalTo: content.centerYAnchor)
-            ])
 
             content.onEvent = { [weak self] in
                 self?.dismiss()
@@ -127,14 +110,5 @@ private final class ScreenBlackoutContentView: NSView {
 
     override func otherMouseDown(with event: NSEvent) {
         onEvent?()
-    }
-}
-
-/// 不可交互的文本标签：不拦截点击，确保点击落在覆盖层内容视图上。
-private final class ScreenBlackoutLabel: NSTextField {
-    override var acceptsFirstResponder: Bool { false }
-
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        nil
     }
 }
