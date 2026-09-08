@@ -125,6 +125,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         menu.autoenablesItems = false
         let syncEnabled = codexSync.syncEnabled
 
+        // 访达访问：直接打开当前左键目录对应的访达目录。
+        let finderAccess = menu.addItem(withTitle: "访达访问", action: #selector(openFinderAtRoot), keyEquivalent: "")
+        finderAccess.target = self
+        finderAccess.image = NSImage(systemSymbolName: "macwindow", accessibilityDescription: nil)
+
         // 目录：读取剪贴板、更改目录、访达目录初始化、重置初始目录。
         let directoryItem = menu.addItem(withTitle: "目录", action: nil, keyEquivalent: "")
         directoryItem.image = NSImage(systemSymbolName: "folder", accessibilityDescription: nil)
@@ -538,6 +543,13 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     /// 显示临时黑屏；再次点击时若已显示则为 no-op。
     @objc private func activateScreenBlackout() {
         screenBlackout.activate()
+    }
+
+    /// 在访达中打开当前左键目录对应的根目录。
+    @objc private func openFinderAtRoot() {
+        let root = resolveDirectoryRoot()
+        guard fs.isExistingDirectory(root) else { return }
+        NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: root)
     }
 
     /// 点击时重新解析访达单选项；失效则不改写根目录。
