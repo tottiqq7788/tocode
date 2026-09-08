@@ -2274,6 +2274,38 @@ func testWeChatProtocolContract() async {
 }
 
 @MainActor
+func testWeChatBindingStatusNormalization() async {
+    // 归一化应把已确认的多种拼写都识别为 confirmed，而不是掉进 unknown 立即失败。
+    for raw in ["wait", "scanning", "scanned", "confirmed", "success", "expired"] {
+        let status = WeChatQRCodeStatus(status: raw, botToken: "tok", baseURL: "https://ilinkai.weixin.qq.com")
+        let page = MockWeChatBindingPage()
+        let transport = MockWeChatTransport()
+        transport.statuses = [.success(status)]
+        let credentials = MemoryWeChatCredentialStore(nil)
+        let service = WeChatAssociationService(
+            transport: transport,
+            credentialStore: credentials,
+            stateStore: MemoryWeChatStateStore(),
+            archiver: MockWeChatArchiver(),
+            pageWriter: page,
+            opener: MockWeChatOpener(),
+            notifier: MockWeChatNotifier(),
+            sleeper: MockWeChatSleeper()
+        )
+        await service.performBinding()
+        switch raw {
+        case "success":
+            expect(service.isBound, "绑定状态 \(raw) 归一化为 confirmed 并绑定成功")
+        case "scanning", "scanned":
+            expect(!page.statuses.contains { if case .failed = $0 { return true }; return false }, "扫描态 \(raw) 不显示失败")
+        default:
+            break
+        }
+        service.stop()
+    }
+}
+
+@MainActor
 func testWeChatAssociationAndFaults() async {
     let old = WeChatCredential(
         token: "old-token",
@@ -3062,6 +3094,7 @@ struct TestRunnerMain {
         testWeChatBindingPage()
         await testWeChatArchive()
         await testWeChatProtocolContract()
+        await testWeChatBindingStatusNormalization()
         await testWeChatAssociationAndFaults()
         await testWeChatBindingToArchiveIntegration()
         await testWeChatCommandConsumption()

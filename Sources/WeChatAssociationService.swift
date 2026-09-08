@@ -135,6 +135,32 @@ final class WeChatAssociationService: WeChatAssociationControlling {
         listenerTask = nil
     }
 
+    private enum BindingStatusKind {
+        case waiting
+        case scanned
+        case confirmed
+        case expired
+        case unknown
+    }
+
+    /// iLink 扫码状态值在不同版本中出现过 `wait`、`scan`、`success` 等拼写，
+    /// 这里做归一化；未知值保守地继续轮询，避免误判导致扫码后页面立即失败。
+    private static func bindingStatusKind(_ raw: String) -> BindingStatusKind {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        switch value {
+        case "", "wait", "waiting", "pending":
+            return .waiting
+        case "scan", "scaned", "scaning", "scanning", "scanned", "login", "logined":
+            return .scanned
+        case "confirm", "confirmed", "success", "succeed", "ok":
+            return .confirmed
+        case "expire", "expired", "timeout", "fail", "failed":
+            return .expired
+        default:
+            return .unknown
+        }
+    }
+
     func performBinding() async {
         do {
             let qrCode = try await transport.fetchQRCode()
@@ -156,25 +182,21 @@ final class WeChatAssociationService: WeChatAssociationControlling {
                     continue
                 }
 
-                switch status.status.lowercased() {
-                case "confirmed":
+                switch Self.bindingStatusKind(status.status) {
+                case .confirmed:
                     try await acceptBinding(status)
                     try? pageWriter.update(.success)
                     notifier.notify(title: "微信绑定成功", body: "新消息将归档到 \(archiveRoot.path)")
                     bindingTask = nil
                     return
-                case "scanned":
+                case .scanned:
                     try? pageWriter.update(.scanned)
-                case "expired":
+                case .expired:
                     try? pageWriter.update(.expired)
                     bindingTask = nil
                     return
-                case "waiting", "":
+                case .waiting, .unknown:
                     try? pageWriter.update(.waiting)
-                default:
-                    try? pageWriter.update(.failed("微信返回了无法识别的绑定状态，请重新绑定。"))
-                    bindingTask = nil
-                    return
                 }
                 try await sleeper.sleep(seconds: bindingPollInterval)
             }
