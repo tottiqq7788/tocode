@@ -64,10 +64,9 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
         for wrapper in entryItems {
             guard let item = wrapper.item else { continue }
             if isDelete {
-                item.submenu = nil
+                // 保留子菜单：悬停仍可进入下层菜单（下层菜单会在填充时读取当前删除模式）。
                 item.action = #selector(deleteItem(_:))
             } else {
-                item.submenu = wrapper.submenu
                 item.action = #selector(copyItem(_:))
             }
             // 条目不设置图标：避免给每行加图标导致标题列整体右移/抖动。
@@ -110,7 +109,7 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
     }
 
     private func makeItem(for entry: FileSystemService.Entry) -> NSMenuItem {
-        let item = NSMenuItem(title: entry.name, action: #selector(copyItem(_:)), keyEquivalent: "")
+        let item = NSMenuItem(title: entry.name, action: deleteMode ? #selector(deleteItem(_:)) : #selector(copyItem(_:)), keyEquivalent: "")
         item.target = self
         item.representedObject = entry.path
 
