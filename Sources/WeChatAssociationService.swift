@@ -350,13 +350,14 @@ final class WeChatAssociationService: WeChatAssociationControlling {
             result = .failure(.operationFailed("命令执行器未就绪"))
         }
 
-        let reply: String
+        let rawReply: String
         switch result {
         case .success(let output):
-            reply = "✅ \(output.text)"
+            rawReply = "✅ \(output.text)"
         case .failure(let error):
-            reply = "❌ \(error.message)"
+            rawReply = "❌ \(error.message)"
         }
+        let reply = Self.markdownCodeBlock(rawReply)
 
         guard let credential else { return }
         do {
@@ -369,6 +370,12 @@ final class WeChatAssociationService: WeChatAssociationControlling {
         } catch {
             notifier.notify(title: "命令结果发送失败", body: reply)
         }
+    }
+
+    /// 把命令回复包进 Markdown 代码框。若内容本身含代码框分隔符，则使用更长的围栏避免截断。
+    private static func markdownCodeBlock(_ text: String) -> String {
+        let fence = text.contains("```") ? "````" : "```"
+        return "\(fence)\n\(text)\n\(fence)"
     }
 
     private func clearRejectedBinding() async {
