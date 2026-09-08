@@ -139,7 +139,10 @@ final class WeChatILinkClient: WeChatILinkTransporting, @unchecked Sendable {
             request(url: url, method: "POST", token: credential.token, body: encoded),
             timeout: 20
         )
-        _ = try decoder.decode(OutboundResponse.self, from: data)
+        let outbound = try decoder.decode(OutboundResponse.self, from: data)
+        guard outbound.ret == 0 else {
+            throw WeChatTransportError.apiFailure(outbound.ret)
+        }
     }
 
     func makeHeaders(token: String?) -> [String: String] {
@@ -260,6 +263,21 @@ final class WeChatILinkClient: WeChatILinkTransporting, @unchecked Sendable {
 
     private struct OutboundResponse: Decodable {
         let ret: Int
+
+        enum CodingKeys: String, CodingKey {
+            case ret
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            if let ret = try container.decodeIfPresent(Int.self, forKey: .ret) {
+                self.ret = ret
+            } else {
+                // iLink 历史响应中 ret 曾作为字符串返回。
+                let raw = try container.decodeIfPresent(String.self, forKey: .ret) ?? ""
+                self.ret = Int(raw) ?? -1
+            }
+        }
     }
 
     private static func makeProductionSession() -> URLSession {

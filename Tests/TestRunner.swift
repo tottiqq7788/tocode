@@ -2235,6 +2235,30 @@ func testWeChatProtocolContract() async {
     let baseInfo = body["base_info"] as! [String: Any]
     expect(baseInfo["channel_version"] as? String == "2.0.1", "协议合同：getupdates 提交 channel_version")
 
+    WeChatURLProtocol.handler = { request in
+        switch request.url!.path {
+        case "/ilink/bot/sendmessage":
+            return (200, Data(#"{"ret":0}"#.utf8))
+        default:
+            return (404, Data())
+        }
+    }
+    try! await client.sendText(
+        credential: credential,
+        toUserID: "user@im.wechat",
+        contextToken: "ctx",
+        text: "hi"
+    )
+    let sendRequest = WeChatURLProtocol.requests[3]
+    expect(sendRequest.httpMethod == "POST", "协议合同：sendmessage 使用 POST")
+    expect(sendRequest.value(forHTTPHeaderField: "Authorization") == "Bearer secret", "协议合同：sendmessage 携带 Bearer")
+    let sendBody = try! JSONSerialization.jsonObject(with: sendRequest.httpBody!) as! [String: Any]
+    let sendMsg = sendBody["msg"] as! [String: Any]
+    expect(sendMsg["message_type"] as? Int == 2, "协议合同：sendmessage message_type=2")
+    expect(sendMsg["message_state"] as? Int == 2, "协议合同：sendmessage message_state=2")
+    let sendItems = sendMsg["item_list"] as! [[String: Any]]
+    expect((sendItems.first?["text_item"] as? [String: Any])?["text"] as? String == "hi", "协议合同：sendmessage 文本内容")
+
     let beforeUntrusted = WeChatURLProtocol.requests.count
     do {
         _ = try await client.getUpdates(
@@ -2270,6 +2294,26 @@ func testWeChatProtocolContract() async {
         expect(true, "HTTP 5xx 应分类为暂时服务故障")
     } catch {
         expect(false, "HTTP 5xx 错误分类")
+    }
+
+    WeChatURLProtocol.handler = { request in
+        if request.url!.path == "/ilink/bot/sendmessage" {
+            return (200, Data(#"{"ret":-3,"errmsg":"invalid arguments"}"#.utf8))
+        }
+        return (404, Data())
+    }
+    do {
+        _ = try await client.sendText(
+            credential: credential,
+            toUserID: "user@im.wechat",
+            contextToken: "ctx",
+            text: "bad"
+        )
+        expect(false, "sendmessage 非零 ret 应视为失败")
+    } catch WeChatTransportError.apiFailure(let ret) {
+        expect(ret == -3, "sendmessage 非零 ret 正确分类")
+    } catch {
+        expect(false, "sendmessage 错误分类")
     }
 }
 
