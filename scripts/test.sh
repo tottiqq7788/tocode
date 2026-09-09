@@ -23,6 +23,9 @@ swiftc Tests/TestRunner.swift \
   Sources/MultitouchSupportMonitor.swift \
   Sources/TrackpadShortcutService.swift \
   Sources/ShortcutRecorderPrompt.swift \
+  Sources/KeyboardShortcutMapping.swift \
+  Sources/KeyboardShortcutRemapService.swift \
+  Sources/KeyboardShortcutMappingPrompt.swift \
   Sources/CommandQTargetProvider.swift \
   Sources/FinderDismissService.swift \
   Sources/GlobalShortcutService.swift \

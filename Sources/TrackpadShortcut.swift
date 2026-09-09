@@ -18,7 +18,7 @@ enum TrackpadTapGesture: Int, CaseIterable, Codable, Hashable {
     }
 }
 
-struct ShortcutModifiers: OptionSet, Codable, Equatable {
+struct ShortcutModifiers: OptionSet, Codable, Equatable, Hashable {
     let rawValue: UInt8
 
     static let control = ShortcutModifiers(rawValue: 1 << 0)
@@ -48,7 +48,7 @@ struct ShortcutModifiers: OptionSet, Codable, Equatable {
     }
 }
 
-struct RecordedShortcut: Codable, Equatable {
+struct RecordedShortcut: Codable, Equatable, Hashable {
     let keyCode: UInt16
     let modifiers: ShortcutModifiers
     let keyLabel: String

@@ -13,6 +13,7 @@ private final class UnboundWeChat: WeChatAssociationControlling {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var shortcuts: GlobalShortcutService?
     private var trackpadShortcuts: TrackpadShortcutService?
+    private var keyboardRemaps: KeyboardShortcutRemapService?
     private var mouseWheel: MouseWheelReverseService?
     private var weChat: WeChatAssociationService?
     private var controller: StatusItemController?
@@ -26,6 +27,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let trackpad = TrackpadShortcutService()
         trackpad.applySavedSettings()
         trackpadShortcuts = trackpad
+        let keyboardRemaps = KeyboardShortcutRemapService()
+        service.setExternalEventBypass { [weak keyboardRemaps] type, event in
+            keyboardRemaps?.claims(type: type, event: event) ?? false
+        }
+        keyboardRemaps.applySavedSettings()
+        self.keyboardRemaps = keyboardRemaps
         let wheel = MouseWheelReverseService()
         wheel.applySavedSettings()
         mouseWheel = wheel
@@ -59,6 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller = StatusItemController(
             shortcuts: service,
             trackpadShortcuts: trackpad,
+            keyboardRemaps: keyboardRemaps,
             mouseWheel: wheel,
             weChat: weChat,
             screenBlackout: blackout
@@ -104,6 +112,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ipcServer = nil
         shortcuts?.shutdown()
         trackpadShortcuts?.shutdown()
+        keyboardRemaps?.shutdown()
         mouseWheel?.shutdown()
         weChat?.stop()
     }

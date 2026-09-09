@@ -13,6 +13,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private let finderSelection = FinderSelectionService()
     private let shortcuts: GlobalShortcutService
     private let trackpadShortcuts: TrackpadShortcutControlling
+    private let keyboardRemaps: KeyboardShortcutRemapControlling
     private let mouseWheel: MouseWheelReverseService
     private let launchAtLogin: LaunchAtLoginControlling
     private let weChat: WeChatAssociationControlling
@@ -32,6 +33,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     init(
         shortcuts: GlobalShortcutService,
         trackpadShortcuts: TrackpadShortcutControlling,
+        keyboardRemaps: KeyboardShortcutRemapControlling,
         mouseWheel: MouseWheelReverseService,
         launchAtLogin: LaunchAtLoginControlling = LaunchAtLoginService(),
         weChat: WeChatAssociationControlling,
@@ -43,6 +45,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     ) {
         self.shortcuts = shortcuts
         self.trackpadShortcuts = trackpadShortcuts
+        self.keyboardRemaps = keyboardRemaps
         self.mouseWheel = mouseWheel
         self.launchAtLogin = launchAtLogin
         self.weChat = weChat
@@ -253,7 +256,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         )
         weChatItem.submenu = weChatMenu
 
-        // mac 子菜单：显示、触控板、鼠标滚轮与全局退出保护。
+        // mac 子菜单：显示、触控板、键盘、鼠标滚轮与全局退出保护。
         let macItem = menu.addItem(withTitle: "mac", action: nil, keyEquivalent: "")
         macItem.image = NSImage(systemSymbolName: "display", accessibilityDescription: nil)
         let macMenu = NSMenu()
@@ -291,6 +294,46 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             )
         }
         trackpadItem.submenu = trackpadMenu
+
+        let keyboardItem = macMenu.addItem(
+            withTitle: "键盘",
+            action: nil,
+            keyEquivalent: ""
+        )
+        keyboardItem.image = NSImage(
+            systemSymbolName: "keyboard",
+            accessibilityDescription: nil
+        )
+        let keyboardMenu = NSMenu()
+        keyboardMenu.autoenablesItems = false
+        let addKeyboardMapping = keyboardMenu.addItem(
+            withTitle: "新增",
+            action: #selector(createKeyboardMapping),
+            keyEquivalent: ""
+        )
+        addKeyboardMapping.target = self
+        addKeyboardMapping.image = NSImage(
+            systemSymbolName: "plus",
+            accessibilityDescription: "新增"
+        )
+        if !keyboardRemaps.mappings.isEmpty {
+            keyboardMenu.addItem(.separator())
+            for mapping in keyboardRemaps.mappings {
+                let item = keyboardMenu.addItem(
+                    withTitle: mapping.name,
+                    action: #selector(editKeyboardMapping(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = mapping.id.uuidString
+                item.image = NSImage(
+                    systemSymbolName: "checkmark.circle.fill",
+                    accessibilityDescription: "已配置"
+                )
+                item.toolTip = "\(mapping.source.displayName) → \(mapping.target.displayName)"
+            }
+        }
+        keyboardItem.submenu = keyboardMenu
 
         macMenu.addItem(.separator())
         addShortcutToggle(
@@ -611,6 +654,74 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             to: sender,
             enabled: trackpadShortcuts.shortcut(for: gesture) != nil
         )
+    }
+
+    @objc private func createKeyboardMapping() {
+        presentKeyboardMappingEditor(
+            draft: KeyboardShortcutMappingDraft(),
+            isEditing: false
+        )
+    }
+
+    @objc private func editKeyboardMapping(_ sender: NSMenuItem) {
+        guard
+            let rawID = sender.representedObject as? String,
+            let id = UUID(uuidString: rawID),
+            let mapping = keyboardRemaps.mappings.first(where: { $0.id == id })
+        else {
+            return
+        }
+        presentKeyboardMappingEditor(
+            draft: KeyboardShortcutMappingDraft(mapping: mapping),
+            isEditing: true
+        )
+    }
+
+    private func presentKeyboardMappingEditor(
+        draft initialDraft: KeyboardShortcutMappingDraft,
+        isEditing: Bool
+    ) {
+        shortcuts.setInputCaptureSuspended(true)
+        keyboardRemaps.setInputCaptureSuspended(true)
+        defer {
+            keyboardRemaps.setInputCaptureSuspended(false)
+            shortcuts.setInputCaptureSuspended(false)
+        }
+
+        var draft = initialDraft
+        while true {
+            switch KeyboardShortcutMappingPrompt.prompt(
+                draft: draft,
+                isEditing: isEditing
+            ) {
+            case .save(let candidate):
+                switch keyboardRemaps.saveMapping(candidate) {
+                case .success:
+                    return
+                case .failure(let error):
+                    presentKeyboardMappingError(error)
+                    draft = candidate
+                }
+            case .delete:
+                if let id = draft.id {
+                    keyboardRemaps.deleteMapping(id: id)
+                }
+                return
+            case .cancel:
+                return
+            }
+        }
+    }
+
+    private func presentKeyboardMappingError(
+        _ error: KeyboardShortcutMappingValidationError
+    ) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "无法保存键盘映射"
+        alert.informativeText = error.localizedDescription
+        alert.addButton(withTitle: "好")
+        alert.runModal()
     }
 
     /// 复制当前访达选中文件或文件夹本身的绝对路径。

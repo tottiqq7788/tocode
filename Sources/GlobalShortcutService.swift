@@ -59,6 +59,8 @@ final class GlobalShortcutService {
     private let scheduler: ShortcutScheduling
     private let alerts: ShortcutAlerting
     private var engine = GlobalShortcutEngine()
+    private var inputCaptureSuspended = false
+    private var externalEventBypass: ((CGEventType, CGEvent) -> Bool)?
 
     init(
         settings: ShortcutSettingsStore = ShortcutSettingsStore(),
@@ -177,6 +179,8 @@ final class GlobalShortcutService {
     }
 
     func shutdown() {
+        inputCaptureSuspended = false
+        externalEventBypass = nil
         engine.setFinderMoveEnabled(false)
         engine.setDoubleCommandQEnabled(false)
         engine.setFinderCommandQEnabled(false)
@@ -186,12 +190,23 @@ final class GlobalShortcutService {
     /// 测试入口：走完整决策与副作用调度，不创建真实钩子。
     @discardableResult
     func handleSnapshot(_ event: KeyboardEventSnapshot) -> ShortcutStep {
+        guard !inputCaptureSuspended else { return .pass }
         let step = process(event)
         perform(step.effect)
         return step
     }
 
     var isCutPrepared: Bool { engine.isCutPrepared }
+
+    func setInputCaptureSuspended(_ suspended: Bool) {
+        inputCaptureSuspended = suspended
+    }
+
+    func setExternalEventBypass(
+        _ bypass: ((CGEventType, CGEvent) -> Bool)?
+    ) {
+        externalEventBypass = bypass
+    }
 
     private func ensureTapRunning() -> Bool {
         if tap.isInstalled && tap.isEnabled {
@@ -246,6 +261,12 @@ final class GlobalShortcutService {
                     self?.failOpenStop(message: "系统事件钩子被停用，无法恢复。所有按键已放行。")
                 }
             }
+            return .pass
+        }
+        if inputCaptureSuspended {
+            return .pass
+        }
+        if externalEventBypass?(type, event) == true {
             return .pass
         }
         guard let snapshot = ShortcutKeyClassifier.snapshot(type: type, event: event) else {

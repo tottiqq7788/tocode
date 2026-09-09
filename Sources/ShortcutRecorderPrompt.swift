@@ -45,7 +45,7 @@ enum ShortcutRecorderPrompt {
 }
 
 @MainActor
-private final class ShortcutRecorderView: NSView {
+final class ShortcutRecorderView: NSView {
     var shortcut: RecordedShortcut? {
         didSet {
             label.stringValue = shortcut?.displayName ?? "等待输入"
