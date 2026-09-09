@@ -19,6 +19,10 @@ swiftc Tests/TestRunner.swift \
   Sources/ShortcutMenuAppearance.swift \
   Sources/GlobalShortcutState.swift \
   Sources/KeyboardEventSynthesizer.swift \
+  Sources/TrackpadShortcut.swift \
+  Sources/MultitouchSupportMonitor.swift \
+  Sources/TrackpadShortcutService.swift \
+  Sources/ShortcutRecorderPrompt.swift \
   Sources/CommandQTargetProvider.swift \
   Sources/FinderDismissService.swift \
   Sources/GlobalShortcutService.swift \

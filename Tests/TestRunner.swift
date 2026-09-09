@@ -1049,6 +1049,295 @@ final class MockAlerts: ShortcutAlerting {
     }
 }
 
+final class MockMultitouchMonitor: MultitouchMonitoring {
+    var isRunning = false
+    var shouldStart = true
+    var startCount = 0
+    var stopCount = 0
+    var handler: ((MultitouchContactFrame) -> Void)?
+
+    func start(handler: @escaping (MultitouchContactFrame) -> Void) -> Bool {
+        startCount += 1
+        guard shouldStart else { return false }
+        self.handler = handler
+        isRunning = true
+        return true
+    }
+
+    func stop() {
+        stopCount += 1
+        isRunning = false
+        handler = nil
+    }
+
+    func emit(
+        deviceID: UInt = 1,
+        count: Int,
+        timestamp: TimeInterval,
+        position: CGPoint? = CGPoint(x: 0.5, y: 0.5)
+    ) {
+        handler?(
+            MultitouchContactFrame(
+                deviceID: deviceID,
+                touchCount: count,
+                timestamp: timestamp,
+                firstPosition: position
+            )
+        )
+    }
+}
+
+final class MockTrackpadShortcutPoster: TrackpadShortcutEventPosting {
+    var posted: [RecordedShortcut] = []
+    var shouldSucceed = true
+
+    func post(_ shortcut: RecordedShortcut) -> Bool {
+        posted.append(shortcut)
+        return shouldSucceed
+    }
+}
+
+final class MockTrackpadPermissions: ShortcutPermissionChecking {
+    var trusted: Bool
+    var requestResult: Bool
+    var requestCount = 0
+
+    init(trusted: Bool, requestResult: Bool? = nil) {
+        self.trusted = trusted
+        self.requestResult = requestResult ?? trusted
+    }
+
+    func hasAccessibilityAccess() -> Bool {
+        trusted
+    }
+
+    func requestAccessibilityAccess() -> Bool {
+        requestCount += 1
+        if requestResult {
+            trusted = true
+        }
+        return requestResult
+    }
+}
+
+func testTrackpadShortcutStoreAndRecognizer() {
+    let suite = "tocode-trackpad-shortcuts-\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defaults.removePersistentDomain(forName: suite)
+    defer { defaults.removePersistentDomain(forName: suite) }
+
+    let store = TrackpadShortcutStore(defaults: defaults)
+    let commandP = RecordedShortcut(
+        keyCode: 35,
+        modifiers: [.command, .shift],
+        keyLabel: "P"
+    )
+    let controlSpace = RecordedShortcut(
+        keyCode: 49,
+        modifiers: [.control],
+        keyLabel: "空格"
+    )
+
+    expect(!store.hasAnyShortcut, "触控板快捷键默认无配置")
+    expect(store.shortcut(for: .threeFingerTap) == nil, "三指轻点默认未配置")
+    store.setShortcut(commandP, for: .threeFingerTap)
+    expect(store.shortcut(for: .threeFingerTap) == commandP, "三指轻点配置持久化")
+    expect(store.hasAnyShortcut, "存在触控板配置时 hasAnyShortcut 为 true")
+    expect(commandP.displayName == "⇧⌘P", "快捷键显示修饰键与按键")
+    expect(commandP.modifiers.eventFlags.contains(.maskCommand), "快捷键转换 Command 标记")
+    expect(commandP.modifiers.eventFlags.contains(.maskShift), "快捷键转换 Shift 标记")
+
+    store.setShortcut(controlSpace, for: .threeFingerTap)
+    expect(store.shortcut(for: .threeFingerTap) == controlSpace, "同一手势保存时覆盖旧配置")
+    store.setShortcut(commandP, for: .fiveFingerTap)
+    expect(store.allShortcuts().count == 2, "三指与五指配置彼此独立")
+    store.removeShortcut(for: .threeFingerTap)
+    expect(store.shortcut(for: .threeFingerTap) == nil, "清除只移除指定手势")
+    expect(store.shortcut(for: .fiveFingerTap) == commandP, "清除三指不影响五指")
+
+    func recognize(
+        count: Int,
+        duration: TimeInterval = 0.12,
+        movement: CGFloat = 0
+    ) -> TrackpadTapGesture? {
+        var recognizer = TrackpadTapRecognizer()
+        _ = recognizer.process(
+            TrackpadTouchSample(
+                touchCount: count,
+                timestamp: 1,
+                firstPosition: CGPoint(x: 0.4, y: 0.4)
+            )
+        )
+        _ = recognizer.process(
+            TrackpadTouchSample(
+                touchCount: count,
+                timestamp: 1.04,
+                firstPosition: CGPoint(x: 0.4 + movement, y: 0.4)
+            )
+        )
+        return recognizer.process(
+            TrackpadTouchSample(
+                touchCount: 0,
+                timestamp: 1 + duration,
+                firstPosition: nil
+            )
+        )
+    }
+
+    expect(recognize(count: 3) == .threeFingerTap, "精确三指短时完整抬起识别为三指轻点")
+    expect(recognize(count: 4) == .fourFingerTap, "精确四指短时完整抬起识别为四指轻点")
+    expect(recognize(count: 5) == .fiveFingerTap, "精确五指短时完整抬起识别为五指轻点")
+    expect(recognize(count: 2) == nil, "二指轻点不在映射范围")
+    expect(recognize(count: 6) == nil, "六指轻点不降级为五指")
+    expect(recognize(count: 3, duration: 0.8) == nil, "长按抬起不识别为轻点")
+    expect(
+        recognize(count: 3, movement: TrackpadTapRecognizer.maximumMovement + 0.02) == nil,
+        "三指滑动抬起不识别为轻点"
+    )
+
+    var staggered = TrackpadTapRecognizer()
+    _ = staggered.process(
+        TrackpadTouchSample(touchCount: 1, timestamp: 2, firstPosition: CGPoint(x: 0.5, y: 0.5))
+    )
+    _ = staggered.process(
+        TrackpadTouchSample(touchCount: 3, timestamp: 2.03, firstPosition: CGPoint(x: 0.55, y: 0.5))
+    )
+    _ = staggered.process(
+        TrackpadTouchSample(touchCount: 3, timestamp: 2.06, firstPosition: CGPoint(x: 0.56, y: 0.5))
+    )
+    _ = staggered.process(
+        TrackpadTouchSample(touchCount: 2, timestamp: 2.09, firstPosition: CGPoint(x: 0.56, y: 0.5))
+    )
+    let staggeredResult = staggered.process(
+        TrackpadTouchSample(touchCount: 0, timestamp: 2.12, firstPosition: nil)
+    )
+    expect(staggeredResult == .threeFingerTap, "手指分批落下和抬起仍识别完整三指轻点")
+
+    var bounced = TrackpadTapRecognizer()
+    _ = bounced.process(
+        TrackpadTouchSample(touchCount: 3, timestamp: 3, firstPosition: CGPoint(x: 0.5, y: 0.5))
+    )
+    _ = bounced.process(
+        TrackpadTouchSample(touchCount: 3, timestamp: 3.03, firstPosition: CGPoint(x: 0.5, y: 0.5))
+    )
+    _ = bounced.process(
+        TrackpadTouchSample(touchCount: 2, timestamp: 3.06, firstPosition: CGPoint(x: 0.5, y: 0.5))
+    )
+    _ = bounced.process(
+        TrackpadTouchSample(touchCount: 3, timestamp: 3.09, firstPosition: CGPoint(x: 0.5, y: 0.5))
+    )
+    let bouncedResult = bounced.process(
+        TrackpadTouchSample(touchCount: 0, timestamp: 3.12, firstPosition: nil)
+    )
+    expect(bouncedResult == nil, "抬起后重新落下的抖动序列不触发")
+}
+
+func testTrackpadShortcutServiceLifecycleAndFaults() async {
+    let suite = "tocode-trackpad-service-\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defaults.removePersistentDomain(forName: suite)
+    defer { defaults.removePersistentDomain(forName: suite) }
+
+    let store = TrackpadShortcutStore(defaults: defaults)
+    let monitor = MockMultitouchMonitor()
+    let permissions = MockTrackpadPermissions(trusted: true)
+    let poster = MockTrackpadShortcutPoster()
+    let alerts = MockAlerts()
+    let service = TrackpadShortcutService(
+        store: store,
+        monitor: monitor,
+        permissions: permissions,
+        poster: poster,
+        alerts: alerts
+    )
+    defer { service.shutdown() }
+
+    let shortcut = RecordedShortcut(
+        keyCode: 35,
+        modifiers: [.command, .shift],
+        keyLabel: "P"
+    )
+
+    monitor.shouldStart = false
+    expect(
+        !service.setShortcut(shortcut, for: .threeFingerTap),
+        "触控监听不可用时保存返回未生效"
+    )
+    expect(
+        service.shortcut(for: .threeFingerTap) == shortcut,
+        "触控监听不可用时仍保留配置"
+    )
+    expect(alerts.titles.contains("触控板监听未启动"), "触控监听不可用时明确提示")
+
+    monitor.shouldStart = true
+    expect(
+        service.setShortcut(shortcut, for: .threeFingerTap),
+        "触控监听恢复后配置生效"
+    )
+    expect(monitor.isRunning, "存在配置时启动触控监听")
+
+    monitor.emit(count: 3, timestamp: 1)
+    monitor.emit(count: 3, timestamp: 1.04)
+    monitor.emit(count: 0, timestamp: 1.12, position: nil)
+    _ = await waitUntil { poster.posted.count == 1 }
+    expect(poster.posted == [shortcut], "三指轻点发送已配置快捷键")
+
+    monitor.emit(count: 3, timestamp: 2, position: CGPoint(x: 0.2, y: 0.2))
+    monitor.emit(count: 3, timestamp: 2.04, position: CGPoint(x: 0.5, y: 0.2))
+    monitor.emit(count: 0, timestamp: 2.12, position: nil)
+    try? await Task.sleep(nanoseconds: 20_000_000)
+    expect(poster.posted.count == 1, "三指滑动不会发送快捷键")
+
+    service.setShortcut(shortcut, for: .fourFingerTap)
+    service.clearShortcut(for: .threeFingerTap)
+    expect(monitor.isRunning, "仍有四指配置时保持监听")
+    service.clearShortcut(for: .fourFingerTap)
+    expect(!monitor.isRunning, "清除最后一项配置后停止监听")
+
+    let deniedSuite = "tocode-trackpad-denied-\(UUID().uuidString)"
+    let deniedDefaults = UserDefaults(suiteName: deniedSuite)!
+    deniedDefaults.removePersistentDomain(forName: deniedSuite)
+    defer { deniedDefaults.removePersistentDomain(forName: deniedSuite) }
+    let deniedMonitor = MockMultitouchMonitor()
+    let deniedPermissions = MockTrackpadPermissions(trusted: false, requestResult: false)
+    let deniedAlerts = MockAlerts()
+    let deniedService = TrackpadShortcutService(
+        store: TrackpadShortcutStore(defaults: deniedDefaults),
+        monitor: deniedMonitor,
+        permissions: deniedPermissions,
+        poster: MockTrackpadShortcutPoster(),
+        alerts: deniedAlerts
+    )
+    defer { deniedService.shutdown() }
+
+    expect(
+        !deniedService.setShortcut(shortcut, for: .fiveFingerTap),
+        "辅助功能未授权时保存返回未生效"
+    )
+    expect(deniedPermissions.requestCount == 1, "辅助功能未授权时发起一次系统授权")
+    expect(
+        deniedService.shortcut(for: .fiveFingerTap) == shortcut,
+        "辅助功能未授权时仍保留配置"
+    )
+    expect(
+        deniedAlerts.titles.contains("触控板快捷键需要辅助功能权限"),
+        "辅助功能未授权时明确提示"
+    )
+}
+
+func testPrivateMultitouchIntegrationIfRequested() {
+    guard ProcessInfo.processInfo.environment["TOCODE_MULTITOUCH_PROBE"] == "1" else {
+        return
+    }
+
+    let monitor = PrivateMultitouchMonitor()
+    let started = monitor.start { _ in }
+    expect(started, "真机触控板探针可枚举并启动当前设备")
+    expect(monitor.isRunning, "真机触控板探针启动后报告运行中")
+    monitor.stop()
+    expect(!monitor.isRunning, "真机触控板探针可安全停止")
+}
+
 final class MockCommandQTarget: CommandQTargetProviding {
     let frontmost: MockFrontmost
     var override: FrontmostAppInfo?
@@ -3171,6 +3460,9 @@ struct TestRunnerMain {
         testFinderVisibilityService()
         testFinderSelectionService()
         testShortcutSettingsStoreDefaults()
+        testTrackpadShortcutStoreAndRecognizer()
+        await testTrackpadShortcutServiceLifecycleAndFaults()
+        testPrivateMultitouchIntegrationIfRequested()
         testShortcutEventClassification()
         testFinderMoveStateMachine()
         testDoubleCommandQStateMachine()

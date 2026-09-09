@@ -12,6 +12,7 @@ private final class UnboundWeChat: WeChatAssociationControlling {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var shortcuts: GlobalShortcutService?
+    private var trackpadShortcuts: TrackpadShortcutService?
     private var mouseWheel: MouseWheelReverseService?
     private var weChat: WeChatAssociationService?
     private var controller: StatusItemController?
@@ -22,6 +23,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let service = GlobalShortcutService()
         service.applySavedSettings()
         shortcuts = service
+        let trackpad = TrackpadShortcutService()
+        trackpad.applySavedSettings()
+        trackpadShortcuts = trackpad
         let wheel = MouseWheelReverseService()
         wheel.applySavedSettings()
         mouseWheel = wheel
@@ -54,6 +58,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let blackout = ScreenBlackoutService(overlay: ScreenBlackoutOverlay())
         controller = StatusItemController(
             shortcuts: service,
+            trackpadShortcuts: trackpad,
             mouseWheel: wheel,
             weChat: weChat,
             screenBlackout: blackout
@@ -98,6 +103,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ipcServer?.stop()
         ipcServer = nil
         shortcuts?.shutdown()
+        trackpadShortcuts?.shutdown()
         mouseWheel?.shutdown()
         weChat?.stop()
     }

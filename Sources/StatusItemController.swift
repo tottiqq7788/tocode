@@ -12,6 +12,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private let visibility = FinderVisibilityService()
     private let finderSelection = FinderSelectionService()
     private let shortcuts: GlobalShortcutService
+    private let trackpadShortcuts: TrackpadShortcutControlling
     private let mouseWheel: MouseWheelReverseService
     private let launchAtLogin: LaunchAtLoginControlling
     private let weChat: WeChatAssociationControlling
@@ -30,6 +31,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     init(
         shortcuts: GlobalShortcutService,
+        trackpadShortcuts: TrackpadShortcutControlling,
         mouseWheel: MouseWheelReverseService,
         launchAtLogin: LaunchAtLoginControlling = LaunchAtLoginService(),
         weChat: WeChatAssociationControlling,
@@ -40,6 +42,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         screenBlackout: ScreenBlackoutService? = nil
     ) {
         self.shortcuts = shortcuts
+        self.trackpadShortcuts = trackpadShortcuts
         self.mouseWheel = mouseWheel
         self.launchAtLogin = launchAtLogin
         self.weChat = weChat
@@ -228,7 +231,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         )
         weChatItem.submenu = weChatMenu
 
-        // mac 子菜单：自包含的全屏临时黑屏叠加层，任意按键或鼠标点击解除。
+        // mac 子菜单：临时黑屏与触控板轻点快捷键。
         let macItem = menu.addItem(withTitle: "mac", action: nil, keyEquivalent: "")
         macItem.image = NSImage(systemSymbolName: "display", accessibilityDescription: nil)
         let macMenu = NSMenu()
@@ -240,6 +243,32 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         )
         blackoutItem.target = self
         blackoutItem.image = NSImage(systemSymbolName: "display.trianglebadge.exclamationmark", accessibilityDescription: nil)
+
+        let trackpadItem = macMenu.addItem(
+            withTitle: "触控板",
+            action: nil,
+            keyEquivalent: ""
+        )
+        trackpadItem.image = NSImage(
+            systemSymbolName: "hand.tap",
+            accessibilityDescription: nil
+        )
+        let trackpadMenu = NSMenu()
+        trackpadMenu.autoenablesItems = false
+        for gesture in TrackpadTapGesture.allCases {
+            let item = trackpadMenu.addItem(
+                withTitle: gesture.title,
+                action: #selector(configureTrackpadShortcut(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = gesture.rawValue
+            ShortcutMenuAppearance.apply(
+                to: item,
+                enabled: trackpadShortcuts.shortcut(for: gesture) != nil
+            )
+        }
+        trackpadItem.submenu = trackpadMenu
         macItem.submenu = macMenu
 
         let settingsItem = menu.addItem(withTitle: "设置", action: nil, keyEquivalent: "")
@@ -554,6 +583,29 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     /// 显示临时黑屏；再次点击时若已显示则为 no-op。
     @objc private func activateScreenBlackout() {
         screenBlackout.activate()
+    }
+
+    @objc private func configureTrackpadShortcut(_ sender: NSMenuItem) {
+        guard
+            let rawValue = sender.representedObject as? Int,
+            let gesture = TrackpadTapGesture(rawValue: rawValue)
+        else {
+            return
+        }
+
+        let existing = trackpadShortcuts.shortcut(for: gesture)
+        switch ShortcutRecorderPrompt.prompt(for: gesture, existing: existing) {
+        case .save(let shortcut):
+            _ = trackpadShortcuts.setShortcut(shortcut, for: gesture)
+        case .clear:
+            trackpadShortcuts.clearShortcut(for: gesture)
+        case .cancel:
+            break
+        }
+        ShortcutMenuAppearance.apply(
+            to: sender,
+            enabled: trackpadShortcuts.shortcut(for: gesture) != nil
+        )
     }
 
     /// 复制当前访达选中文件或文件夹本身的绝对路径。
