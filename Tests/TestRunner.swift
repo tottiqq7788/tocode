@@ -1656,6 +1656,38 @@ func testKeyboardShortcutRemapServiceLifecycleAndFaults() {
         "辅助功能拒绝时明确提示"
     )
 
+    let installFailureSuite = "tocode-keyboard-install-failure-\(UUID().uuidString)"
+    let installFailureDefaults = UserDefaults(suiteName: installFailureSuite)!
+    installFailureDefaults.removePersistentDomain(forName: installFailureSuite)
+    defer { installFailureDefaults.removePersistentDomain(forName: installFailureSuite) }
+    let installFailurePermissions = MockShortcutPermissions()
+    installFailurePermissions.accessibility = true
+    let installFailureTap = MockKeyboardShortcutRemapTap()
+    installFailureTap.installShouldFail = true
+    let installFailureAlerts = MockAlerts()
+    let installFailureService = KeyboardShortcutRemapService(
+        store: KeyboardShortcutMappingStore(defaults: installFailureDefaults),
+        permissions: installFailurePermissions,
+        tap: installFailureTap,
+        poster: MockTrackpadShortcutPoster(),
+        scheduler: ManualScheduler(),
+        alerts: installFailureAlerts
+    )
+    defer { installFailureService.shutdown() }
+    _ = installFailureService.saveMapping(
+        KeyboardShortcutMappingDraft(
+            name: "安装失败仍保存",
+            source: source,
+            target: target
+        )
+    )
+    expect(installFailureService.mappings.count == 1, "键盘钩子创建失败时仍保留规则")
+    expect(!installFailureTap.isInstalled, "键盘钩子创建失败时监听保持停止")
+    expect(
+        installFailureAlerts.titles.contains("键盘映射监听未启动"),
+        "键盘钩子创建失败时明确提示"
+    )
+
     tap.isEnabled = false
     tap.reenableShouldFail = true
     _ = service.saveMapping(
