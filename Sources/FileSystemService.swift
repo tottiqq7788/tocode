@@ -79,6 +79,28 @@ struct FileSystemService {
         return path
     }
 
+    /// 在目录中创建空文件夹，返回创建后的完整路径。
+    func createDirectory(in directory: String, name rawName: String) throws -> String {
+        let trimmed = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw FileSystemServiceError.emptyFileName
+        }
+        let name = (trimmed as NSString).lastPathComponent
+        guard !name.isEmpty else {
+            throw FileSystemServiceError.emptyFileName
+        }
+        let path = (directory as NSString).appendingPathComponent(name)
+        guard !fm.fileExists(atPath: path) else {
+            throw FileSystemServiceError.fileAlreadyExists(name)
+        }
+        do {
+            try fm.createDirectory(atPath: path, withIntermediateDirectories: false)
+        } catch {
+            throw FileSystemServiceError.createFailed(name)
+        }
+        return path
+    }
+
     /// 把路径移入废纸篓（可恢复）。
     func trashItem(at path: String) throws {
         var resultingURL: NSURL?

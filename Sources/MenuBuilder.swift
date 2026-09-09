@@ -158,9 +158,14 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
 
     @objc private func newItem(_ sender: NSMenuItem) {
         guard let directory = sender.representedObject as? String else { return }
-        guard let input = NewFilePrompt.prompt(in: directory) else { return }
+        guard let input = NewItemPrompt.prompt(in: directory) else { return }
         do {
-            _ = try fs.createFile(in: directory, name: input.name, format: input.format)
+            switch input.kind {
+            case .file:
+                _ = try fs.createFile(in: directory, name: input.name, format: input.format)
+            case .folder:
+                _ = try fs.createDirectory(in: directory, name: input.name)
+            }
         } catch {
             presentError(error, title: "新增失败")
         }
@@ -206,20 +211,42 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
     }
 }
 
-/// 新增文件小窗口：输入文件名并选择常见格式。
+/// 新增窗口：可选择新增文件夹或新增文件，文件支持选择常见格式。
 @MainActor
-enum NewFilePrompt {
-    static func prompt(in directory: String) -> (name: String, format: FileFormat)? {
+enum NewItemPrompt {
+    enum Kind {
+        case file
+        case folder
+    }
+
+    struct Input {
+        let kind: Kind
+        let name: String
+        let format: FileFormat
+    }
+
+    static func prompt(in directory: String) -> Input? {
         let alert = NSAlert()
         alert.alertStyle = .informational
-        alert.messageText = "新增文件"
-        alert.informativeText = "在「\((directory as NSString).lastPathComponent)」中新建一个空文件。"
+        alert.messageText = "新增"
+        alert.informativeText = "在「\(directory as NSString).lastPathComponent)」中新建文件或文件夹。"
         alert.addButton(withTitle: "创建")
         alert.addButton(withTitle: "取消")
 
-        let nameField = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
-        nameField.placeholderString = "文件名（可省略扩展名）"
+        let typeControl = NSSegmentedControl(
+            labels: ["文件夹", "文件"],
+            trackingMode: .selectOne,
+            target: nil,
+            action: nil
+        )
+        typeControl.selectedSegment = 0
+        typeControl.translatesAutoresizingMaskIntoConstraints = false
 
+        let nameLabel = NSTextField(labelWithString: "名称")
+        let nameField = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        nameField.placeholderString = "文件夹名称"
+
+        let formatLabel = NSTextField(labelWithString: "文件格式")
         let formatPopUp = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 260, height: 24), pullsDown: false)
         for format in FileFormat.allCases {
             formatPopUp.addItem(withTitle: "\(format.displayName)（.\(format.fileExtension)）")
@@ -230,29 +257,52 @@ enum NewFilePrompt {
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 8
-        let nameLabel = NSTextField(labelWithString: "文件名")
-        let formatLabel = NSTextField(labelWithString: "格式")
-        nameLabel.translatesAutoresizingMaskIntoConstraints = false
-        formatLabel.translatesAutoresizingMaskIntoConstraints = false
-        nameField.translatesAutoresizingMaskIntoConstraints = false
-        formatPopUp.translatesAutoresizingMaskIntoConstraints = false
-        stack.addArrangedSubview(nameLabel)
-        stack.addArrangedSubview(nameField)
-        stack.addArrangedSubview(formatLabel)
-        stack.addArrangedSubview(formatPopUp)
+        for v in [typeControl, nameLabel, nameField, formatLabel, formatPopUp] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            stack.addArrangedSubview(v)
+        }
         NSLayoutConstraint.activate([
+            typeControl.widthAnchor.constraint(equalToConstant: 260),
             nameField.widthAnchor.constraint(equalToConstant: 260),
             formatPopUp.widthAnchor.constraint(equalToConstant: 260)
         ])
-        stack.frame = NSRect(x: 0, y: 0, width: 260, height: 110)
+        stack.frame = NSRect(x: 0, y: 0, width: 260, height: 158)
 
+        func updateVisibility() {
+            let isFile = typeControl.selectedSegment == 1
+            nameLabel.stringValue = isFile ? "文件名" : "文件夹名称"
+            nameField.placeholderString = isFile ? "文件名（可省略扩展名）" : "文件夹名称"
+            formatLabel.isHidden = !isFile
+            formatPopUp.isHidden = !isFile
+        }
+        updateVisibility()
+
+        let updater = TypeVisibilityUpdater(onChange: updateVisibility)
+        typeControl.target = updater
+        typeControl.action = #selector(TypeVisibilityUpdater.action(_:))
+        // 强引用 updater，避免 target 被释放。
+        withExtendedLifetime(updater) {}
         alert.accessoryView = stack
         alert.window.initialFirstResponder = nameField
 
         guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        let kind: Kind = typeControl.selectedSegment == 1 ? .file : .folder
         let selected = formatPopUp.selectedItem?.representedObject as? String
         let format = selected.flatMap { FileFormat(rawValue: $0) } ?? .txt
-        return (nameField.stringValue, format)
+        return Input(kind: kind, name: nameField.stringValue, format: format)
+    }
+}
+
+/// NSSegmentedControl 的目标代理：用于切换新增类型时更新字段可见性。
+@MainActor
+private final class TypeVisibilityUpdater: NSObject {
+    private let onChange: () -> Void
+    init(onChange: @escaping () -> Void) {
+        self.onChange = onChange
+    }
+
+    @objc func action(_ sender: Any?) {
+        onChange()
     }
 }
 
