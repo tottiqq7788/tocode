@@ -125,12 +125,29 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         menu.autoenablesItems = false
         let syncEnabled = codexSync.syncEnabled
 
-        // 访达访问：直接打开当前左键目录对应的访达目录。
-        let finderAccess = menu.addItem(withTitle: "访达访问", action: #selector(openFinderAtRoot), keyEquivalent: "")
-        finderAccess.target = self
-        finderAccess.image = NSImage(systemSymbolName: "macwindow", accessibilityDescription: nil)
+        // 访达：访问路径、复制路径、目录初始化。
+        let finderItem = menu.addItem(withTitle: "访达", action: nil, keyEquivalent: "")
+        finderItem.image = NSImage(systemSymbolName: "macwindow", accessibilityDescription: nil)
+        let finderMenu = NSMenu()
+        finderMenu.autoenablesItems = false
 
-        // 目录：读取剪贴板、更改目录、访达目录初始化、重置初始目录。
+        let accessPath = finderMenu.addItem(withTitle: "访问路径", action: #selector(openFinderAtRoot), keyEquivalent: "")
+        accessPath.target = self
+        accessPath.image = NSImage(systemSymbolName: "macwindow", accessibilityDescription: nil)
+
+        let copyFinderPath = finderMenu.addItem(withTitle: "复制路径", action: #selector(copyFinderSelectedPath), keyEquivalent: "")
+        copyFinderPath.target = self
+        copyFinderPath.image = NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: nil)
+
+        if case .success = finderSelection.resolveInitializationDirectory() {
+            let initRoot = finderMenu.addItem(withTitle: "目录初始化", action: #selector(initRootFromFinder), keyEquivalent: "")
+            initRoot.target = self
+            initRoot.image = NSImage(systemSymbolName: "folder.badge.gearshape", accessibilityDescription: nil)
+        }
+
+        finderItem.submenu = finderMenu
+
+        // 目录：读取剪贴板、更改目录、重置初始目录。
         let directoryItem = menu.addItem(withTitle: "目录", action: nil, keyEquivalent: "")
         directoryItem.image = NSImage(systemSymbolName: "folder", accessibilityDescription: nil)
         let directoryMenu = NSMenu()
@@ -143,12 +160,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         let changeDir = directoryMenu.addItem(withTitle: "更改目录", action: #selector(chooseRoot), keyEquivalent: "")
         changeDir.target = self
         changeDir.image = NSImage(systemSymbolName: "folder.badge.plus", accessibilityDescription: nil)
-
-        if case .success = finderSelection.resolveInitializationDirectory() {
-            let initRoot = directoryMenu.addItem(withTitle: "访达目录初始化", action: #selector(initRootFromFinder), keyEquivalent: "")
-            initRoot.target = self
-            initRoot.image = NSImage(systemSymbolName: "folder.badge.gearshape", accessibilityDescription: nil)
-        }
 
         let resetRoot = directoryMenu.addItem(withTitle: "重置初始目录", action: #selector(resetRoot), keyEquivalent: "")
         resetRoot.target = self
@@ -543,6 +554,12 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     /// 显示临时黑屏；再次点击时若已显示则为 no-op。
     @objc private func activateScreenBlackout() {
         screenBlackout.activate()
+    }
+
+    /// 复制当前访达选中文件或文件夹本身的绝对路径。
+    @objc private func copyFinderSelectedPath() {
+        guard case .success(let path) = finderSelection.resolveSelectedItemPath() else { return }
+        clipboard.copyPath(path)
     }
 
     /// 在访达中打开当前左键目录对应的根目录。

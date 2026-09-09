@@ -63,6 +63,31 @@ struct FinderSelectionService {
         return .success((parent as NSString).standardizingPath)
     }
 
+    /// 解析访达当前恰好单选的文件或文件夹本身路径（不做目录归约）。
+    func resolveSelectedItemPath() -> Result<String, FinderSelectionError> {
+        switch script.execute(Self.selectionScript) {
+        case .failure(let error):
+            return .failure(error)
+        case .success(let raw):
+            let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return .failure(.notExactlyOne) }
+            let rawPath: String
+            if text.hasPrefix("file:") {
+                guard let url = URL(string: text), url.isFileURL else {
+                    return .failure(.invalidPath)
+                }
+                rawPath = url.path
+            } else {
+                rawPath = text
+            }
+            let path = (rawPath as NSString).standardizingPath
+            guard FileManager.default.fileExists(atPath: path) else {
+                return .failure(.invalidPath)
+            }
+            return .success(path)
+        }
+    }
+
     static let selectionScript = """
         tell application "Finder"
             set selectedItems to selection
