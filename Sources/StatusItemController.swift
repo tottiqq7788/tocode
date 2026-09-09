@@ -122,13 +122,13 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         commandPollingTimer = nil
     }
 
-    /// 右键：功能菜单。目录子菜单含「访达目录初始化」；「设置」含子项切换隐藏文件。
+    /// 右键：功能菜单。访达与 mac 子菜单分别收拢相关系统控制。
     private func showActionMenu() {
         let menu = NSMenu()
         menu.autoenablesItems = false
         let syncEnabled = codexSync.syncEnabled
 
-        // 访达：访问路径、复制路径、目录初始化。
+        // 访达：路径操作、隐藏文件与 Finder 专属快捷键。
         let finderItem = menu.addItem(withTitle: "访达", action: nil, keyEquivalent: "")
         finderItem.image = NSImage(systemSymbolName: "macwindow", accessibilityDescription: nil)
         let finderMenu = NSMenu()
@@ -147,6 +147,28 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             initRoot.target = self
             initRoot.image = NSImage(systemSymbolName: "folder.badge.gearshape", accessibilityDescription: nil)
         }
+
+        finderMenu.addItem(.separator())
+        let showAll = visibility.currentShowAllFiles()
+        let toggleTitle = showAll ? "隐藏隐藏文件" : "显示隐藏文件"
+        let toggle = finderMenu.addItem(withTitle: toggleTitle, action: #selector(toggleHiddenVisibility), keyEquivalent: "")
+        toggle.target = self
+        toggle.image = NSImage(
+            systemSymbolName: showAll ? "eye.slash" : "eye",
+            accessibilityDescription: nil
+        )
+        addShortcutToggle(
+            to: finderMenu,
+            title: "x/v移动文件",
+            enabled: shortcuts.isFinderMoveEffective,
+            action: #selector(toggleFinderMoveHotkeys(_:))
+        )
+        addShortcutToggle(
+            to: finderMenu,
+            title: "⌘Q强关访达",
+            enabled: shortcuts.isFinderCommandQEffective,
+            action: #selector(toggleFinderCommandQ(_:))
+        )
 
         finderItem.submenu = finderMenu
 
@@ -231,7 +253,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         )
         weChatItem.submenu = weChatMenu
 
-        // mac 子菜单：临时黑屏与触控板轻点快捷键。
+        // mac 子菜单：显示、触控板、鼠标滚轮与全局退出保护。
         let macItem = menu.addItem(withTitle: "mac", action: nil, keyEquivalent: "")
         macItem.image = NSImage(systemSymbolName: "display", accessibilityDescription: nil)
         let macMenu = NSMenu()
@@ -269,8 +291,29 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             )
         }
         trackpadItem.submenu = trackpadMenu
+
+        macMenu.addItem(.separator())
+        addShortcutToggle(
+            to: macMenu,
+            title: MouseWheelReverseStore.verticalTitle,
+            enabled: mouseWheel.isVerticalEffective,
+            action: #selector(toggleReverseVerticalWheel(_:))
+        )
+        addShortcutToggle(
+            to: macMenu,
+            title: MouseWheelReverseStore.horizontalTitle,
+            enabled: mouseWheel.isHorizontalEffective,
+            action: #selector(toggleReverseHorizontalWheel(_:))
+        )
+        addShortcutToggle(
+            to: macMenu,
+            title: "双击⌘Q",
+            enabled: shortcuts.isDoubleCommandQEffective,
+            action: #selector(toggleDoubleCommandQ(_:))
+        )
         macItem.submenu = macMenu
 
+        // 设置：应用级启动项。
         let settingsItem = menu.addItem(withTitle: "设置", action: nil, keyEquivalent: "")
         settingsItem.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil)
         let settings = NSMenu()
@@ -280,44 +323,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             title: LaunchAtLoginService.menuTitle,
             enabled: launchAtLogin.isEnabled,
             action: #selector(toggleLaunchAtLogin(_:))
-        )
-        addShortcutToggle(
-            to: settings,
-            title: MouseWheelReverseStore.verticalTitle,
-            enabled: mouseWheel.isVerticalEffective,
-            action: #selector(toggleReverseVerticalWheel(_:))
-        )
-        addShortcutToggle(
-            to: settings,
-            title: MouseWheelReverseStore.horizontalTitle,
-            enabled: mouseWheel.isHorizontalEffective,
-            action: #selector(toggleReverseHorizontalWheel(_:))
-        )
-        let showAll = visibility.currentShowAllFiles()
-        let toggleTitle = showAll ? "隐藏隐藏文件" : "显示隐藏文件"
-        let toggle = settings.addItem(withTitle: toggleTitle, action: #selector(toggleHiddenVisibility), keyEquivalent: "")
-        toggle.target = self
-        toggle.image = NSImage(
-            systemSymbolName: showAll ? "eye.slash" : "eye",
-            accessibilityDescription: nil
-        )
-        addShortcutToggle(
-            to: settings,
-            title: "x/v移动文件",
-            enabled: shortcuts.isFinderMoveEffective,
-            action: #selector(toggleFinderMoveHotkeys(_:))
-        )
-        addShortcutToggle(
-            to: settings,
-            title: "双击⌘Q",
-            enabled: shortcuts.isDoubleCommandQEffective,
-            action: #selector(toggleDoubleCommandQ(_:))
-        )
-        addShortcutToggle(
-            to: settings,
-            title: "⌘Q强关访达",
-            enabled: shortcuts.isFinderCommandQEffective,
-            action: #selector(toggleFinderCommandQ(_:))
         )
         settingsItem.submenu = settings
 
