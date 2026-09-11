@@ -105,9 +105,7 @@ protocol CodexModelSwitching: AnyObject, Sendable {
 enum CodexModelCatalog {
     private static let verifiedIDs: Set<String> = [
         "v_model/gpt",
-        "v_model/gpt-5.5",
         "v_model/gpt-6-astra",
-        "gpt-5.6-luna",
         "anthropic/v_model/claude-opus",
         "anthropic/v_model/claude-opus-4-6",
         "anthropic/v_model/claude-sonnet",
@@ -121,10 +119,8 @@ enum CodexModelCatalog {
     ]
 
     private static let exactNames: [String: String] = [
-        "v_model/gpt": "GPT 默认路由",
-        "v_model/gpt-5.5": "GPT-5.6 Sol",
+        "v_model/gpt": "GPT-5.6 Sol",
         "v_model/gpt-6-astra": "GPT-6 Astra",
-        "gpt-5.6-luna": "GPT-5.6 Luna",
         "anthropic/v_model/claude-opus": "Claude Opus",
         "anthropic/v_model/claude-opus-4-6": "Claude Opus 4.6",
         "anthropic/v_model/claude-sonnet": "Claude Sonnet",

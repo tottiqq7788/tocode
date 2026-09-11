@@ -90,10 +90,10 @@ final class MockTocodeWeChat: WeChatAssociationControlling {
 
 final class MockTocodeCodexModels: CodexModelSwitching {
     var state: Result<CodexModelState, Error> = .success(
-        CodexModelState(liveModelID: "v_model/gpt-5.5", providerModelID: "v_model/gpt-5.5", providerID: "anker", providerName: "Anker")
+        CodexModelState(liveModelID: "v_model/gpt", providerModelID: "v_model/gpt", providerID: "anker", providerName: "Anker")
     )
     var fetchResult: Result<[CodexModelDescriptor], Error> = .success([
-        CodexModelDescriptor(id: "v_model/gpt-5.5", displayName: "GPT-5.6 Sol", source: .general, compatibility: .verified)
+        CodexModelDescriptor(id: "v_model/gpt", displayName: "GPT-5.6 Sol", source: .general, compatibility: .verified)
     ])
     var switchError: Error?
     var switchedIDs: [String] = []

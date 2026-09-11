@@ -288,7 +288,7 @@ private func makeCodexModelFixture() -> CodexModelFixture {
     let configPath = root.appendingPathComponent("config.toml").path
     let template = """
     model_provider = "custom"
-    model = "v_model/gpt-5.5"
+    model = "v_model/gpt"
     model_reasoning_effort = "high"
 
     [model_providers.custom]
@@ -328,7 +328,7 @@ private func makeCodexModelFixture() -> CodexModelFixture {
 
     let live = """
     model_provider = "custom"
-    model = "v_model/gpt-5.5"
+    model = "v_model/gpt"
     model_reasoning_effort = "high"
 
     [desktop]
@@ -373,13 +373,13 @@ func testCodexModelTOMLAndCatalog() {
     let source = """
     # model = "commented"
     model_provider = "custom"
-    model = "v_model/gpt-5.5" # current
+    model = "v_model/gpt" # current
 
     [desktop]
     model = "nested"
     """
     expect(
-        (try? CodexTOMLModel.read(from: source, location: "test")) == "v_model/gpt-5.5",
+        (try? CodexTOMLModel.read(from: source, location: "test")) == "v_model/gpt",
         "模型解析只读取唯一顶层 model"
     )
     let replaced = try! CodexTOMLModel.replacing(
@@ -398,9 +398,13 @@ func testCodexModelTOMLAndCatalog() {
         "只有表内 model 时被拒绝"
     )
 
-    let sol = CodexModelCatalog.descriptor(for: "v_model/gpt-5.5")
-    expect(sol.displayName == "GPT-5.6 Sol", "Sol 使用友好名称")
-    expect(sol.compatibility == .verified, "Sol 标记为已验证")
+    let sol = CodexModelCatalog.descriptor(for: "v_model/gpt")
+    expect(sol.displayName == "GPT-5.6 Sol", "Sol 路由使用友好名称")
+    expect(sol.compatibility == .verified, "Sol 路由标记为已验证")
+    let retired = CodexModelCatalog.descriptor(for: "v_model/gpt-5.5")
+    expect(retired.compatibility == .unverified, "已下线旧 ID 不再标记为已验证")
+    let luna = CodexModelCatalog.descriptor(for: "gpt-5.6-luna")
+    expect(luna.compatibility == .unverified, "不在实时目录的 Luna ID 不再标记为已验证")
     let appsKimi = CodexModelCatalog.descriptor(for: "apps/v_model/kimi")
     expect(appsKimi.displayName == "Kimi · Apps", "重名模型显示来源")
     if case .unsupported = CodexModelCatalog.descriptor(for: "apps/v_model/glm-image").compatibility {
@@ -414,7 +418,7 @@ func testCodexModelTOMLAndCatalog() {
         expect(false, "已知 /responses 不兼容模型被禁用")
     }
     let deduplicated = CodexModelCatalog.descriptors(for: [
-        "apps/v_model/kimi", "apps/v_model/kimi", "v_model/gpt-5.5"
+        "apps/v_model/kimi", "apps/v_model/kimi", "v_model/gpt"
     ])
     expect(deduplicated.count == 2, "实时模型目录按 ID 去重")
 }
@@ -427,8 +431,8 @@ func testCodexModelSwitchIntegrationAndFaults() {
         liveConfigPath: fixture.configPath
     )
     let initial = try! service.currentState()
-    expect(initial.liveModelID == "v_model/gpt-5.5", "模型状态读取实时配置")
-    expect(initial.providerModelID == "v_model/gpt-5.5", "模型状态读取 Provider 模板")
+    expect(initial.liveModelID == "v_model/gpt", "模型状态读取实时配置")
+    expect(initial.providerModelID == "v_model/gpt", "模型状态读取 Provider 模板")
     expect(initial.isConsistent, "初始双配置一致")
 
     try! service.switchModel(to: "v_model/gpt-6-astra")
@@ -457,7 +461,7 @@ func testCodexModelSwitchIntegrationAndFaults() {
         }
     )
     expect(
-        (try? failedWriter.switchModel(to: "v_model/gpt-5.5")) == nil,
+        (try? failedWriter.switchModel(to: "v_model/gpt")) == nil,
         "实时配置写入失败时切换失败"
     )
     let afterFailure = try! service.currentState()
@@ -491,7 +495,7 @@ func testCodexModelSwitchIntegrationAndFaults() {
             httpVersion: nil,
             headerFields: nil
         )!
-        let data = Data(#"{"data":[{"id":"v_model/gpt-5.5"},{"id":"apps/v_model/glm-image"},{"id":"v_model/gpt-5.5"}]}"#.utf8)
+        let data = Data(#"{"data":[{"id":"v_model/gpt"},{"id":"apps/v_model/glm-image"},{"id":"v_model/gpt"}]}"#.utf8)
         return (response, data)
     }
     let loaded = DispatchSemaphore(value: 0)
