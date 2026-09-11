@@ -21,6 +21,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private let codexSync: CodexSyncSettingsStore
     private let codexModels: CodexModelSwitching
     private let codexRestarter: CodexApplicationRestarting
+    private let ankerCredentials: AnkerCredentialUpdating
     private let screenBlackout: ScreenBlackoutService
     private var activeModelMenu: NSMenu?
     private var activeModelParentItem: NSMenuItem?
@@ -28,6 +29,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private var modelDescriptors: [String: CodexModelDescriptor] = [:]
     private var modelLoadGeneration = UUID()
     private var isSwitchingModel = false
+    private var isUpdatingCredentials = false
     private var commandPollingTimer: Timer?
 
     init(
@@ -41,6 +43,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         codexSync: CodexSyncSettingsStore = CodexSyncSettingsStore(),
         codexModels: CodexModelSwitching = CodexModelSwitchService(),
         codexRestarter: CodexApplicationRestarting = CodexApplicationRestarter(),
+        ankerCredentials: AnkerCredentialUpdating = AnkerCredentialService(),
         screenBlackout: ScreenBlackoutService? = nil
     ) {
         self.shortcuts = shortcuts
@@ -53,6 +56,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         self.codexSync = codexSync
         self.codexModels = codexModels
         self.codexRestarter = codexRestarter
+        self.ankerCredentials = ankerCredentials
         self.screenBlackout = screenBlackout ?? ScreenBlackoutService(overlay: ScreenBlackoutOverlay())
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         super.init()
@@ -356,7 +360,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         )
         macItem.submenu = macMenu
 
-        // 设置：应用级启动项。
+        // 设置：应用级启动项与本机安克凭据。
         let settingsItem = menu.addItem(withTitle: "设置", action: nil, keyEquivalent: "")
         settingsItem.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil)
         let settings = NSMenu()
@@ -367,6 +371,13 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             enabled: launchAtLogin.isEnabled,
             action: #selector(toggleLaunchAtLogin(_:))
         )
+        let ankerKey = settings.addItem(
+            withTitle: isUpdatingCredentials ? "安克密钥（保存中…）" : AnkerCredentialPrompt.menuTitle,
+            action: #selector(changeAnkerCredential), keyEquivalent: ""
+        )
+        ankerKey.target = self
+        ankerKey.image = NSImage(systemSymbolName: "key", accessibilityDescription: nil)
+        ankerKey.isEnabled = !isUpdatingCredentials && !isSwitchingModel
         settingsItem.submenu = settings
 
         menu.addItem(.separator())
@@ -537,7 +548,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     @objc private func selectCodexModel(_ sender: NSMenuItem) {
-        guard !isSwitchingModel,
+        guard !isSwitchingModel, !isUpdatingCredentials,
               let modelID = sender.representedObject as? String,
               let descriptor = modelDescriptors[modelID],
               modelID != currentModelID else {
@@ -577,6 +588,19 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                     self.isSwitchingModel = false
                     self.notifyCodexModelFailure(error.localizedDescription)
                 }
+            }
+        }
+    }
+
+    @objc private func changeAnkerCredential() {
+        guard !isUpdatingCredentials, !isSwitchingModel,
+              let key = AnkerCredentialPrompt.prompt() else { return }
+        isUpdatingCredentials = true
+        DispatchQueue.global(qos: .userInitiated).async { [ankerCredentials] in
+            let result = Result { try ankerCredentials.update(key) }
+            DispatchQueue.main.async { [weak self] in
+                self?.isUpdatingCredentials = false
+                AnkerCredentialPrompt.showResult(result)
             }
         }
     }

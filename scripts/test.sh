@@ -6,12 +6,14 @@ mkdir -p build
 swiftc Tests/TestRunner.swift \
   Tests/WeChatTestSupport.swift \
   Tests/TocodeCommandTestSupport.swift \
+  Tests/AnkerCredentialTests.swift \
   Sources/FileSystemService.swift \
   Sources/ClipboardService.swift \
   Sources/RootPathStore.swift \
   Sources/CodexProjectService.swift \
   Sources/CodexSyncSettingsStore.swift \
   Sources/CodexModelSwitchService.swift \
+  Sources/AnkerCredentialService.swift \
   Sources/CodexApplicationRestarter.swift \
   Sources/FinderVisibilityService.swift \
   Sources/FinderSelectionService.swift \
