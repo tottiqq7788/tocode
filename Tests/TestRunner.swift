@@ -1536,20 +1536,32 @@ func testKeyboardShortcutMappingActionTargets() {
 
     let left = KeyboardMappingAction.switchDesktopLeft
     let right = KeyboardMappingAction.switchDesktopRight
-    expect(KeyboardMappingAction.allCases.count == 2, "本期只提供两个内置功能")
+    expect(KeyboardMappingAction.allCases.count == 18, "本期提供桌面切换与 Tocode 一次性动作/开关")
+    expect(
+        KeyboardMappingAction.allCases.contains(.blackout)
+            && KeyboardMappingAction.allCases.contains(.quit)
+            && !KeyboardMappingAction.allCases.contains { $0.rawValue.contains("model") },
+        "收录临时黑屏与退出，不收录模型切换"
+    )
     expect(left.title == "向左切换桌面", "向左功能提供中文名称")
     expect(right.title == "向右切换桌面", "向右功能提供中文名称")
     expect(
-        left.shortcut == RecordedShortcut(keyCode: 123, modifiers: [.control], keyLabel: "\u{2190}"),
-        "向左切换桌面解析为系统 ⌃←"
+        left.synthesizedShortcut == RecordedShortcut(keyCode: 123, modifiers: [.control, .function], keyLabel: "\u{2190}"),
+        "向左切换桌面解析为系统 ⌃←（含方向键自带的 Fn）"
     )
     expect(
-        right.shortcut == RecordedShortcut(keyCode: 124, modifiers: [.control], keyLabel: "\u{2192}"),
-        "向右切换桌面解析为系统 ⌃→"
+        right.synthesizedShortcut == RecordedShortcut(keyCode: 124, modifiers: [.control, .function], keyLabel: "\u{2192}"),
+        "向右切换桌面解析为系统 ⌃→（含方向键自带的 Fn）"
+    )
+    expect(KeyboardMappingAction.blackout.synthesizedShortcut == nil, "临时黑屏不走组合键合成")
+    expect(KeyboardMappingAction.blackout.command == .blackout, "临时黑屏复用命令执行器")
+    expect(
+        KeyboardShortcutMappingTarget.action(right).resolvedShortcut == right.synthesizedShortcut,
+        "桌面功能目标解析为固定组合键"
     )
     expect(
-        KeyboardShortcutMappingTarget.action(right).resolvedShortcut == right.shortcut,
-        "功能目标解析为固定组合键"
+        KeyboardShortcutMappingTarget.action(.blackout).remapStep() == .invoke(.blackout),
+        "Tocode 动作目标发出 invoke"
     )
     expect(
         KeyboardShortcutMappingTarget.action(left).displayText == "向左切换桌面",
@@ -1625,6 +1637,17 @@ func testKeyboardShortcutMappingActionTargets() {
     } else {
         expect(false, "允许把 ⌃← 重映射为其他目标")
     }
+    if case .success = store.save(
+        KeyboardShortcutMappingDraft(
+            name: "黑屏不自指",
+            source: RecordedShortcut(keyCode: 2, modifiers: [.control], keyLabel: "D"),
+            target: .action(.blackout)
+        )
+    ) {
+        expect(true, "Tocode 动作没有自身触发键冲突")
+    } else {
+        expect(false, "Tocode 动作没有自身触发键冲突")
+    }
 
     var engine = KeyboardShortcutRemapEngine(mappings: [actionMapping])
     let down = KeyboardShortcutEventSnapshot(
@@ -1652,6 +1675,22 @@ func testKeyboardShortcutMappingActionTargets() {
         isSynthesized: true
     )
     expect(engine.process(synthesized) == .pass, "功能合成出的 ⌃← 不再进入重映射")
+    let blackoutSource = RecordedShortcut(keyCode: 14, modifiers: [.command], keyLabel: "E")
+    let blackoutMapping = KeyboardShortcutMapping(
+        id: UUID(),
+        name: "黑屏",
+        source: blackoutSource,
+        target: .action(.blackout)
+    )
+    var invokeEngine = KeyboardShortcutRemapEngine(mappings: [blackoutMapping])
+    let invokeDown = KeyboardShortcutEventSnapshot(
+        keyCode: blackoutSource.keyCode,
+        modifiers: blackoutSource.modifiers,
+        isKeyDown: true,
+        isAutoRepeat: false,
+        isSynthesized: false
+    )
+    expect(invokeEngine.process(invokeDown) == .invoke(.blackout), "功能规则命中 Tocode 动作时 invoke")
 
     let serviceSuite = "tocode-keyboard-action-service-\(UUID().uuidString)"
     let serviceDefaults = UserDefaults(suiteName: serviceSuite)!
@@ -1723,6 +1762,122 @@ func testKeyboardShortcutMappingActionTargets() {
         deniedAlerts.titles.contains("键盘映射需要辅助功能权限"),
         "功能规则故障时同样明确提示"
     )
+}
+
+@MainActor
+func testKeyboardMappingTargetEditorRetainsBlackout() {
+    let editor = KeyboardMappingTargetEditor(target: .action(.blackout))
+    expect(editor.target == .action(.blackout), "编辑已有黑屏规则时回填并保存临时黑屏")
+    let desktop = KeyboardMappingTargetEditor(target: .action(.switchDesktopLeft))
+    expect(desktop.target == .action(.switchDesktopLeft), "编辑桌面规则时回填向左切换桌面")
+    editor.detach()
+    desktop.detach()
+}
+
+func testKeyboardMappingActionDispatchAndYield() {
+    let dispatcher = KeyboardMappingActionDispatcher()
+    var executed: [TocodeCommand] = []
+    var notices: [(String, String)] = []
+    var syncOn = false
+    var openFinderCalls = 0
+    var copyPathCalls = 0
+    var readClipboardCalls = 0
+    var blackoutCalls = 0
+    dispatcher.syncEnabled = { syncOn }
+    dispatcher.execute = { command in
+        executed.append(command)
+        if command == .hidden(.toggle) {
+            return .success(TocodeCommandOutput("已切换为 开"))
+        }
+        if command == .root(.reset) {
+            return .success(TocodeCommandOutput("已重置根目录"))
+        }
+        return .success(TocodeCommandOutput("ok"))
+    }
+    dispatcher.notify = { title, body in
+        notices.append((title, body))
+    }
+    dispatcher.openFinderAtRoot = { openFinderCalls += 1 }
+    dispatcher.copyFinderSelectedPath = { copyPathCalls += 1 }
+    dispatcher.readClipboardRoot = { readClipboardCalls += 1 }
+    dispatcher.activateBlackout = { blackoutCalls += 1 }
+
+    dispatcher.perform(.blackout)
+    expect(blackoutCalls == 1, "临时黑屏直接激活覆盖层")
+    expect(executed.isEmpty, "临时黑屏不绕行命令执行器")
+    expect(notices.isEmpty, "临时黑屏成功不额外通知")
+
+    dispatcher.perform(.toggleHidden)
+    expect(executed == [.hidden(.toggle)], "开关只调用一次 toggle")
+    expect(notices.count == 1 && notices[0].0 == "显示/隐藏隐藏文件" && notices[0].1 == "已切换为 开", "开关成功发短通知")
+
+    dispatcher.perform(.openFinderAtRoot)
+    dispatcher.perform(.copyFinderSelectedPath)
+    dispatcher.perform(.readClipboardRoot)
+    expect(openFinderCalls == 1, "访问路径走菜单方法")
+    expect(copyPathCalls == 1, "复制路径走菜单方法")
+    expect(readClipboardCalls == 1, "读取剪贴板走菜单方法")
+
+    syncOn = true
+    executed.removeAll()
+    notices.removeAll()
+    readClipboardCalls = 0
+    dispatcher.perform(.readClipboardRoot)
+    dispatcher.perform(.resetRoot)
+    dispatcher.perform(.initRootFromFinder)
+    expect(executed.isEmpty, "同步开启时根目录动作不调用执行器")
+    expect(readClipboardCalls == 0, "同步开启时不读取剪贴板设根")
+    expect(notices.count == 3, "同步开启时根目录动作通知原因")
+    expect(
+        notices.allSatisfy { $0.1.contains("同步项目夹") },
+        "同步开启通知说明不能改手动根目录"
+    )
+
+    let suite = "tocode-keyboard-invoke-\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defaults.removePersistentDomain(forName: suite)
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let permissions = MockShortcutPermissions()
+    permissions.accessibility = true
+    let tap = MockKeyboardShortcutRemapTap()
+    let poster = MockTrackpadShortcutPoster()
+    let scheduler = ManualScheduler()
+    let service = KeyboardShortcutRemapService(
+        store: KeyboardShortcutMappingStore(defaults: defaults),
+        permissions: permissions,
+        tap: tap,
+        poster: poster,
+        scheduler: scheduler,
+        alerts: MockAlerts()
+    )
+    defer { service.shutdown() }
+    var invoked: [KeyboardMappingAction] = []
+    service.actionHandler = { invoked.append($0) }
+    let source = RecordedShortcut(keyCode: 1, modifiers: [.option], keyLabel: "S")
+    _ = service.saveMapping(
+        KeyboardShortcutMappingDraft(
+            name: "映射黑屏",
+            source: source,
+            target: .action(.blackout)
+        )
+    )
+    let event = CGEvent(
+        keyboardEventSource: nil,
+        virtualKey: CGKeyCode(source.keyCode),
+        keyDown: true
+    )!
+    event.flags = source.modifiers.eventFlags
+    expect(tap.handler?(.keyDown, event) == .suppress, "Tocode 动作同样吞掉源 keyDown")
+    scheduler.runAll()
+    expect(invoked == [.blackout], "服务异步 invoke 临时黑屏")
+    expect(poster.posted.isEmpty, "Tocode 动作不走组合键 poster")
+
+    invoked.removeAll()
+    service.shouldYieldAllEvents = { true }
+    expect(!service.claims(type: .keyDown, event: event), "黑屏呈现时不向既有钩子声明映射事件")
+    expect(tap.handler?(.keyDown, event) == .pass, "黑屏呈现时映射钩子放行按键")
+    scheduler.runAll()
+    expect(invoked.isEmpty, "黑屏呈现时不再 invoke")
 }
 
 func testKeyboardShortcutRemapServiceLifecycleAndFaults() {
@@ -4090,6 +4245,8 @@ struct TestRunnerMain {
         await testTrackpadShortcutServiceLifecycleAndFaults()
         testKeyboardShortcutMappingStoreAndEngine()
         testKeyboardShortcutMappingActionTargets()
+        await testKeyboardMappingTargetEditorRetainsBlackout()
+        testKeyboardMappingActionDispatchAndYield()
         testKeyboardShortcutRemapServiceLifecycleAndFaults()
         testPrivateMultitouchIntegrationIfRequested()
         testShortcutEventClassification()

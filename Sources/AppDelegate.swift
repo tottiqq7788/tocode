@@ -37,12 +37,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         wheel.applySavedSettings()
         mouseWheel = wheel
 
+        let blackout = ScreenBlackoutService(overlay: ScreenBlackoutOverlay())
+
         // 先启动 IPC，避免微信 Keychain 初始化阻塞命令入口。
         let executor = TocodeCommandExecutor(
             mouseWheel: wheel,
             shortcuts: service,
             codexModels: CodexModelSwitchService(),
-            weChat: UnboundWeChat()
+            weChat: UnboundWeChat(),
+            screenBlackout: blackout
         )
         commandExecutor = executor
 
@@ -62,15 +65,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         executor.attachWeChat(weChat)
         weChat.commandExecutor = executor
 
-        let blackout = ScreenBlackoutService(overlay: ScreenBlackoutOverlay())
-        controller = StatusItemController(
+        let controller = StatusItemController(
             shortcuts: service,
             trackpadShortcuts: trackpad,
             keyboardRemaps: keyboardRemaps,
             mouseWheel: wheel,
             weChat: weChat,
-            screenBlackout: blackout
+            screenBlackout: blackout,
+            commandExecutor: executor
         )
+        self.controller = controller
+        keyboardRemaps.actionHandler = { [weak controller] action in
+            controller?.performMappedAction(action)
+        }
+        keyboardRemaps.shouldYieldAllEvents = { [weak blackout] in
+            blackout?.isPresented == true
+        }
 
         weChat.startBoundListener()
     }

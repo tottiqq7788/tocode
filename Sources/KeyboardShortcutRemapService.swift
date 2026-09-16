@@ -27,6 +27,51 @@ protocol KeyboardShortcutRemapControlling: AnyObject {
     func deleteMapping(id: UUID)
 }
 
+/// 把 Tocode 动作交给既有命令执行器或菜单方法；桌面切换不经过这里。
+final class KeyboardMappingActionDispatcher {
+    var syncEnabled: () -> Bool = { false }
+    var execute: (TocodeCommand) -> TocodeCommandResult = { _ in
+        .failure(.operationFailed("命令执行器不可用"))
+    }
+    var notify: (String, String) -> Void = { _, _ in }
+    var openFinderAtRoot: () -> Void = {}
+    var copyFinderSelectedPath: () -> Void = {}
+    var readClipboardRoot: () -> Void = {}
+    var activateBlackout: () -> Void = {}
+
+    func perform(_ action: KeyboardMappingAction) {
+        if action.mutatesManualRoot && syncEnabled() {
+            notify(action.title, "同步项目夹开启时不能改手动根目录")
+            return
+        }
+        if action == .blackout {
+            activateBlackout()
+            return
+        }
+        if let command = action.command {
+            switch execute(command) {
+            case .success(let output):
+                if action.notifiesToggleResult {
+                    notify(action.title, output.text)
+                }
+            case .failure(let error):
+                notify(action.title, error.message)
+            }
+            return
+        }
+        switch action {
+        case .openFinderAtRoot:
+            openFinderAtRoot()
+        case .copyFinderSelectedPath:
+            copyFinderSelectedPath()
+        case .readClipboardRoot:
+            readClipboardRoot()
+        default:
+            break
+        }
+    }
+}
+
 final class KeyboardShortcutRemapService: KeyboardShortcutRemapControlling {
     private let store: KeyboardShortcutMappingStore
     private let permissions: ShortcutPermissionChecking
@@ -36,6 +81,8 @@ final class KeyboardShortcutRemapService: KeyboardShortcutRemapControlling {
     private let alerts: ShortcutAlerting
     private var engine: KeyboardShortcutRemapEngine
     private var inputCaptureSuspended = false
+    var actionHandler: ((KeyboardMappingAction) -> Void)?
+    var shouldYieldAllEvents: (() -> Bool)?
     private(set) var mappings: [KeyboardShortcutMapping]
 
     init(
@@ -94,6 +141,7 @@ final class KeyboardShortcutRemapService: KeyboardShortcutRemapControlling {
             !inputCaptureSuspended,
             tap.isInstalled,
             tap.isEnabled,
+            shouldYieldAllEvents?() != true,
             let snapshot = KeyboardShortcutEventSnapshot.capture(type: type, event: event)
         else {
             return false
@@ -104,6 +152,7 @@ final class KeyboardShortcutRemapService: KeyboardShortcutRemapControlling {
     @discardableResult
     func handleSnapshot(_ snapshot: KeyboardShortcutEventSnapshot) -> KeyboardShortcutRemapStep {
         guard !inputCaptureSuspended else { return .pass }
+        if shouldYieldAllEvents?() == true { return .pass }
         let step = engine.process(snapshot)
         perform(step)
         return step
@@ -169,6 +218,9 @@ final class KeyboardShortcutRemapService: KeyboardShortcutRemapControlling {
         if inputCaptureSuspended {
             return .pass
         }
+        if shouldYieldAllEvents?() == true {
+            return .pass
+        }
         guard let snapshot = KeyboardShortcutEventSnapshot.capture(type: type, event: event) else {
             return .pass
         }
@@ -178,20 +230,28 @@ final class KeyboardShortcutRemapService: KeyboardShortcutRemapControlling {
         switch step {
         case .pass:
             return .pass
-        case .suppress, .emit:
+        case .suppress, .emit, .invoke:
             return .suppress
         }
     }
 
     private func perform(_ step: KeyboardShortcutRemapStep) {
-        guard case .emit(let target) = step else { return }
-        scheduler.async { [weak self] in
-            guard let self else { return }
-            if !self.poster.post(target) {
-                self.alerts.notify(
-                    title: "键盘映射发送失败",
-                    body: "目标快捷键未能发送。规则已保留，其他输入功能不受影响。"
-                )
+        switch step {
+        case .pass, .suppress:
+            return
+        case .emit(let target):
+            scheduler.async { [weak self] in
+                guard let self else { return }
+                if !self.poster.post(target) {
+                    self.alerts.notify(
+                        title: "键盘映射发送失败",
+                        body: "目标快捷键未能发送。规则已保留，其他输入功能不受影响。"
+                    )
+                }
+            }
+        case .invoke(let action):
+            scheduler.async { [weak self] in
+                self?.actionHandler?(action)
             }
         }
     }

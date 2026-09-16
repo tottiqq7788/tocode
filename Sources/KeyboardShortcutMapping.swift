@@ -39,13 +39,25 @@ enum KeyboardShortcutMappingTarget: Equatable, Hashable {
     case shortcut(RecordedShortcut)
     case action(KeyboardMappingAction)
 
-    /// 功能最终也落到一个固定组合键，复用同一条合成通路与内部标记。
-    var resolvedShortcut: RecordedShortcut {
+    /// 快捷键目标，或桌面切换解析出的组合键；Tocode 动作没有组合键。
+    var resolvedShortcut: RecordedShortcut? {
         switch self {
         case .shortcut(let shortcut):
             return shortcut
         case .action(let action):
-            return action.shortcut
+            return action.synthesizedShortcut
+        }
+    }
+
+    func remapStep() -> KeyboardShortcutRemapStep {
+        switch self {
+        case .shortcut(let shortcut):
+            return .emit(shortcut)
+        case .action(let action):
+            if let shortcut = action.synthesizedShortcut {
+                return .emit(shortcut)
+            }
+            return .invoke(action)
         }
     }
 
@@ -99,10 +111,26 @@ extension KeyboardShortcutMappingTarget: Codable {
     }
 }
 
-/// 内置命名功能。每项都实现为系统自身的组合键，不引入第二条事件注入通路。
+/// 内置命名功能：桌面切换走既有组合键合成；其余调用 Tocode 一次性动作或开关切换。
 enum KeyboardMappingAction: String, Codable, CaseIterable, Equatable, Hashable {
     case switchDesktopLeft
     case switchDesktopRight
+    case openFinderAtRoot
+    case copyFinderSelectedPath
+    case initRootFromFinder
+    case toggleHidden
+    case toggleFinderMove
+    case toggleFinderCommandQ
+    case readClipboardRoot
+    case resetRoot
+    case toggleCodexSync
+    case openWeChatLocation
+    case blackout
+    case toggleVerticalWheel
+    case toggleHorizontalWheel
+    case toggleDoubleCommandQ
+    case toggleLaunchAtLogin
+    case quit
 
     var title: String {
         switch self {
@@ -110,24 +138,38 @@ enum KeyboardMappingAction: String, Codable, CaseIterable, Equatable, Hashable {
             return "向左切换桌面"
         case .switchDesktopRight:
             return "向右切换桌面"
-        }
-    }
-
-    var keyCode: UInt16 {
-        switch self {
-        case .switchDesktopLeft:
-            return 123
-        case .switchDesktopRight:
-            return 124
-        }
-    }
-
-    var keyLabel: String {
-        switch self {
-        case .switchDesktopLeft:
-            return "\u{2190}"
-        case .switchDesktopRight:
-            return "\u{2192}"
+        case .openFinderAtRoot:
+            return "访问路径"
+        case .copyFinderSelectedPath:
+            return "复制路径"
+        case .initRootFromFinder:
+            return "目录初始化"
+        case .toggleHidden:
+            return "显示/隐藏隐藏文件"
+        case .toggleFinderMove:
+            return "x/v移动文件"
+        case .toggleFinderCommandQ:
+            return "⌘Q强关访达"
+        case .readClipboardRoot:
+            return "读取剪贴板"
+        case .resetRoot:
+            return "重置初始目录"
+        case .toggleCodexSync:
+            return "同步项目夹"
+        case .openWeChatLocation:
+            return "文件位置"
+        case .blackout:
+            return "临时黑屏"
+        case .toggleVerticalWheel:
+            return MouseWheelReverseStore.verticalTitle
+        case .toggleHorizontalWheel:
+            return MouseWheelReverseStore.horizontalTitle
+        case .toggleDoubleCommandQ:
+            return "双击⌘Q"
+        case .toggleLaunchAtLogin:
+            return LaunchAtLoginService.menuTitle
+        case .quit:
+            return "退出"
         }
     }
 
@@ -137,12 +179,168 @@ enum KeyboardMappingAction: String, Codable, CaseIterable, Equatable, Hashable {
             return "arrow.left.square"
         case .switchDesktopRight:
             return "arrow.right.square"
+        case .openFinderAtRoot:
+            return "macwindow"
+        case .copyFinderSelectedPath:
+            return "doc.on.clipboard"
+        case .initRootFromFinder:
+            return "folder.badge.gearshape"
+        case .toggleHidden:
+            return "eye"
+        case .toggleFinderMove:
+            return "arrow.left.arrow.right"
+        case .toggleFinderCommandQ:
+            return "xmark.rectangle"
+        case .readClipboardRoot:
+            return "doc.on.clipboard"
+        case .resetRoot:
+            return "arrow.counterclockwise"
+        case .toggleCodexSync:
+            return "arrow.triangle.2.circlepath"
+        case .openWeChatLocation:
+            return "folder"
+        case .blackout:
+            return "display.trianglebadge.exclamationmark"
+        case .toggleVerticalWheel:
+            return "arrow.up.arrow.down"
+        case .toggleHorizontalWheel:
+            return "arrow.left.and.right"
+        case .toggleDoubleCommandQ:
+            return "q.circle"
+        case .toggleLaunchAtLogin:
+            return "power.circle"
+        case .quit:
+            return "power"
+        }
+    }
+
+    var group: KeyboardMappingActionGroup {
+        switch self {
+        case .switchDesktopLeft, .switchDesktopRight:
+            return .system
+        case .openFinderAtRoot, .copyFinderSelectedPath, .initRootFromFinder,
+            .toggleHidden, .toggleFinderMove, .toggleFinderCommandQ:
+            return .finder
+        case .readClipboardRoot, .resetRoot:
+            return .directory
+        case .toggleCodexSync:
+            return .codex
+        case .openWeChatLocation:
+            return .wechat
+        case .blackout, .toggleVerticalWheel, .toggleHorizontalWheel, .toggleDoubleCommandQ:
+            return .mac
+        case .toggleLaunchAtLogin:
+            return .settings
+        case .quit:
+            return .application
         }
     }
 
     /// 系统「调度中心 → 向左/向右移动一个空间」的默认触发键。
+    /// 物理方向键始终带 SecondaryFn；只设 Control 时系统不会把它当成空间切换热键。
+    var synthesizedShortcut: RecordedShortcut? {
+        switch self {
+        case .switchDesktopLeft:
+            return RecordedShortcut(keyCode: 123, modifiers: [.control, .function], keyLabel: "\u{2190}")
+        case .switchDesktopRight:
+            return RecordedShortcut(keyCode: 124, modifiers: [.control, .function], keyLabel: "\u{2192}")
+        default:
+            return nil
+        }
+    }
+
     var shortcut: RecordedShortcut {
-        RecordedShortcut(keyCode: keyCode, modifiers: [.control], keyLabel: keyLabel)
+        synthesizedShortcut ?? RecordedShortcut(keyCode: 0, modifiers: [], keyLabel: "")
+    }
+
+    var command: TocodeCommand? {
+        switch self {
+        case .initRootFromFinder:
+            return .root(.initFromFinder)
+        case .toggleHidden:
+            return .hidden(.toggle)
+        case .toggleFinderMove:
+            return .shortcut(.finderMove, .toggle)
+        case .toggleFinderCommandQ:
+            return .shortcut(.finderCmdQ, .toggle)
+        case .resetRoot:
+            return .root(.reset)
+        case .toggleCodexSync:
+            return .codex(.sync(.toggle))
+        case .openWeChatLocation:
+            return .wechat(.location)
+        case .blackout:
+            return .blackout
+        case .toggleVerticalWheel:
+            return .wheel(.vertical, .toggle)
+        case .toggleHorizontalWheel:
+            return .wheel(.horizontal, .toggle)
+        case .toggleDoubleCommandQ:
+            return .shortcut(.doubleCmdQ, .toggle)
+        case .toggleLaunchAtLogin:
+            return .login(.toggle)
+        case .quit:
+            return .quit
+        case .switchDesktopLeft, .switchDesktopRight, .openFinderAtRoot,
+            .copyFinderSelectedPath, .readClipboardRoot:
+            return nil
+        }
+    }
+
+    var mutatesManualRoot: Bool {
+        switch self {
+        case .readClipboardRoot, .resetRoot, .initRootFromFinder:
+            return true
+        default:
+            return false
+        }
+    }
+
+    var notifiesToggleResult: Bool {
+        switch self {
+        case .toggleHidden, .toggleFinderMove, .toggleFinderCommandQ, .toggleCodexSync,
+            .toggleVerticalWheel, .toggleHorizontalWheel, .toggleDoubleCommandQ,
+            .toggleLaunchAtLogin:
+            return true
+        default:
+            return false
+        }
+    }
+}
+
+enum KeyboardMappingActionGroup: String, CaseIterable, Equatable {
+    case system
+    case finder
+    case directory
+    case codex
+    case wechat
+    case mac
+    case settings
+    case application
+
+    var title: String {
+        switch self {
+        case .system:
+            return "系统"
+        case .finder:
+            return "访达"
+        case .directory:
+            return "目录"
+        case .codex:
+            return "codex"
+        case .wechat:
+            return "微信关联"
+        case .mac:
+            return "mac"
+        case .settings:
+            return "设置"
+        case .application:
+            return "应用"
+        }
+    }
+
+    var actions: [KeyboardMappingAction] {
+        KeyboardMappingAction.allCases.filter { $0.group == self }
     }
 }
 
@@ -222,9 +420,10 @@ struct KeyboardShortcutMappingStore {
             return .failure(.duplicateSource)
         }
 
-        // 只拒绝「源 == 所选功能自身的触发键」；把该触发键重映射为其他目标是合法的。
+        // 只拒绝「源 == 所选桌面功能自身的触发键」；Tocode 动作没有自身触发键。
         if case .action(let action) = target,
-            KeyboardShortcutSignature(action.shortcut) == sourceSignature
+            let actionShortcut = action.synthesizedShortcut,
+            KeyboardShortcutSignature(actionShortcut) == sourceSignature
         {
             return .failure(.sourceConflictsWithAction)
         }
@@ -302,6 +501,7 @@ enum KeyboardShortcutRemapStep: Equatable {
     case pass
     case suppress
     case emit(RecordedShortcut)
+    case invoke(KeyboardMappingAction)
 }
 
 struct KeyboardShortcutRemapEngine {
@@ -371,6 +571,6 @@ struct KeyboardShortcutRemapEngine {
         }
 
         activeSourceKeyCodes.insert(event.keyCode)
-        return .emit(mapping.target.resolvedShortcut)
+        return mapping.target.remapStep()
     }
 }

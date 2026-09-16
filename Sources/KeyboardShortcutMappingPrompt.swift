@@ -15,7 +15,7 @@ enum KeyboardShortcutMappingPrompt {
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.messageText = isEditing ? "编辑键盘映射" : "新增键盘映射"
-        alert.informativeText = "点击快捷键框后输入键盘组合，或把源快捷键映射为内置功能。"
+        alert.informativeText = "点击快捷键框后输入键盘组合，或把源快捷键映射为 Tocode 功能或系统桌面切换。"
         alert.addButton(withTitle: "保存")
         alert.addButton(withTitle: "取消")
         if isEditing {
@@ -119,7 +119,9 @@ final class KeyboardMappingTargetEditor: NSObject {
     private let recorder: ShortcutRecorderView
     private let shortcutPage = NSView()
     private let actionPage = NSView()
+    private let actionPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private var selectedAction: KeyboardMappingAction
+    private var actionItems: [KeyboardMappingAction: NSMenuItem] = [:]
 
     init(target: KeyboardShortcutMappingTarget?) {
         if case .action(let action)? = target {
@@ -132,7 +134,6 @@ final class KeyboardMappingTargetEditor: NSObject {
                 existing = shortcut
             }
             recorder = ShortcutRecorderView(shortcut: existing)
-            // 功能页始终有默认选中项，避免出现无选中的单选组。
             selectedAction = KeyboardMappingAction.allCases[0]
             segment.selectedSegment = 0
         }
@@ -148,28 +149,17 @@ final class KeyboardMappingTargetEditor: NSObject {
         segment.segmentDistribution = .fillEqually
         segment.target = self
         segment.action = #selector(segmentChanged(_:))
-        segment.toolTip = "选择目标是另一个组合键，还是一个内置功能"
+        segment.toolTip = "选择目标是另一个组合键，还是一个 Tocode 功能"
 
         recorder.toolTip = "点击后输入替换后的快捷键"
         recorder.onChange = { [weak self] _ in self?.onChange?() }
         shortcutPage.addSubview(recorder)
 
-        let actionStack = NSStackView()
-        actionStack.orientation = .vertical
-        actionStack.alignment = .leading
-        actionStack.spacing = 6
-        for action in KeyboardMappingAction.allCases {
-            let button = NSButton(
-                radioButtonWithTitle: action.title,
-                target: self,
-                action: #selector(actionSelected(_:))
-            )
-            button.identifier = NSUserInterfaceItemIdentifier(action.rawValue)
-            button.state = action == selectedAction ? .on : .off
-            button.toolTip = "命中源快捷键后发送系统「\(action.title)」的组合键"
-            actionStack.addArrangedSubview(button)
-        }
-        actionPage.addSubview(actionStack)
+        populateActionPopup()
+        actionPopup.target = self
+        actionPopup.action = #selector(actionPopupChanged(_:))
+        actionPopup.toolTip = "按右键菜单分组选择一次性动作或开关切换"
+        actionPage.addSubview(actionPopup)
 
         let container = NSView()
         container.addSubview(shortcutPage)
@@ -179,7 +169,7 @@ final class KeyboardMappingTargetEditor: NSObject {
             subview.translatesAutoresizingMaskIntoConstraints = false
             stack.addArrangedSubview(subview)
         }
-        for subview in [shortcutPage, actionPage, recorder, actionStack] {
+        for subview in [shortcutPage, actionPage, recorder, actionPopup] {
             subview.translatesAutoresizingMaskIntoConstraints = false
         }
 
@@ -199,8 +189,10 @@ final class KeyboardMappingTargetEditor: NSObject {
             recorder.trailingAnchor.constraint(equalTo: shortcutPage.trailingAnchor),
             recorder.topAnchor.constraint(equalTo: shortcutPage.topAnchor),
             recorder.heightAnchor.constraint(equalToConstant: Self.recorderHeight),
-            actionStack.leadingAnchor.constraint(equalTo: actionPage.leadingAnchor),
-            actionStack.topAnchor.constraint(equalTo: actionPage.topAnchor)
+            actionPopup.leadingAnchor.constraint(equalTo: actionPage.leadingAnchor),
+            actionPopup.trailingAnchor.constraint(equalTo: actionPage.trailingAnchor),
+            actionPopup.topAnchor.constraint(equalTo: actionPage.topAnchor),
+            actionPopup.heightAnchor.constraint(equalToConstant: 28)
         ])
 
         updatePages()
@@ -209,6 +201,11 @@ final class KeyboardMappingTargetEditor: NSObject {
     /// 当前分段下的目标；快捷键页未录入时返回 nil，用于禁用保存。
     var target: KeyboardShortcutMappingTarget? {
         if segment.selectedSegment == Self.actionSegment {
+            if let rawValue = actionPopup.selectedItem?.representedObject as? String,
+                let action = KeyboardMappingAction(rawValue: rawValue)
+            {
+                return .action(action)
+            }
             return .action(selectedAction)
         }
         guard let shortcut = recorder.shortcut else { return nil }
@@ -219,6 +216,7 @@ final class KeyboardMappingTargetEditor: NSObject {
         onChange = nil
         recorder.onChange = nil
         segment.target = nil
+        actionPopup.target = nil
     }
 
     @objc private func segmentChanged(_ sender: NSSegmentedControl) {
@@ -226,15 +224,46 @@ final class KeyboardMappingTargetEditor: NSObject {
         onChange?()
     }
 
-    @objc private func actionSelected(_ sender: NSButton) {
+    @objc private func actionPopupChanged(_ sender: NSPopUpButton) {
         guard
-            let rawValue = sender.identifier?.rawValue,
+            let rawValue = sender.selectedItem?.representedObject as? String,
             let action = KeyboardMappingAction(rawValue: rawValue)
         else {
             return
         }
         selectedAction = action
         onChange?()
+    }
+
+    private func populateActionPopup() {
+        let menu = NSMenu()
+        // 扁平列表：分组标题禁用，选项一级可选。
+        // NSPopUpButton 的子菜单选中项不会成为 selectedItem，保存时会悄悄落回默认的「向左切换桌面」。
+        for group in KeyboardMappingActionGroup.allCases {
+            let header = NSMenuItem(title: group.title, action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            menu.addItem(header)
+            for action in group.actions {
+                let item = NSMenuItem(
+                    title: action.title,
+                    action: nil,
+                    keyEquivalent: ""
+                )
+                item.representedObject = action.rawValue
+                item.indentationLevel = 1
+                item.image = NSImage(
+                    systemSymbolName: action.menuSymbolName,
+                    accessibilityDescription: action.title
+                )
+                item.toolTip = "命中源快捷键后执行「\(group.title) → \(action.title)」"
+                menu.addItem(item)
+                actionItems[action] = item
+            }
+        }
+        actionPopup.menu = menu
+        if let item = actionItems[selectedAction] {
+            actionPopup.select(item)
+        }
     }
 
     private func updatePages() {

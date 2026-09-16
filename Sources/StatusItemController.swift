@@ -23,6 +23,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private let codexRestarter: CodexApplicationRestarting
     private let ankerCredentials: AnkerCredentialUpdating
     private let screenBlackout: ScreenBlackoutService
+    private let commandExecutor: TocodeCommandExecutor
+    private let actionDispatcher = KeyboardMappingActionDispatcher()
     private var activeModelMenu: NSMenu?
     private var activeModelParentItem: NSMenuItem?
     private var currentModelID: String?
@@ -44,7 +46,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         codexModels: CodexModelSwitching = CodexModelSwitchService(),
         codexRestarter: CodexApplicationRestarting = CodexApplicationRestarter(),
         ankerCredentials: AnkerCredentialUpdating = AnkerCredentialService(),
-        screenBlackout: ScreenBlackoutService? = nil
+        screenBlackout: ScreenBlackoutService? = nil,
+        commandExecutor: TocodeCommandExecutor
     ) {
         self.shortcuts = shortcuts
         self.trackpadShortcuts = trackpadShortcuts
@@ -58,8 +61,33 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         self.codexRestarter = codexRestarter
         self.ankerCredentials = ankerCredentials
         self.screenBlackout = screenBlackout ?? ScreenBlackoutService(overlay: ScreenBlackoutOverlay())
+        self.commandExecutor = commandExecutor
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         super.init()
+        actionDispatcher.syncEnabled = { [weak self] in
+            self?.codexSync.syncEnabled ?? false
+        }
+        actionDispatcher.execute = { [weak self] command in
+            guard let self else {
+                return .failure(.operationFailed("命令执行器不可用"))
+            }
+            return self.commandExecutor.execute(command)
+        }
+        actionDispatcher.notify = { [weak self] title, body in
+            self?.notifyMappedAction(title, body)
+        }
+        actionDispatcher.openFinderAtRoot = { [weak self] in
+            self?.openFinderAtRoot()
+        }
+        actionDispatcher.copyFinderSelectedPath = { [weak self] in
+            self?.copyFinderSelectedPath()
+        }
+        actionDispatcher.readClipboardRoot = { [weak self] in
+            self?.readClipboard()
+        }
+        actionDispatcher.activateBlackout = { [weak self] in
+            self?.screenBlackout.activate()
+        }
         if let button = statusItem.button {
             button.image = NSImage(systemSymbolName: "folder", accessibilityDescription: "tocode")
             button.target = self
@@ -761,6 +789,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         clipboard.copyPath(path)
     }
 
+    func performMappedAction(_ action: KeyboardMappingAction) {
+        actionDispatcher.perform(action)
+    }
+
     /// 在访达中打开当前左键目录对应的根目录。
     @objc private func openFinderAtRoot() {
         let root = resolveDirectoryRoot()
@@ -813,6 +845,19 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         content.sound = .default
         let request = UNNotificationRequest(
             identifier: "tocode.launch-at-login.\(UUID().uuidString)",
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request) { _ in }
+    }
+
+    private func notifyMappedAction(_ title: String, _ body: String) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        let request = UNNotificationRequest(
+            identifier: "tocode.keyboard-mapping.\(UUID().uuidString)",
             content: content,
             trigger: nil
         )
