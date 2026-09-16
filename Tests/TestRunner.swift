@@ -1391,14 +1391,14 @@ func testKeyboardShortcutMappingStoreAndEngine() {
 
     expect(store.allMappings().isEmpty, "键盘映射默认无规则")
     if case .failure(.emptyName) = store.save(
-        KeyboardShortcutMappingDraft(name: "  ", source: sourceA, target: targetB)
+        KeyboardShortcutMappingDraft(name: "  ", source: sourceA, target: .shortcut(targetB))
     ) {
         expect(true, "键盘映射拒绝空名称")
     } else {
         expect(false, "键盘映射拒绝空名称")
     }
     if case .failure(.missingSource) = store.save(
-        KeyboardShortcutMappingDraft(name: "缺少源", target: targetB)
+        KeyboardShortcutMappingDraft(name: "缺少源", target: .shortcut(targetB))
     ) {
         expect(true, "键盘映射拒绝缺少源快捷键")
     } else {
@@ -1416,7 +1416,7 @@ func testKeyboardShortcutMappingStoreAndEngine() {
         KeyboardShortcutMappingDraft(
             name: "  搜索映射  ",
             source: sourceA,
-            target: targetB
+            target: .shortcut(targetB)
         )
     )
     guard case .success(let first) = firstResult else {
@@ -1430,7 +1430,7 @@ func testKeyboardShortcutMappingStoreAndEngine() {
         KeyboardShortcutMappingDraft(
             name: "搜索映射",
             source: sourceC,
-            target: targetB
+            target: .shortcut(targetB)
         )
     ) {
         expect(true, "键盘映射拒绝重复名称")
@@ -1445,7 +1445,7 @@ func testKeyboardShortcutMappingStoreAndEngine() {
                 modifiers: sourceA.modifiers,
                 keyLabel: "不同显示名"
             ),
-            target: targetB
+            target: .shortcut(targetB)
         )
     ) {
         expect(true, "键盘映射按键码与修饰键拒绝重复源")
@@ -1458,7 +1458,7 @@ func testKeyboardShortcutMappingStoreAndEngine() {
             id: first.id,
             name: "编辑后",
             source: sourceC,
-            target: sourceA
+            target: .shortcut(sourceA)
         )
     )
     guard case .success(let edited) = editedResult else {
@@ -1472,7 +1472,7 @@ func testKeyboardShortcutMappingStoreAndEngine() {
         id: UUID(),
         name: "测试",
         source: sourceA,
-        target: targetB
+        target: .shortcut(targetB)
     )
     var engine = KeyboardShortcutRemapEngine(mappings: [mapping])
     let exactDown = KeyboardShortcutEventSnapshot(
@@ -1528,6 +1528,203 @@ func testKeyboardShortcutMappingStoreAndEngine() {
     expect(store.allMappings().isEmpty, "删除只移除指定键盘映射")
 }
 
+func testKeyboardShortcutMappingActionTargets() {
+    let suite = "tocode-keyboard-action-\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defaults.removePersistentDomain(forName: suite)
+    defer { defaults.removePersistentDomain(forName: suite) }
+
+    let left = KeyboardMappingAction.switchDesktopLeft
+    let right = KeyboardMappingAction.switchDesktopRight
+    expect(KeyboardMappingAction.allCases.count == 2, "本期只提供两个内置功能")
+    expect(left.title == "向左切换桌面", "向左功能提供中文名称")
+    expect(right.title == "向右切换桌面", "向右功能提供中文名称")
+    expect(
+        left.shortcut == RecordedShortcut(keyCode: 123, modifiers: [.control], keyLabel: "\u{2190}"),
+        "向左切换桌面解析为系统 ⌃←"
+    )
+    expect(
+        right.shortcut == RecordedShortcut(keyCode: 124, modifiers: [.control], keyLabel: "\u{2192}"),
+        "向右切换桌面解析为系统 ⌃→"
+    )
+    expect(
+        KeyboardShortcutMappingTarget.action(right).resolvedShortcut == right.shortcut,
+        "功能目标解析为固定组合键"
+    )
+    expect(
+        KeyboardShortcutMappingTarget.action(left).displayText == "向左切换桌面",
+        "功能目标显示名称而非组合键"
+    )
+
+    // 旧格式：target 直接是 RecordedShortcut，没有 kind 判别字段。
+    struct LegacyMapping: Codable {
+        let id: UUID
+        let name: String
+        let source: RecordedShortcut
+        let target: RecordedShortcut
+    }
+    let legacyID = UUID()
+    let legacySource = RecordedShortcut(keyCode: 0, modifiers: [.command], keyLabel: "A")
+    let legacyTarget = RecordedShortcut(keyCode: 11, modifiers: [.control], keyLabel: "B")
+    guard let legacyData = try? JSONEncoder().encode([
+        LegacyMapping(id: legacyID, name: "旧规则", source: legacySource, target: legacyTarget)
+    ]) else {
+        expect(false, "旧格式夹具可编码")
+        return
+    }
+    defaults.set(legacyData, forKey: KeyboardShortcutMappingStore.defaultsKey)
+
+    let store = KeyboardShortcutMappingStore(defaults: defaults)
+    let loaded = store.allMappings()
+    expect(loaded.count == 1, "旧格式规则无迁移即可读入")
+    expect(
+        loaded.first == KeyboardShortcutMapping(
+            id: legacyID,
+            name: "旧规则",
+            source: legacySource,
+            target: .shortcut(legacyTarget)
+        ),
+        "旧格式规则读入后语义不变"
+    )
+
+    let actionSource = RecordedShortcut(keyCode: 5, modifiers: [.command, .option], keyLabel: "G")
+    guard case .success(let actionMapping) = store.save(
+        KeyboardShortcutMappingDraft(
+            name: "  切到左边桌面  ",
+            source: actionSource,
+            target: .action(left)
+        )
+    ) else {
+        expect(false, "功能目标规则保存成功")
+        return
+    }
+    expect(actionMapping.name == "切到左边桌面", "功能规则同样 trim 名称")
+    expect(actionMapping.target == .action(left), "功能规则保留判别类型")
+    expect(store.allMappings().count == 2, "功能规则与旧格式规则共存")
+    expect(
+        KeyboardShortcutMappingStore(defaults: defaults).allMappings()
+            .contains { $0.id == actionMapping.id && $0.target == .action(left) },
+        "功能目标编解码往返一致"
+    )
+
+    if case .failure(.sourceConflictsWithAction) = store.save(
+        KeyboardShortcutMappingDraft(name: "自指规则", source: left.shortcut, target: .action(left))
+    ) {
+        expect(true, "拒绝源与所选功能自身触发键相同的规则")
+    } else {
+        expect(false, "拒绝源与所选功能自身触发键相同的规则")
+    }
+    if case .success = store.save(
+        KeyboardShortcutMappingDraft(
+            name: "改用途的箭头键",
+            source: left.shortcut,
+            target: .shortcut(legacyTarget)
+        )
+    ) {
+        expect(true, "允许把 ⌃← 重映射为其他目标")
+    } else {
+        expect(false, "允许把 ⌃← 重映射为其他目标")
+    }
+
+    var engine = KeyboardShortcutRemapEngine(mappings: [actionMapping])
+    let down = KeyboardShortcutEventSnapshot(
+        keyCode: actionSource.keyCode,
+        modifiers: actionSource.modifiers,
+        isKeyDown: true,
+        isAutoRepeat: false,
+        isSynthesized: false
+    )
+    expect(engine.claims(down), "功能规则声明其源 keyDown")
+    expect(engine.process(down) == .emit(left.shortcut), "功能规则命中时合成 ⌃←")
+    let repeated = KeyboardShortcutEventSnapshot(
+        keyCode: actionSource.keyCode,
+        modifiers: actionSource.modifiers,
+        isKeyDown: true,
+        isAutoRepeat: true,
+        isSynthesized: false
+    )
+    expect(engine.process(repeated) == .suppress, "功能规则自动重复只吞掉不重复合成")
+    let synthesized = KeyboardShortcutEventSnapshot(
+        keyCode: left.shortcut.keyCode,
+        modifiers: left.shortcut.modifiers,
+        isKeyDown: true,
+        isAutoRepeat: false,
+        isSynthesized: true
+    )
+    expect(engine.process(synthesized) == .pass, "功能合成出的 ⌃← 不再进入重映射")
+
+    let serviceSuite = "tocode-keyboard-action-service-\(UUID().uuidString)"
+    let serviceDefaults = UserDefaults(suiteName: serviceSuite)!
+    serviceDefaults.removePersistentDomain(forName: serviceSuite)
+    defer { serviceDefaults.removePersistentDomain(forName: serviceSuite) }
+    let permissions = MockShortcutPermissions()
+    permissions.accessibility = true
+    let tap = MockKeyboardShortcutRemapTap()
+    let poster = MockTrackpadShortcutPoster()
+    let scheduler = ManualScheduler()
+    let service = KeyboardShortcutRemapService(
+        store: KeyboardShortcutMappingStore(defaults: serviceDefaults),
+        permissions: permissions,
+        tap: tap,
+        poster: poster,
+        scheduler: scheduler,
+        alerts: MockAlerts()
+    )
+    defer { service.shutdown() }
+    if case .success = service.saveMapping(
+        KeyboardShortcutMappingDraft(
+            name: "服务功能规则",
+            source: actionSource,
+            target: .action(right)
+        )
+    ) {
+        expect(true, "服务保存功能规则成功")
+    } else {
+        expect(false, "服务保存功能规则成功")
+    }
+    expect(tap.isInstalled, "功能规则同样需要独立键盘钩子")
+    let event = CGEvent(
+        keyboardEventSource: nil,
+        virtualKey: CGKeyCode(actionSource.keyCode),
+        keyDown: true
+    )!
+    event.flags = actionSource.modifiers.eventFlags
+    expect(service.claims(type: .keyDown, event: event), "服务向既有钩子声明功能规则的源事件")
+    expect(tap.handler?(.keyDown, event) == .suppress, "功能规则同样吞掉源 keyDown")
+    scheduler.runAll()
+    expect(poster.posted == [right.shortcut], "功能规则复用既有通路发送 ⌃→")
+
+    let deniedSuite = "tocode-keyboard-action-denied-\(UUID().uuidString)"
+    let deniedDefaults = UserDefaults(suiteName: deniedSuite)!
+    deniedDefaults.removePersistentDomain(forName: deniedSuite)
+    defer { deniedDefaults.removePersistentDomain(forName: deniedSuite) }
+    let deniedTap = MockKeyboardShortcutRemapTap()
+    let deniedAlerts = MockAlerts()
+    let deniedService = KeyboardShortcutRemapService(
+        store: KeyboardShortcutMappingStore(defaults: deniedDefaults),
+        permissions: MockShortcutPermissions(),
+        tap: deniedTap,
+        poster: MockTrackpadShortcutPoster(),
+        scheduler: ManualScheduler(),
+        alerts: deniedAlerts
+    )
+    defer { deniedService.shutdown() }
+    _ = deniedService.saveMapping(
+        KeyboardShortcutMappingDraft(
+            name: "无权限的功能规则",
+            source: actionSource,
+            target: .action(left)
+        )
+    )
+    expect(deniedService.mappings.count == 1, "辅助功能拒绝时功能规则仍保留")
+    expect(deniedService.mappings.first?.target == .action(left), "辅助功能拒绝时功能目标不降级")
+    expect(!deniedTap.isInstalled, "辅助功能拒绝时不为功能规则安装钩子")
+    expect(
+        deniedAlerts.titles.contains("键盘映射需要辅助功能权限"),
+        "功能规则故障时同样明确提示"
+    )
+}
+
 func testKeyboardShortcutRemapServiceLifecycleAndFaults() {
     let suite = "tocode-keyboard-service-\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suite)!
@@ -1567,7 +1764,7 @@ func testKeyboardShortcutRemapServiceLifecycleAndFaults() {
         KeyboardShortcutMappingDraft(
             name: "服务映射",
             source: source,
-            target: target
+            target: .shortcut(target)
         )
     )
     guard case .success(let saved) = saveResult else {
@@ -1646,7 +1843,7 @@ func testKeyboardShortcutRemapServiceLifecycleAndFaults() {
         KeyboardShortcutMappingDraft(
             name: "无权限仍保存",
             source: source,
-            target: target
+            target: .shortcut(target)
         )
     )
     expect(deniedService.mappings.count == 1, "辅助功能拒绝时仍保留键盘映射规则")
@@ -1682,7 +1879,7 @@ func testKeyboardShortcutRemapServiceLifecycleAndFaults() {
         KeyboardShortcutMappingDraft(
             name: "安装失败仍保存",
             source: source,
-            target: target
+            target: .shortcut(target)
         )
     )
     expect(installFailureService.mappings.count == 1, "键盘钩子创建失败时仍保留规则")
@@ -1698,7 +1895,7 @@ func testKeyboardShortcutRemapServiceLifecycleAndFaults() {
         KeyboardShortcutMappingDraft(
             name: "恢复测试",
             source: source,
-            target: target
+            target: .shortcut(target)
         )
     )
     let disabledEvent = CGEvent(
@@ -3892,6 +4089,7 @@ struct TestRunnerMain {
         testTrackpadShortcutStoreAndRecognizer()
         await testTrackpadShortcutServiceLifecycleAndFaults()
         testKeyboardShortcutMappingStoreAndEngine()
+        testKeyboardShortcutMappingActionTargets()
         testKeyboardShortcutRemapServiceLifecycleAndFaults()
         testPrivateMultitouchIntegrationIfRequested()
         testShortcutEventClassification()

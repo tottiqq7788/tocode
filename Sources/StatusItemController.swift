@@ -330,11 +330,18 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 )
                 item.target = self
                 item.representedObject = mapping.id.uuidString
+                let symbolName: String
+                switch mapping.target {
+                case .shortcut:
+                    symbolName = "checkmark.circle.fill"
+                case .action(let action):
+                    symbolName = action.menuSymbolName
+                }
                 item.image = NSImage(
-                    systemSymbolName: "checkmark.circle.fill",
+                    systemSymbolName: symbolName,
                     accessibilityDescription: "已配置"
                 )
-                item.toolTip = "\(mapping.source.displayName) → \(mapping.target.displayName)"
+                item.toolTip = "\(mapping.source.displayName) → \(mapping.target.displayText)"
             }
         }
         keyboardItem.submenu = keyboardMenu
