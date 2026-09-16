@@ -1196,6 +1196,38 @@ func testTrackpadShortcutStoreAndRecognizer() {
     expect(store.shortcut(for: .threeFingerTap) == nil, "清除只移除指定手势")
     expect(store.shortcut(for: .fiveFingerTap) == commandP, "清除三指不影响五指")
 
+    let legacyShortcut = RecordedShortcut(
+        keyCode: 8,
+        modifiers: [.option],
+        keyLabel: "C"
+    )
+    defaults.set(
+        try! JSONEncoder().encode(legacyShortcut),
+        forKey: "tocode.trackpadShortcut.4FingerTap"
+    )
+    expect(
+        store.binding(for: .fourFingerTap) == .shortcut(legacyShortcut),
+        "旧纯快捷键 JSON 读为映射快捷键"
+    )
+    expect(store.shortcut(for: .fourFingerTap) == legacyShortcut, "旧格式仍可通过 shortcut 读取")
+
+    store.setBinding(.action(.blackout), for: .fourFingerTap)
+    expect(store.binding(for: .fourFingerTap) == .action(.blackout), "功能绑定持久化")
+    expect(store.shortcut(for: .fourFingerTap) == nil, "功能绑定不是快捷键")
+    expect(store.allShortcuts()[.fiveFingerTap] == commandP, "功能绑定不进入 allShortcuts")
+    expect(store.hasAnyShortcut, "功能绑定也算已配置")
+    expect(
+        store.allBindings()[.fourFingerTap] == .action(.blackout),
+        "allBindings 包含功能目标"
+    )
+
+    store.removeBinding(for: .fiveFingerTap)
+    store.removeBinding(for: .fourFingerTap)
+    expect(!store.hasAnyShortcut, "清除全部绑定后 hasAnyShortcut 为 false")
+    store.setBinding(.action(.toggleHidden), for: .threeFingerTap)
+    expect(store.hasAnyShortcut, "纯功能绑定 hasAnyShortcut 为 true")
+    store.removeBinding(for: .threeFingerTap)
+
     func recognize(
         count: Int,
         duration: TimeInterval = 0.12,
@@ -1363,6 +1395,131 @@ func testTrackpadShortcutServiceLifecycleAndFaults() async {
     expect(
         deniedAlerts.titles.contains("触控板快捷键需要辅助功能权限"),
         "辅助功能未授权时明确提示"
+    )
+}
+
+func testTrackpadShortcutActionBindingsAndDispatch() async {
+    let suite = "tocode-trackpad-actions-\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defaults.removePersistentDomain(forName: suite)
+    defer { defaults.removePersistentDomain(forName: suite) }
+
+    let store = TrackpadShortcutStore(defaults: defaults)
+    let monitor = MockMultitouchMonitor()
+    let permissions = MockTrackpadPermissions(trusted: true)
+    let poster = MockTrackpadShortcutPoster()
+    let alerts = MockAlerts()
+    let service = TrackpadShortcutService(
+        store: store,
+        monitor: monitor,
+        permissions: permissions,
+        poster: poster,
+        alerts: alerts
+    )
+    defer { service.shutdown() }
+
+    var invoked: [KeyboardMappingAction] = []
+    service.actionHandler = { invoked.append($0) }
+
+    expect(
+        service.setBinding(.action(.blackout), for: .threeFingerTap),
+        "纯功能绑定保存成功"
+    )
+    expect(monitor.isRunning, "纯功能绑定启动触控监听")
+    expect(
+        service.binding(for: .threeFingerTap) == .action(.blackout),
+        "服务可读回功能绑定"
+    )
+    expect(service.shortcut(for: .threeFingerTap) == nil, "功能绑定不暴露为快捷键")
+
+    monitor.emit(count: 3, timestamp: 1)
+    monitor.emit(count: 3, timestamp: 1.04)
+    monitor.emit(count: 0, timestamp: 1.12, position: nil)
+    _ = await waitUntil { invoked == [.blackout] }
+    expect(invoked == [.blackout], "三指轻点 invoke 临时黑屏")
+    expect(poster.posted.isEmpty, "Tocode 动作不走组合键 poster")
+
+    invoked.removeAll()
+    expect(
+        service.setBinding(.action(.switchDesktopLeft), for: .fourFingerTap),
+        "桌面功能绑定保存成功"
+    )
+    monitor.emit(count: 4, timestamp: 2)
+    monitor.emit(count: 4, timestamp: 2.04)
+    monitor.emit(count: 0, timestamp: 2.12, position: nil)
+    _ = await waitUntil { poster.posted.count == 1 }
+    expect(
+        poster.posted == [KeyboardMappingAction.switchDesktopLeft.synthesizedShortcut!],
+        "桌面功能发出带 Fn 的 Control 方向键"
+    )
+    expect(invoked.isEmpty, "桌面功能不走 actionHandler")
+
+    let shortcut = RecordedShortcut(
+        keyCode: 35,
+        modifiers: [.command, .shift],
+        keyLabel: "P"
+    )
+    expect(
+        service.setBinding(.shortcut(shortcut), for: .fiveFingerTap),
+        "快捷键绑定保存成功"
+    )
+    monitor.emit(count: 5, timestamp: 3)
+    monitor.emit(count: 5, timestamp: 3.04)
+    monitor.emit(count: 0, timestamp: 3.12, position: nil)
+    _ = await waitUntil { poster.posted.count == 2 }
+    expect(poster.posted.last == shortcut, "快捷键绑定仍 poster.post")
+
+    invoked.removeAll()
+    _ = service.setBinding(.action(.toggleHidden), for: .threeFingerTap)
+    monitor.emit(count: 3, timestamp: 4)
+    monitor.emit(count: 3, timestamp: 4.04)
+    monitor.emit(count: 0, timestamp: 4.12, position: nil)
+    _ = await waitUntil { invoked == [.toggleHidden] }
+    expect(invoked == [.toggleHidden], "开关只触发一次 toggle")
+
+    service.clearBinding(for: .threeFingerTap)
+    service.clearBinding(for: .fourFingerTap)
+    service.clearBinding(for: .fiveFingerTap)
+    expect(!monitor.isRunning, "清除全部绑定后停止监听")
+
+    monitor.shouldStart = false
+    expect(
+        !service.setBinding(.action(.blackout), for: .threeFingerTap),
+        "触控监听不可用时功能绑定保存返回未生效"
+    )
+    expect(
+        service.binding(for: .threeFingerTap) == .action(.blackout),
+        "触控监听不可用时仍保留功能绑定"
+    )
+    expect(alerts.titles.contains("触控板监听未启动"), "功能绑定监听失败时明确提示")
+
+    let deniedSuite = "tocode-trackpad-action-denied-\(UUID().uuidString)"
+    let deniedDefaults = UserDefaults(suiteName: deniedSuite)!
+    deniedDefaults.removePersistentDomain(forName: deniedSuite)
+    defer { deniedDefaults.removePersistentDomain(forName: deniedSuite) }
+    let deniedMonitor = MockMultitouchMonitor()
+    let deniedPermissions = MockTrackpadPermissions(trusted: false, requestResult: false)
+    let deniedAlerts = MockAlerts()
+    let deniedService = TrackpadShortcutService(
+        store: TrackpadShortcutStore(defaults: deniedDefaults),
+        monitor: deniedMonitor,
+        permissions: deniedPermissions,
+        poster: MockTrackpadShortcutPoster(),
+        alerts: deniedAlerts
+    )
+    defer { deniedService.shutdown() }
+
+    expect(
+        !deniedService.setBinding(.action(.toggleDoubleCommandQ), for: .fourFingerTap),
+        "辅助功能未授权时功能绑定保存返回未生效"
+    )
+    expect(
+        deniedService.binding(for: .fourFingerTap) == .action(.toggleDoubleCommandQ),
+        "辅助功能未授权时仍保留功能绑定"
+    )
+    expect(
+        deniedAlerts.titles.contains("触控板快捷键需要辅助功能权限"),
+        "功能绑定未授权时明确提示"
     )
 }
 
@@ -1770,8 +1927,14 @@ func testKeyboardMappingTargetEditorRetainsBlackout() {
     expect(editor.target == .action(.blackout), "编辑已有黑屏规则时回填并保存临时黑屏")
     let desktop = KeyboardMappingTargetEditor(target: .action(.switchDesktopLeft))
     expect(desktop.target == .action(.switchDesktopLeft), "编辑桌面规则时回填向左切换桌面")
+    let trackpad = KeyboardMappingTargetEditor(
+        target: .action(.blackout),
+        actionTriggerPhrase: "轻点后"
+    )
+    expect(trackpad.target == .action(.blackout), "触控板弹窗复用同一编辑器并回填临时黑屏")
     editor.detach()
     desktop.detach()
+    trackpad.detach()
 }
 
 func testKeyboardMappingActionDispatchAndYield() {
@@ -4243,6 +4406,7 @@ struct TestRunnerMain {
         testShortcutSettingsStoreDefaults()
         testTrackpadShortcutStoreAndRecognizer()
         await testTrackpadShortcutServiceLifecycleAndFaults()
+        await testTrackpadShortcutActionBindingsAndDispatch()
         testKeyboardShortcutMappingStoreAndEngine()
         testKeyboardShortcutMappingActionTargets()
         await testKeyboardMappingTargetEditorRetainsBlackout()

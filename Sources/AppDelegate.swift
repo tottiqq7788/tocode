@@ -78,6 +78,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         keyboardRemaps.actionHandler = { [weak controller] action in
             controller?.performMappedAction(action)
         }
+        trackpad.actionHandler = { [weak controller] action in
+            controller?.performMappedAction(action)
+        }
         keyboardRemaps.shouldYieldAllEvents = { [weak blackout] in
             blackout?.isPresented == true
         }

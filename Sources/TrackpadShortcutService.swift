@@ -3,6 +3,10 @@ import CoreGraphics
 import Foundation
 
 protocol TrackpadShortcutControlling: AnyObject {
+    func binding(for gesture: TrackpadTapGesture) -> KeyboardShortcutMappingTarget?
+    @discardableResult
+    func setBinding(_ target: KeyboardShortcutMappingTarget, for gesture: TrackpadTapGesture) -> Bool
+    func clearBinding(for gesture: TrackpadTapGesture)
     func shortcut(for gesture: TrackpadTapGesture) -> RecordedShortcut?
     @discardableResult
     func setShortcut(_ shortcut: RecordedShortcut, for gesture: TrackpadTapGesture) -> Bool
@@ -56,9 +60,10 @@ final class TrackpadShortcutService: NSObject, TrackpadShortcutControlling {
     private let poster: TrackpadShortcutEventPosting
     private let alerts: ShortcutAlerting
     private let lock = NSLock()
-    private var shortcuts: [TrackpadTapGesture: RecordedShortcut] = [:]
+    private var bindings: [TrackpadTapGesture: KeyboardShortcutMappingTarget] = [:]
     private var recognizers: [UInt: TrackpadTapRecognizer] = [:]
     private var observingWake = false
+    var actionHandler: ((KeyboardMappingAction) -> Void)?
 
     init(
         store: TrackpadShortcutStore = TrackpadShortcutStore(),
@@ -77,11 +82,11 @@ final class TrackpadShortcutService: NSObject, TrackpadShortcutControlling {
 
     func applySavedSettings() {
         lock.lock()
-        shortcuts = store.allShortcuts()
-        let hasShortcuts = !shortcuts.isEmpty
+        bindings = store.allBindings()
+        let hasBindings = !bindings.isEmpty
         lock.unlock()
 
-        if hasShortcuts {
+        if hasBindings {
             startListeningAndRequestPermission()
         } else {
             monitor.stop()
@@ -89,27 +94,39 @@ final class TrackpadShortcutService: NSObject, TrackpadShortcutControlling {
         startWakeObservationIfNeeded()
     }
 
-    func shortcut(for gesture: TrackpadTapGesture) -> RecordedShortcut? {
+    func binding(for gesture: TrackpadTapGesture) -> KeyboardShortcutMappingTarget? {
         lock.lock()
         defer { lock.unlock() }
-        return shortcuts[gesture] ?? store.shortcut(for: gesture)
+        return bindings[gesture] ?? store.binding(for: gesture)
+    }
+
+    func shortcut(for gesture: TrackpadTapGesture) -> RecordedShortcut? {
+        if case .shortcut(let shortcut) = binding(for: gesture) {
+            return shortcut
+        }
+        return nil
     }
 
     @discardableResult
-    func setShortcut(_ shortcut: RecordedShortcut, for gesture: TrackpadTapGesture) -> Bool {
-        store.setShortcut(shortcut, for: gesture)
+    func setBinding(_ target: KeyboardShortcutMappingTarget, for gesture: TrackpadTapGesture) -> Bool {
+        store.setBinding(target, for: gesture)
         lock.lock()
-        shortcuts[gesture] = shortcut
+        bindings[gesture] = target
         lock.unlock()
         startWakeObservationIfNeeded()
         return startListeningAndRequestPermission()
     }
 
-    func clearShortcut(for gesture: TrackpadTapGesture) {
-        store.removeShortcut(for: gesture)
+    @discardableResult
+    func setShortcut(_ shortcut: RecordedShortcut, for gesture: TrackpadTapGesture) -> Bool {
+        setBinding(.shortcut(shortcut), for: gesture)
+    }
+
+    func clearBinding(for gesture: TrackpadTapGesture) {
+        store.removeBinding(for: gesture)
         lock.lock()
-        shortcuts.removeValue(forKey: gesture)
-        let shouldStop = shortcuts.isEmpty
+        bindings.removeValue(forKey: gesture)
+        let shouldStop = bindings.isEmpty
         if shouldStop {
             recognizers.removeAll()
         }
@@ -117,6 +134,10 @@ final class TrackpadShortcutService: NSObject, TrackpadShortcutControlling {
         if shouldStop {
             monitor.stop()
         }
+    }
+
+    func clearShortcut(for gesture: TrackpadTapGesture) {
+        clearBinding(for: gesture)
     }
 
     func shutdown() {
@@ -175,7 +196,7 @@ final class TrackpadShortcutService: NSObject, TrackpadShortcutControlling {
 
     @objc private func handleWake() {
         lock.lock()
-        let shouldRestart = !shortcuts.isEmpty
+        let shouldRestart = !bindings.isEmpty
         recognizers.removeAll()
         lock.unlock()
         guard shouldRestart else { return }
@@ -187,7 +208,7 @@ final class TrackpadShortcutService: NSObject, TrackpadShortcutControlling {
     }
 
     private func handle(_ frame: MultitouchContactFrame) {
-        var shortcut: RecordedShortcut?
+        var binding: KeyboardShortcutMappingTarget?
 
         lock.lock()
         var recognizer = recognizers[frame.deviceID] ?? TrackpadTapRecognizer()
@@ -200,19 +221,36 @@ final class TrackpadShortcutService: NSObject, TrackpadShortcutControlling {
         )
         recognizers[frame.deviceID] = recognizer
         if let gesture {
-            shortcut = shortcuts[gesture]
+            binding = bindings[gesture]
         }
         lock.unlock()
 
-        guard let shortcut else { return }
+        guard let binding else { return }
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            if !self.poster.post(shortcut) {
-                self.alerts.notify(
+            self?.perform(binding)
+        }
+    }
+
+    private func perform(_ binding: KeyboardShortcutMappingTarget) {
+        switch binding.remapStep() {
+        case .emit(let shortcut):
+            if !poster.post(shortcut) {
+                alerts.notify(
                     title: "触控板快捷键发送失败",
                     body: "快捷键配置已保留，其他输入功能不受影响。"
                 )
             }
+        case .invoke(let action):
+            if let actionHandler {
+                actionHandler(action)
+            } else {
+                alerts.notify(
+                    title: "触控板功能未执行",
+                    body: "功能配置已保留，其他输入功能不受影响。"
+                )
+            }
+        case .pass, .suppress:
+            break
         }
     }
 }

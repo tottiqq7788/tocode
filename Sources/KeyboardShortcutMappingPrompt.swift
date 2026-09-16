@@ -122,8 +122,13 @@ final class KeyboardMappingTargetEditor: NSObject {
     private let actionPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private var selectedAction: KeyboardMappingAction
     private var actionItems: [KeyboardMappingAction: NSMenuItem] = [:]
+    private let actionTriggerPhrase: String
 
-    init(target: KeyboardShortcutMappingTarget?) {
+    init(
+        target: KeyboardShortcutMappingTarget?,
+        actionTriggerPhrase: String = "命中源快捷键后"
+    ) {
+        self.actionTriggerPhrase = actionTriggerPhrase
         if case .action(let action)? = target {
             recorder = ShortcutRecorderView(shortcut: nil)
             selectedAction = action
@@ -255,7 +260,7 @@ final class KeyboardMappingTargetEditor: NSObject {
                     systemSymbolName: action.menuSymbolName,
                     accessibilityDescription: action.title
                 )
-                item.toolTip = "命中源快捷键后执行「\(group.title) → \(action.title)」"
+                item.toolTip = "\(actionTriggerPhrase)执行「\(group.title) → \(action.title)」"
                 menu.addItem(item)
                 actionItems[action] = item
             }

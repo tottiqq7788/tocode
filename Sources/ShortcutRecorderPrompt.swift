@@ -1,7 +1,7 @@
 import AppKit
 
 enum ShortcutRecorderResult {
-    case save(RecordedShortcut)
+    case save(KeyboardShortcutMappingTarget)
     case clear
     case cancel
 }
@@ -10,32 +10,43 @@ enum ShortcutRecorderResult {
 enum ShortcutRecorderPrompt {
     static func prompt(
         for gesture: TrackpadTapGesture,
-        existing: RecordedShortcut?
+        existing: KeyboardShortcutMappingTarget?
     ) -> ShortcutRecorderResult {
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.messageText = gesture.title
-        alert.informativeText = "快捷键"
+        alert.informativeText = "选择映射快捷键或映射功能。"
         alert.addButton(withTitle: "保存")
         alert.addButton(withTitle: "取消")
         alert.addButton(withTitle: "清除配置")
 
-        let recorder = ShortcutRecorderView(shortcut: existing)
-        alert.accessoryView = recorder
-        alert.window.initialFirstResponder = recorder
+        let targetEditor = KeyboardMappingTargetEditor(
+            target: existing,
+            actionTriggerPhrase: "轻点后"
+        )
+        targetEditor.view.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            targetEditor.view.widthAnchor.constraint(equalToConstant: KeyboardMappingTargetEditor.width)
+        ])
+        targetEditor.view.frame = NSRect(x: 0, y: 0, width: KeyboardMappingTargetEditor.width, height: 111)
+        alert.accessoryView = targetEditor.view
 
         let saveButton = alert.buttons[0]
         let clearButton = alert.buttons[2]
-        saveButton.isEnabled = existing != nil
-        clearButton.isEnabled = existing != nil
-        recorder.onChange = { shortcut in
-            saveButton.isEnabled = shortcut != nil
+        func updateButtons() {
+            saveButton.isEnabled = targetEditor.target != nil
+            clearButton.isEnabled = existing != nil
         }
+        targetEditor.onChange = updateButtons
+        updateButtons()
 
-        switch alert.runModal() {
+        let response = alert.runModal()
+        let target = targetEditor.target
+        targetEditor.detach()
+        switch response {
         case .alertFirstButtonReturn:
-            guard let shortcut = recorder.shortcut else { return .cancel }
-            return .save(shortcut)
+            guard let target else { return .cancel }
+            return .save(target)
         case .alertThirdButtonReturn:
             return .clear
         default:

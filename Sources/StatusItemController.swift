@@ -320,10 +320,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             )
             item.target = self
             item.representedObject = gesture.rawValue
-            ShortcutMenuAppearance.apply(
-                to: item,
-                enabled: trackpadShortcuts.shortcut(for: gesture) != nil
-            )
+            applyTrackpadMenuAppearance(to: item, gesture: gesture)
         }
         trackpadItem.submenu = trackpadMenu
 
@@ -700,19 +697,29 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             return
         }
 
-        let existing = trackpadShortcuts.shortcut(for: gesture)
+        shortcuts.setInputCaptureSuspended(true)
+        keyboardRemaps.setInputCaptureSuspended(true)
+        defer {
+            keyboardRemaps.setInputCaptureSuspended(false)
+            shortcuts.setInputCaptureSuspended(false)
+        }
+
+        let existing = trackpadShortcuts.binding(for: gesture)
         switch ShortcutRecorderPrompt.prompt(for: gesture, existing: existing) {
-        case .save(let shortcut):
-            _ = trackpadShortcuts.setShortcut(shortcut, for: gesture)
+        case .save(let target):
+            _ = trackpadShortcuts.setBinding(target, for: gesture)
         case .clear:
-            trackpadShortcuts.clearShortcut(for: gesture)
+            trackpadShortcuts.clearBinding(for: gesture)
         case .cancel:
             break
         }
-        ShortcutMenuAppearance.apply(
-            to: sender,
-            enabled: trackpadShortcuts.shortcut(for: gesture) != nil
-        )
+        applyTrackpadMenuAppearance(to: sender, gesture: gesture)
+    }
+
+    private func applyTrackpadMenuAppearance(to item: NSMenuItem, gesture: TrackpadTapGesture) {
+        let binding = trackpadShortcuts.binding(for: gesture)
+        ShortcutMenuAppearance.apply(to: item, enabled: binding != nil)
+        item.toolTip = binding?.displayText
     }
 
     @objc private func createKeyboardMapping() {

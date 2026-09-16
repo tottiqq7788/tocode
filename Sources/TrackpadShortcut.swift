@@ -67,9 +67,22 @@ struct TrackpadShortcutStore {
         self.defaults = defaults
     }
 
-    func shortcut(for gesture: TrackpadTapGesture) -> RecordedShortcut? {
+    func binding(for gesture: TrackpadTapGesture) -> KeyboardShortcutMappingTarget? {
         guard let data = defaults.data(forKey: key(for: gesture)) else { return nil }
-        return try? JSONDecoder().decode(RecordedShortcut.self, from: data)
+        return try? JSONDecoder().decode(KeyboardShortcutMappingTarget.self, from: data)
+    }
+
+    func shortcut(for gesture: TrackpadTapGesture) -> RecordedShortcut? {
+        if case .shortcut(let shortcut) = binding(for: gesture) {
+            return shortcut
+        }
+        return nil
+    }
+
+    func allBindings() -> [TrackpadTapGesture: KeyboardShortcutMappingTarget] {
+        Dictionary(uniqueKeysWithValues: TrackpadTapGesture.allCases.compactMap { gesture in
+            binding(for: gesture).map { (gesture, $0) }
+        })
     }
 
     func allShortcuts() -> [TrackpadTapGesture: RecordedShortcut] {
@@ -79,16 +92,24 @@ struct TrackpadShortcutStore {
     }
 
     var hasAnyShortcut: Bool {
-        TrackpadTapGesture.allCases.contains { shortcut(for: $0) != nil }
+        TrackpadTapGesture.allCases.contains { binding(for: $0) != nil }
     }
 
-    func setShortcut(_ shortcut: RecordedShortcut, for gesture: TrackpadTapGesture) {
-        guard let data = try? JSONEncoder().encode(shortcut) else { return }
+    func setBinding(_ target: KeyboardShortcutMappingTarget, for gesture: TrackpadTapGesture) {
+        guard let data = try? JSONEncoder().encode(target) else { return }
         defaults.set(data, forKey: key(for: gesture))
     }
 
-    func removeShortcut(for gesture: TrackpadTapGesture) {
+    func setShortcut(_ shortcut: RecordedShortcut, for gesture: TrackpadTapGesture) {
+        setBinding(.shortcut(shortcut), for: gesture)
+    }
+
+    func removeBinding(for gesture: TrackpadTapGesture) {
         defaults.removeObject(forKey: key(for: gesture))
+    }
+
+    func removeShortcut(for gesture: TrackpadTapGesture) {
+        removeBinding(for: gesture)
     }
 
     private func key(for gesture: TrackpadTapGesture) -> String {
