@@ -2,7 +2,7 @@ import AppKit
 
 @MainActor
 enum AnkerCredentialPrompt {
-    static let menuTitle = "安克密钥"
+    static let menuTitle = ExtendedSettingsStore.akCredentialTitle
 
     static func prompt() -> String? {
         let alert = NSAlert()
@@ -11,8 +11,8 @@ enum AnkerCredentialPrompt {
         alert.addButton(withTitle: "保存")
         alert.addButton(withTitle: "取消")
         let field = AnkerSecureTextField(frame: NSRect(x: 0, y: 0, width: 380, height: 26))
-        field.placeholderString = "输入新的安克密钥"
-        field.setAccessibilityLabel("新的安克密钥")
+        field.placeholderString = "输入新的 AK 密钥"
+        field.setAccessibilityLabel("新的 AK 密钥")
         alert.accessoryView = field
         alert.window.initialFirstResponder = field
         NSApp.activate(ignoringOtherApps: true)
@@ -29,11 +29,11 @@ enum AnkerCredentialPrompt {
         let alert = NSAlert()
         switch result {
         case .success:
-            alert.messageText = "安克密钥已更新"
+            alert.messageText = "AK密钥已更新"
             alert.informativeText = "已保存到 pi、Codex（通过 CC Switch）、Hermes 和 OpenCode。\n\npi 和 Codex 的后续请求会读取新密钥。已打开的 Hermes、OpenCode 会话请重新加载或重开；若 pi 使用过手动登录凭据，可打开 /model 重新加载配置。"
         case .failure(let error):
             alert.alertStyle = .warning
-            alert.messageText = "安克密钥未保存成功"
+            alert.messageText = "AK密钥未保存成功"
             alert.informativeText = (error as? AnkerCredentialError)?.localizedDescription
                 ?? AnkerCredentialError.writeFailed.localizedDescription
         }

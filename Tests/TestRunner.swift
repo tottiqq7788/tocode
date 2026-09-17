@@ -809,6 +809,27 @@ func testShortcutSettingsStoreDefaults() {
     expect(!store.finderMoveHotkeysEnabled, "finderMove 可写回关闭")
 }
 
+func testExtendedSettingsStore() {
+    let suite = "tocode-extended-settings-\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defaults.removePersistentDomain(forName: suite)
+    defer { defaults.removePersistentDomain(forName: suite) }
+
+    let store = ExtendedSettingsStore(defaults: defaults)
+    expect(!store.akEnabled, "AK 类型默认关闭")
+    expect(ExtendedSettingsStore.folderTitle == "拓展设置", "拓展设置夹标题")
+    expect(ExtendedSettingsStore.akTitle == "AK", "AK 类型标题")
+    expect(ExtendedSettingsStore.akCredentialTitle == "AK密钥", "安克入口菜单名为 AK密钥")
+
+    store.akEnabled = true
+    expect(store.akEnabled, "AK 类型可持久化为开启")
+    let reread = ExtendedSettingsStore(defaults: defaults)
+    expect(reread.akEnabled, "AK 类型重启后仍为开启")
+
+    store.akEnabled = false
+    expect(!store.akEnabled, "AK 类型可写回关闭")
+}
+
 func testShortcutEventClassification() {
     let cmdX = ShortcutKeyClassifier.snapshot(
         keyCode: ShortcutKeyClassifier.keyX,
@@ -4404,6 +4425,7 @@ struct TestRunnerMain {
         testFinderVisibilityService()
         testFinderSelectionService()
         testShortcutSettingsStoreDefaults()
+        testExtendedSettingsStore()
         testTrackpadShortcutStoreAndRecognizer()
         await testTrackpadShortcutServiceLifecycleAndFaults()
         await testTrackpadShortcutActionBindingsAndDispatch()

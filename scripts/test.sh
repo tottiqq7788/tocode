@@ -12,6 +12,7 @@ swiftc Tests/TestRunner.swift \
   Sources/RootPathStore.swift \
   Sources/CodexProjectService.swift \
   Sources/CodexSyncSettingsStore.swift \
+  Sources/ExtendedSettingsStore.swift \
   Sources/CodexModelSwitchService.swift \
   Sources/AnkerCredentialService.swift \
   Sources/CodexApplicationRestarter.swift \

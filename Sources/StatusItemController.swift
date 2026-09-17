@@ -22,6 +22,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private let codexModels: CodexModelSwitching
     private let codexRestarter: CodexApplicationRestarting
     private let ankerCredentials: AnkerCredentialUpdating
+    private let extendedSettings: ExtendedSettingsStore
     private let screenBlackout: ScreenBlackoutService
     private let commandExecutor: TocodeCommandExecutor
     private let actionDispatcher = KeyboardMappingActionDispatcher()
@@ -33,6 +34,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private var isSwitchingModel = false
     private var isUpdatingCredentials = false
     private var commandPollingTimer: Timer?
+    private weak var liveCodexMenu: NSMenu?
+    private weak var liveSettingsMenu: NSMenu?
+    private static let ankerKeyItemID = "tocode.extended.ankerKey"
+    private static let codexModelItemID = "tocode.extended.codexModel"
+    private static let codexModelSeparatorID = "tocode.extended.codexModelSeparator"
 
     init(
         shortcuts: GlobalShortcutService,
@@ -46,6 +52,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         codexModels: CodexModelSwitching = CodexModelSwitchService(),
         codexRestarter: CodexApplicationRestarting = CodexApplicationRestarter(),
         ankerCredentials: AnkerCredentialUpdating = AnkerCredentialService(),
+        extendedSettings: ExtendedSettingsStore = ExtendedSettingsStore(),
         screenBlackout: ScreenBlackoutService? = nil,
         commandExecutor: TocodeCommandExecutor
     ) {
@@ -60,6 +67,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         self.codexModels = codexModels
         self.codexRestarter = codexRestarter
         self.ankerCredentials = ankerCredentials
+        self.extendedSettings = extendedSettings
         self.screenBlackout = screenBlackout ?? ScreenBlackoutService(overlay: ScreenBlackoutOverlay())
         self.commandExecutor = commandExecutor
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -244,25 +252,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         let syncItem = codexMenu.addItem(withTitle: "同步项目夹", action: #selector(toggleCodexProjectSync(_:)), keyEquivalent: "")
         syncItem.target = self
         ShortcutMenuAppearance.apply(to: syncItem, enabled: syncEnabled)
-
-        codexMenu.addItem(.separator())
-        let modelState = try? codexModels.currentState()
-        currentModelID = modelState?.liveModelID
-        let modelTitle = modelState.map {
-            CodexModelCatalog.displayName(for: $0.liveModelID)
-        } ?? "模型不可用"
-        let modelItem = codexMenu.addItem(withTitle: modelTitle, action: nil, keyEquivalent: "")
-        modelItem.image = NSImage(systemSymbolName: "cpu", accessibilityDescription: nil)
-        if let modelState, !modelState.isConsistent {
-            modelItem.toolTip = "Codex 实时配置与 CC Switch Provider 模板当前不一致"
-        }
-        let modelMenu = NSMenu()
-        modelMenu.autoenablesItems = false
-        modelMenu.delegate = self
-        addModelStatusItem("悬停后实时加载", to: modelMenu)
-        modelItem.submenu = modelMenu
-        activeModelMenu = modelMenu
-        activeModelParentItem = modelItem
+        activeModelMenu = nil
+        activeModelParentItem = nil
+        currentModelID = nil
+        syncCodexModelItem(in: codexMenu)
+        liveCodexMenu = codexMenu
         codexItem.submenu = codexMenu
 
         let weChatItem = menu.addItem(withTitle: "微信关联", action: nil, keyEquivalent: "")
@@ -392,7 +386,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         )
         macItem.submenu = macMenu
 
-        // 设置：应用级启动项与本机安克凭据。
+        // 设置：开机自启、拓展类型，以及类型勾选后才出现的专用项。
         let settingsItem = menu.addItem(withTitle: "设置", action: nil, keyEquivalent: "")
         settingsItem.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil)
         let settings = NSMenu()
@@ -403,13 +397,26 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             enabled: launchAtLogin.isEnabled,
             action: #selector(toggleLaunchAtLogin(_:))
         )
-        let ankerKey = settings.addItem(
-            withTitle: isUpdatingCredentials ? "安克密钥（保存中…）" : AnkerCredentialPrompt.menuTitle,
-            action: #selector(changeAnkerCredential), keyEquivalent: ""
+        let extendedItem = settings.addItem(
+            withTitle: ExtendedSettingsStore.folderTitle,
+            action: nil,
+            keyEquivalent: ""
         )
-        ankerKey.target = self
-        ankerKey.image = NSImage(systemSymbolName: "key", accessibilityDescription: nil)
-        ankerKey.isEnabled = !isUpdatingCredentials && !isSwitchingModel
+        extendedItem.image = NSImage(
+            systemSymbolName: "ellipsis.circle",
+            accessibilityDescription: nil
+        )
+        let extendedMenu = NSMenu()
+        extendedMenu.autoenablesItems = false
+        addShortcutToggle(
+            to: extendedMenu,
+            title: ExtendedSettingsStore.akTitle,
+            enabled: extendedSettings.akEnabled,
+            action: #selector(toggleExtendedSettingAK(_:))
+        )
+        extendedItem.submenu = extendedMenu
+        liveSettingsMenu = settings
+        syncAnkerKeyItem(in: settings)
         settingsItem.submenu = settings
 
         menu.addItem(.separator())
@@ -425,6 +432,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         if let button = statusItem.button {
             menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
         }
+        liveCodexMenu = nil
+        liveSettingsMenu = nil
     }
 
     /// 读取剪贴板：若是纯文件夹路径（不带「」），设为根文件夹并通知。
@@ -461,6 +470,105 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     @objc private func toggleCodexProjectSync(_ sender: NSMenuItem) {
         codexSync.syncEnabled = !codexSync.syncEnabled
         ShortcutMenuAppearance.apply(to: sender, enabled: codexSync.syncEnabled)
+    }
+
+    @objc private func toggleExtendedSettingAK(_ sender: NSMenuItem) {
+        extendedSettings.akEnabled = !extendedSettings.akEnabled
+        ShortcutMenuAppearance.apply(to: sender, enabled: extendedSettings.akEnabled)
+        if let settings = liveSettingsMenu {
+            syncAnkerKeyItem(in: settings)
+        }
+        if let codex = liveCodexMenu {
+            syncCodexModelItem(in: codex)
+        }
+    }
+
+    private func syncAnkerKeyItem(in settings: NSMenu) {
+        let existing = settings.items.first {
+            ($0.representedObject as? String) == Self.ankerKeyItemID
+        }
+        if extendedSettings.akEnabled {
+            guard existing == nil else {
+                existing?.title = ankerKeyItemTitle
+                existing?.isEnabled = !isUpdatingCredentials && !isSwitchingModel
+                return
+            }
+            let item = makeAnkerKeyItem()
+            if let extendedIndex = settings.items.firstIndex(where: {
+                $0.title == ExtendedSettingsStore.folderTitle
+            }) {
+                settings.insertItem(item, at: extendedIndex)
+            } else {
+                settings.addItem(item)
+            }
+        } else if let existing {
+            settings.removeItem(existing)
+        }
+    }
+
+    private var ankerKeyItemTitle: String {
+        isUpdatingCredentials
+            ? "\(AnkerCredentialPrompt.menuTitle)（保存中…）"
+            : AnkerCredentialPrompt.menuTitle
+    }
+
+    private func makeAnkerKeyItem() -> NSMenuItem {
+        let item = NSMenuItem(
+            title: ankerKeyItemTitle,
+            action: #selector(changeAnkerCredential),
+            keyEquivalent: ""
+        )
+        item.target = self
+        item.image = NSImage(systemSymbolName: "key", accessibilityDescription: nil)
+        item.isEnabled = !isUpdatingCredentials && !isSwitchingModel
+        item.representedObject = Self.ankerKeyItemID
+        return item
+    }
+
+    private func syncCodexModelItem(in codexMenu: NSMenu) {
+        let separator = codexMenu.items.first {
+            ($0.representedObject as? String) == Self.codexModelSeparatorID
+        }
+        let modelItem = codexMenu.items.first {
+            ($0.representedObject as? String) == Self.codexModelItemID
+        }
+        if extendedSettings.akEnabled {
+            guard modelItem == nil else { return }
+            let sep = NSMenuItem.separator()
+            sep.representedObject = Self.codexModelSeparatorID
+            codexMenu.addItem(sep)
+
+            let modelState = try? codexModels.currentState()
+            currentModelID = modelState?.liveModelID
+            let modelTitle = modelState.map {
+                CodexModelCatalog.displayName(for: $0.liveModelID)
+            } ?? "模型不可用"
+            let item = codexMenu.addItem(withTitle: modelTitle, action: nil, keyEquivalent: "")
+            item.image = NSImage(systemSymbolName: "cpu", accessibilityDescription: nil)
+            item.representedObject = Self.codexModelItemID
+            if let modelState, !modelState.isConsistent {
+                item.toolTip = "Codex 实时配置与 CC Switch Provider 模板当前不一致"
+            }
+            let modelMenu = NSMenu()
+            modelMenu.autoenablesItems = false
+            modelMenu.delegate = self
+            addModelStatusItem("悬停后实时加载", to: modelMenu)
+            item.submenu = modelMenu
+            activeModelMenu = modelMenu
+            activeModelParentItem = item
+        } else {
+            if let separator {
+                codexMenu.removeItem(separator)
+            }
+            if let modelItem {
+                codexMenu.removeItem(modelItem)
+            }
+            if activeModelParentItem == nil || activeModelParentItem === modelItem {
+                activeModelMenu = nil
+                activeModelParentItem = nil
+            }
+            currentModelID = nil
+        }
     }
 
     func menuWillOpen(_ menu: NSMenu) {
