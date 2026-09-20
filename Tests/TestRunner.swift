@@ -2624,6 +2624,27 @@ func testShortcutMenuAppearance() {
     expect(item.image != nil, "快捷键开启图标可创建")
 }
 
+func testAlertFocusesFirstEditableTextField() {
+    let stack = NSStackView()
+    stack.addArrangedSubview(NSTextField(labelWithString: "名称"))
+    let nameField = NSTextField(string: "草稿")
+    nameField.isEditable = true
+    stack.addArrangedSubview(nameField)
+    stack.addArrangedSubview(NSTextField(labelWithString: "格式"))
+    let second = NSTextField(string: "第二框")
+    second.isEditable = true
+    stack.addArrangedSubview(second)
+
+    expect(AlertFocus.firstEditableTextField(in: stack) === nameField, "跳过标签后落到第一个可编辑文本框")
+
+    let secret = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 100, height: 24))
+    expect(AlertFocus.firstEditableTextField(in: secret) === secret, "安全输入框本身就是第一个文本框")
+
+    let labels = NSStackView()
+    labels.addArrangedSubview(NSTextField(labelWithString: "仅标签"))
+    expect(AlertFocus.firstEditableTextField(in: labels) == nil, "没有可编辑文本框时返回空")
+}
+
 func testFinderCommandQStateMachine() {
     var engine = GlobalShortcutEngine()
     engine.setFinderCommandQEnabled(true)
@@ -5099,6 +5120,7 @@ struct TestRunnerMain {
         testShortcutServiceLifecycleAndFaults()
         testFinderCutProbeAndQuitEffects()
         testShortcutMenuAppearance()
+        testAlertFocusesFirstEditableTextField()
         testFinderCommandQStateMachine()
         testCommandQTargetResolver()
         testFinderDismissServiceFaults()

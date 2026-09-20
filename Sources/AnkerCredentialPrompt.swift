@@ -14,10 +14,8 @@ enum AnkerCredentialPrompt {
         field.placeholderString = "输入新的 AK 密钥"
         field.setAccessibilityLabel("新的 AK 密钥")
         alert.accessoryView = field
-        alert.window.initialFirstResponder = field
-        NSApp.activate(ignoringOtherApps: true)
         defer { field.stringValue = "" }
-        while alert.runModal() == .alertFirstButtonReturn {
+        while alert.runModalFocusingFirstTextField() == .alertFirstButtonReturn {
             if let key = try? AnkerCredentialService.normalizedKey(field.stringValue) { return key }
             alert.informativeText = AnkerCredentialError.invalidKey.localizedDescription
             alert.window.makeFirstResponder(field)

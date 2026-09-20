@@ -71,10 +71,9 @@ enum KeyboardShortcutMappingPrompt {
         sourceRecorder.onChange = { _ in updateSaveButton() }
         targetEditor.onChange = updateSaveButton
         updateSaveButton()
-        alert.window.initialFirstResponder = nameField
 
         let response = withExtendedLifetime(observer) {
-            alert.runModal()
+            alert.runModalFocusingFirstTextField()
         }
         nameField.delegate = nil
         sourceRecorder.onChange = nil

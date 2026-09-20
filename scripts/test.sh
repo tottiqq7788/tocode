@@ -20,6 +20,7 @@ swiftc Tests/TestRunner.swift \
   Sources/FinderSelectionService.swift \
   Sources/ShortcutSettingsStore.swift \
   Sources/ShortcutMenuAppearance.swift \
+  Sources/AlertFocus.swift \
   Sources/GlobalShortcutState.swift \
   Sources/KeyboardEventSynthesizer.swift \
   Sources/TrackpadShortcut.swift \

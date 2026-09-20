@@ -283,9 +283,8 @@ enum NewItemPrompt {
         // 强引用 updater，避免 target 被释放。
         withExtendedLifetime(updater) {}
         alert.accessoryView = stack
-        alert.window.initialFirstResponder = nameField
 
-        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        guard alert.runModalFocusingFirstTextField() == .alertFirstButtonReturn else { return nil }
         let kind: Kind = typeControl.selectedSegment == 1 ? .file : .folder
         let selected = formatPopUp.selectedItem?.representedObject as? String
         let format = selected.flatMap { FileFormat(rawValue: $0) } ?? .txt
