@@ -4,6 +4,9 @@ import Foundation
 struct TocodeCLI {
     static func main() {
         let args = Array(CommandLine.arguments.dropFirst())
-        exit(TocodeCLIRunner.run(arguments: args, transport: TocodeSocketTransport()))
+        exit(TocodeCLIRunner.run(
+            arguments: args,
+            transport: TocodeSocketTransport(timeout: TocodeCLIArgumentPrep.timeout(for: args))
+        ))
     }
 }

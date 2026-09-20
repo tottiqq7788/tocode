@@ -114,6 +114,8 @@ final class TocodeCommandExecutor {
             return executeRoot(subcommand)
         case .codex(let subcommand):
             return executeCodex(subcommand)
+        case .wechat(.send):
+            return .failure(.operationFailed("wechat send 需要通过 CLI 异步执行"))
         case .wechat(let subcommand):
             return executeWechat(subcommand)
         case .blackout:
@@ -164,6 +166,22 @@ final class TocodeCommandExecutor {
             return .failure(error)
         case .success(let command):
             return execute(command)
+        }
+    }
+
+    func executeAsync(_ command: TocodeCommand) async -> TocodeCommandResult {
+        if case .wechat(.send(let payload)) = command {
+            return await weChat.sendOutbound(payload)
+        }
+        return execute(command)
+    }
+
+    func executeAsync(_ body: String) async -> TocodeCommandResult {
+        switch TocodeCommandParser.parse(body) {
+        case .failure(let error):
+            return .failure(error)
+        case .success(let command):
+            return await executeAsync(command)
         }
     }
 
@@ -314,6 +332,8 @@ final class TocodeCommandExecutor {
         case .location:
             weChat.openArchiveLocation()
             return .success(TocodeCommandOutput("已在访达打开微信归档目录"))
+        case .send:
+            return .failure(.operationFailed("wechat send 需要通过 CLI 异步执行"))
         }
     }
 

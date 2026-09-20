@@ -8,6 +8,14 @@ protocol WeChatAssociationControlling: AnyObject {
     func startBoundListener()
     func openArchiveLocation()
     func stop()
+    func sendOutbound(_ payload: TocodeWechatSendPayload) async -> TocodeCommandResult
+}
+
+extension WeChatAssociationControlling {
+    func sendOutbound(_ payload: TocodeWechatSendPayload) async -> TocodeCommandResult {
+        _ = payload
+        return .failure(.operationFailed("微信未绑定"))
+    }
 }
 
 protocol WeChatSleeping {
@@ -295,6 +303,7 @@ final class WeChatAssociationService: WeChatAssociationControlling {
                     committed.recentKeys = Array(
                         committed.recentKeys.suffix(WeChatDeduplication.maximumKeys)
                     )
+                    committed.rememberInbound(message)
                     try stateStore.save(committed)
                     state = committed
                     known.insert(key)
@@ -342,6 +351,7 @@ final class WeChatAssociationService: WeChatAssociationControlling {
         if !cursor.isEmpty {
             committed.cursor = cursor
         }
+        committed.rememberInbound(message)
         try stateStore.save(committed)
         state = committed
         known.insert(key)
@@ -352,7 +362,7 @@ final class WeChatAssociationService: WeChatAssociationControlling {
         case .command(let body):
             helpBody = body
             if let executor = commandExecutor {
-                result = executor.execute(body)
+                result = await executor.executeAsync(body)
             } else {
                 result = .failure(.operationFailed("命令执行器未就绪"))
             }
@@ -384,6 +394,119 @@ final class WeChatAssociationService: WeChatAssociationControlling {
         } catch {
             notifier.notify(title: "命令结果发送失败", body: reply)
         }
+    }
+
+    func sendOutbound(_ payload: TocodeWechatSendPayload) async -> TocodeCommandResult {
+        guard let credential else {
+            return .failure(.operationFailed("微信未绑定"))
+        }
+        let state = stateStore.load()
+        guard let target = state.replyTarget(userID: payload.toUserID) else {
+            if let to = payload.toUserID, !to.isEmpty {
+                return .failure(.operationFailed("没有该用户的会话记录，请先收到对方消息"))
+            }
+            return .failure(.operationFailed("还没有可回复的会话，请先收到一条微信消息"))
+        }
+
+        var sent = 0
+        if let text = payload.text {
+            do {
+                try await transport.sendItems(
+                    credential: credential,
+                    toUserID: target.userID,
+                    contextToken: target.contextToken,
+                    items: [.text(text)]
+                )
+                sent += 1
+            } catch {
+                return .failure(.operationFailed(sendFailureMessage(error, sent: sent)))
+            }
+        }
+
+        for path in payload.files {
+            switch await sendFile(path, credential: credential, target: target) {
+            case .failure(let error):
+                return .failure(.operationFailed(sendFailureMessage(error, sent: sent)))
+            case .success:
+                sent += 1
+            }
+        }
+        return .success(TocodeCommandOutput(sent == 1 ? "已发送" : "已发送 \(sent) 条消息"))
+    }
+
+    private func sendFile(
+        _ path: String,
+        credential: WeChatCredential,
+        target: WeChatReplyTarget
+    ) async -> Result<Void, Error> {
+        let url = URL(fileURLWithPath: path)
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+              !isDirectory.boolValue else {
+            return .failure(TocodeCommandError.operationFailed("找不到文件：\(path)"))
+        }
+        do {
+            let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+            let size = (attributes[.size] as? NSNumber)?.intValue ?? 0
+            guard size <= TocodeWechatSendPayload.maximumFileBytes else {
+                return .failure(
+                    TocodeCommandError.operationFailed("文件超过 20MB：\(url.lastPathComponent)")
+                )
+            }
+            let data = try Data(contentsOf: url)
+            let kind = WeChatOutboundMediaKind.classify(path: url.path)
+            let uploaded = try await transport.uploadMedia(
+                credential: credential,
+                toUserID: target.userID,
+                fileName: url.lastPathComponent,
+                data: data,
+                kind: kind
+            )
+            let item: WeChatOutboundMessageItem
+            switch kind {
+            case .image:
+                item = .image(uploaded)
+            case .file:
+                item = .file(name: url.lastPathComponent, media: uploaded)
+            }
+            try await transport.sendItems(
+                credential: credential,
+                toUserID: target.userID,
+                contextToken: target.contextToken,
+                items: [item]
+            )
+            return .success(())
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    private func sendFailureMessage(_ error: Error, sent: Int) -> String {
+        let reason: String
+        if let command = error as? TocodeCommandError {
+            reason = command.message
+        } else if let transport = error as? WeChatTransportError {
+            switch transport {
+            case .unauthorized:
+                reason = "微信授权已失效"
+            case .untrustedURL:
+                reason = "微信服务地址不受信任"
+            case .emptyUploadParam, .missingEncryptedParam, .invalidResponse:
+                reason = "微信上传协议不匹配"
+            case .apiFailure(let ret):
+                reason = "微信接口返回 \(ret)"
+            case .serverFailure(let status):
+                reason = "微信服务暂时故障（\(status)）"
+            default:
+                reason = "发送失败"
+            }
+        } else {
+            reason = "发送失败"
+        }
+        if sent == 0 {
+            return reason
+        }
+        return "已发送 \(sent) 条后失败：\(reason)"
     }
 
     private func clearRejectedBinding() async {

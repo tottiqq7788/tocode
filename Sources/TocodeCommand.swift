@@ -33,10 +33,19 @@ enum TocodeCodexCommand: Equatable {
     case modelSet(String)
 }
 
+struct TocodeWechatSendPayload: Equatable {
+    var toUserID: String?
+    var text: String?
+    var files: [String]
+
+    static let maximumFileBytes = 20 * 1024 * 1024
+}
+
 enum TocodeWechatCommand: Equatable {
     case status
     case bind
     case location
+    case send(TocodeWechatSendPayload)
 }
 
 enum TocodeCommand: Equatable {
@@ -149,6 +158,8 @@ enum TocodeCommandParser {
         wechat status                       是否已绑定
         wechat bind                         触发扫码绑定
         wechat location                     创建并在访达打开归档目录
+        wechat send [--to <id>] [--text <文字>] [文件...]
+                                            向最近会话发送文字、图片或附件
 
       其他
         blackout（别名 .lshp）                mac → 临时黑屏
@@ -179,6 +190,7 @@ enum TocodeCommandParser {
         ("wechat status", "是否已绑定"),
         ("wechat bind", "触发扫码绑定"),
         ("wechat location", "创建并在访达打开归档目录"),
+        ("wechat send [--to <id>] [--text <文字>] [文件...]", "向最近会话发送文字、图片或附件"),
         ("blackout", "mac → 临时黑屏（别名 .lshp）"),
         ("login on|off|toggle", "开机自启"),
         ("wheel vertical on|off|toggle", "对调垂直滚轮"),
@@ -352,9 +364,55 @@ enum TocodeCommandParser {
         case "location":
             guard tokens.count == 1 else { return .failure(.invalidArguments("wechat location")) }
             return .success(.wechat(.location))
+        case "send":
+            return parseWechatSend(Array(tokens.dropFirst()))
         default:
             return .failure(.unknownCommand("wechat \(sub)"))
         }
+    }
+
+    private static func parseWechatSend(_ tokens: [String]) -> Result<TocodeCommand, TocodeCommandError> {
+        var toUserID: String?
+        var text: String?
+        var files: [String] = []
+        var index = 0
+        while index < tokens.count {
+            let token = tokens[index]
+            switch token {
+            case "--to":
+                guard index + 1 < tokens.count else {
+                    return .failure(.missingValue("wechat send --to <user_id>"))
+                }
+                toUserID = tokens[index + 1]
+                index += 2
+            case "--text":
+                guard index + 1 < tokens.count else {
+                    return .failure(.missingValue("wechat send --text <文字>"))
+                }
+                text = tokens[index + 1]
+                index += 2
+            default:
+                if token.hasPrefix("--") {
+                    return .failure(.invalidArguments("wechat send \(token)"))
+                }
+                files.append(token)
+                index += 1
+            }
+        }
+        let trimmedTo = toUserID?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmedTo, trimmedTo.isEmpty {
+            return .failure(.invalidArguments("wechat send --to"))
+        }
+        let trimmedText = text?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedText = (trimmedText?.isEmpty == false) ? trimmedText : nil
+        guard resolvedText != nil || !files.isEmpty else {
+            return .failure(.missingValue("wechat send --text <文字> | <文件>"))
+        }
+        return .success(.wechat(.send(TocodeWechatSendPayload(
+            toUserID: (trimmedTo?.isEmpty == false) ? trimmedTo : nil,
+            text: resolvedText,
+            files: files
+        ))))
     }
 
     private static func parseWheel(_ tokens: [String], verb: String) -> Result<TocodeCommand, TocodeCommandError> {

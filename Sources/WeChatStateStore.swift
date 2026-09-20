@@ -1,11 +1,72 @@
 import CommonCrypto
 import Foundation
 
+struct WeChatReplyTarget: Codable, Equatable {
+    var userID: String
+    var contextToken: String
+}
+
 struct WeChatReceiveState: Codable, Equatable {
     var cursor: String
     var recentKeys: [String]
+    var lastReply: WeChatReplyTarget?
+    var recentReplies: [WeChatReplyTarget]
 
-    static let empty = WeChatReceiveState(cursor: "", recentKeys: [])
+    static let empty = WeChatReceiveState(
+        cursor: "",
+        recentKeys: [],
+        lastReply: nil,
+        recentReplies: []
+    )
+    static let maximumRecentReplies = 32
+
+    enum CodingKeys: String, CodingKey {
+        case cursor
+        case recentKeys
+        case lastReply
+        case recentReplies
+    }
+
+    init(
+        cursor: String,
+        recentKeys: [String],
+        lastReply: WeChatReplyTarget? = nil,
+        recentReplies: [WeChatReplyTarget] = []
+    ) {
+        self.cursor = cursor
+        self.recentKeys = recentKeys
+        self.lastReply = lastReply
+        self.recentReplies = recentReplies
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        cursor = try container.decodeIfPresent(String.self, forKey: .cursor) ?? ""
+        recentKeys = try container.decodeIfPresent([String].self, forKey: .recentKeys) ?? []
+        lastReply = try container.decodeIfPresent(WeChatReplyTarget.self, forKey: .lastReply)
+        recentReplies = try container.decodeIfPresent(
+            [WeChatReplyTarget].self,
+            forKey: .recentReplies
+        ) ?? []
+    }
+
+    mutating func rememberInbound(_ message: WeChatMessage) {
+        guard !message.fromUserID.isEmpty, !message.contextToken.isEmpty else { return }
+        let target = WeChatReplyTarget(userID: message.fromUserID, contextToken: message.contextToken)
+        lastReply = target
+        recentReplies.removeAll { $0.userID == target.userID }
+        recentReplies.append(target)
+        if recentReplies.count > Self.maximumRecentReplies {
+            recentReplies.removeFirst(recentReplies.count - Self.maximumRecentReplies)
+        }
+    }
+
+    func replyTarget(userID: String?) -> WeChatReplyTarget? {
+        if let userID, !userID.isEmpty {
+            return recentReplies.last(where: { $0.userID == userID })
+        }
+        return lastReply
+    }
 }
 
 protocol WeChatReceiveStateStoring {
@@ -37,7 +98,9 @@ final class FileWeChatReceiveStateStore: WeChatReceiveStateStoring {
         }
         return WeChatReceiveState(
             cursor: state.cursor,
-            recentKeys: Array(state.recentKeys.suffix(WeChatDeduplication.maximumKeys))
+            recentKeys: Array(state.recentKeys.suffix(WeChatDeduplication.maximumKeys)),
+            lastReply: state.lastReply,
+            recentReplies: Array(state.recentReplies.suffix(WeChatReceiveState.maximumRecentReplies))
         )
     }
 
@@ -48,10 +111,16 @@ final class FileWeChatReceiveStateStore: WeChatReceiveStateStoring {
         )
         let normalized = WeChatReceiveState(
             cursor: state.cursor,
-            recentKeys: Array(state.recentKeys.suffix(WeChatDeduplication.maximumKeys))
+            recentKeys: Array(state.recentKeys.suffix(WeChatDeduplication.maximumKeys)),
+            lastReply: state.lastReply,
+            recentReplies: Array(state.recentReplies.suffix(WeChatReceiveState.maximumRecentReplies))
         )
         let data = try JSONEncoder().encode(normalized)
         try data.write(to: fileURL, options: .atomic)
+        try fileManager.setAttributes(
+            [.posixPermissions: NSNumber(value: 0o600)],
+            ofItemAtPath: fileURL.path
+        )
     }
 
     func reset() throws {

@@ -118,7 +118,7 @@ final class TocodeIPCServer {
             let result: TocodeCommandResult
             switch parsed {
             case .success(let command):
-                result = self.executor.execute(command)
+                result = await self.executor.executeAsync(command)
             case .failure(let parseError):
                 result = .failure(parseError)
             }

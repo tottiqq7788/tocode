@@ -107,7 +107,9 @@ CLI 通过本机 Unix domain socket 转发给**常驻 Tocode 进程**执行；To
 
 Tocode 首次启动后，会自动把 CLI 安装到 `~/.local/bin/tocode`（该目录已在 PATH 中），之后可直接在终端运行 `tocode ...`。
 
-主要命令：`help`（同 `commands`）、`status`、`root get|set|choose|reset|init-from-finder`、`codex status|sync|model|model list|model set`、`wechat status|bind|location`、`blackout`、`login on|off|toggle`、`wheel vertical|horizontal on|off|toggle`、`hidden on|off|toggle`、`shortcut finder-move|double-cmdq|finder-cmdq on|off|toggle`、`quit`。开关类命令的 `on|off|toggle` 可互换使用；每条命令都会返回结果，不静默执行。
+主要命令：`help`（同 `commands`）、`status`、`root get|set|choose|reset|init-from-finder`、`codex status|sync|model|model list|model set`、`wechat status|bind|location|send`、`blackout`、`login on|off|toggle`、`wheel vertical|horizontal on|off|toggle`、`hidden on|off|toggle`、`shortcut finder-move|double-cmdq|finder-cmdq on|off|toggle`、`quit`。开关类命令的 `on|off|toggle` 可互换使用；每条命令都会返回结果，不静默执行。
+
+`tocode wechat send [--to <user_id>] [--text <文字>] [文件...]` 通过**当前已绑定**的微信 Bot 主动发消息：默认发给最近一条入站会话；`--to` 只能指定曾经入站过的用户。文字先发，文件按参数顺序各发一条；`jpg/jpeg/png/gif/webp` 作为图片，其余作为附件。单文件不超过 20MB；失败即停，已发出的不回滚。出站内容不写入 `wechat*.md`。Tocode 未运行或未绑定时失败。
 
 ### 微信 `.` 前缀命令
 

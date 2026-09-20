@@ -82,10 +82,17 @@ final class MockTocodeWeChat: WeChatAssociationControlling {
     var locationCalls = 0
 
     var isBound: Bool { bound }
+    var sendPayloads: [TocodeWechatSendPayload] = []
+    var sendResult: TocodeCommandResult = .success(TocodeCommandOutput("已发送"))
+
     func startBinding() { bindCalls += 1 }
     func startBoundListener() {}
     func openArchiveLocation() { locationCalls += 1 }
     func stop() {}
+    func sendOutbound(_ payload: TocodeWechatSendPayload) async -> TocodeCommandResult {
+        sendPayloads.append(payload)
+        return sendResult
+    }
 }
 
 final class MockTocodeCodexModels: CodexModelSwitching {

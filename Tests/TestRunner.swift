@@ -3268,6 +3268,27 @@ func testWeChatModelsCryptoAndState() {
     expect(loaded.recentKeys.first == "key-1", "去重键超限时淘汰最旧项")
     try! stateStore.reset()
     expect(stateStore.load() == .empty, "重绑时重置游标与去重状态")
+
+    let encrypted = try! WeChatCrypto.encryptAESData(expected, key: keyHex)
+    expect(
+        try! WeChatCrypto.decryptAESData(encrypted, key: keyHex) == expected,
+        "AES 加密后可解密回原文"
+    )
+    let oldState = try! JSONDecoder().decode(
+        WeChatReceiveState.self,
+        from: Data(#"{"cursor":"legacy","recentKeys":["k1"]}"#.utf8)
+    )
+    expect(oldState.cursor == "legacy" && oldState.lastReply == nil, "旧状态文件缺会话字段仍可读")
+    var remembered = WeChatReceiveState.empty
+    remembered.rememberInbound(message)
+    expect(remembered.lastReply?.userID == "sender", "入站记住最近会话")
+    expect(remembered.replyTarget(userID: "missing") == nil, "未见过的 --to 查不到会话")
+    expect(WeChatOutboundMediaKind.classify(path: "/tmp/a.PNG") == .image, "png 按图片发送")
+    expect(WeChatOutboundMediaKind.classify(path: "/tmp/a.pdf") == .file, "pdf 按附件发送")
+
+    try! stateStore.save(remembered)
+    let permissions = try! FileManager.default.attributesOfItem(atPath: temp.path)[.posixPermissions] as? NSNumber
+    expect(permissions?.intValue == 0o600, "接收状态文件权限 0600")
 }
 
 func testWeChatArchiveNaming() {
@@ -3580,6 +3601,43 @@ func testWeChatProtocolContract() async {
     expect(sendMsg["message_state"] as? Int == 2, "协议合同：sendmessage message_state=2")
     let sendItems = sendMsg["item_list"] as! [[String: Any]]
     expect((sendItems.first?["text_item"] as? [String: Any])?["text"] as? String == "hi", "协议合同：sendmessage 文本内容")
+
+    WeChatURLProtocol.extraHeaders = ["x-encrypted-param": "dl-param"]
+    WeChatURLProtocol.handler = { request in
+        if request.url!.path == "/ilink/bot/getuploadurl" {
+            return (200, Data(#"{"upload_param":"up-param"}"#.utf8))
+        }
+        if request.url!.path.hasSuffix("/upload") {
+            return (200, Data())
+        }
+        if request.url!.path == "/ilink/bot/sendmessage" {
+            return (200, Data(#"{"ret":0}"#.utf8))
+        }
+        return (404, Data())
+    }
+    let uploaded = try! await client.uploadMedia(
+        credential: credential,
+        toUserID: "user@im.wechat",
+        fileName: "a.png",
+        data: Data("png-bytes".utf8),
+        kind: .image
+    )
+    expect(uploaded.encryptQueryParameter == "dl-param", "协议合同：CDN 上传读取 x-encrypted-param")
+    try! await client.sendItems(
+        credential: credential,
+        toUserID: "user@im.wechat",
+        contextToken: "ctx",
+        items: [.image(uploaded)]
+    )
+    let uploadRequest = WeChatURLProtocol.requests.first { $0.url?.path == "/ilink/bot/getuploadurl" }
+    expect(uploadRequest != nil, "协议合同：getuploadurl 发出")
+    let uploadBody = try! JSONSerialization.jsonObject(with: uploadRequest!.httpBody!) as! [String: Any]
+    expect(uploadBody["media_type"] as? Int == 1, "协议合同：图片 media_type=1")
+    expect(uploadBody["no_need_thumb"] as? Bool == true, "协议合同：上传不要求缩略图")
+    let imageSend = WeChatURLProtocol.requests.last { $0.url?.path == "/ilink/bot/sendmessage" }!
+    let imageBody = try! JSONSerialization.jsonObject(with: imageSend.httpBody!) as! [String: Any]
+    let imageItems = (imageBody["msg"] as! [String: Any])["item_list"] as! [[String: Any]]
+    expect(imageItems.first?["type"] as? Int == 2, "协议合同：图片 item type=2")
 
     let beforeUntrusted = WeChatURLProtocol.requests.count
     do {
@@ -4087,6 +4145,30 @@ func testTocodeCommandParser() {
     expect(TocodeCommandParser.parse("wechat status") == .success(.wechat(.status)), "wechat status")
     expect(TocodeCommandParser.parse("wechat bind") == .success(.wechat(.bind)), "wechat bind")
     expect(TocodeCommandParser.parse("wechat location") == .success(.wechat(.location)), "wechat location")
+    expect(
+        TocodeCommandParser.parse("wechat send --text 你好")
+            == .success(.wechat(.send(TocodeWechatSendPayload(toUserID: nil, text: "你好", files: [])))),
+        "wechat send --text"
+    )
+    expect(
+        TocodeCommandParser.parse("wechat send --to u1 --text hi photo.png report.pdf")
+            == .success(.wechat(.send(TocodeWechatSendPayload(
+                toUserID: "u1",
+                text: "hi",
+                files: ["photo.png", "report.pdf"]
+            )))),
+        "wechat send --to 与多文件"
+    )
+    if case .failure(.missingValue) = TocodeCommandParser.parse("wechat send") {
+        expect(true, "wechat send 无载荷失败")
+    } else {
+        expect(false, "wechat send 无载荷失败")
+    }
+    if case .failure(.missingValue) = TocodeCommandParser.parse("wechat send --text") {
+        expect(true, "wechat send --text 缺值失败")
+    } else {
+        expect(false, "wechat send --text 缺值失败")
+    }
 
     expect(TocodeCommandParser.parse("blackout") == .success(.blackout), "blackout")
     expect(TocodeCommandParser.parse("commands") == .success(.help), "commands 别名映射 help")
@@ -4561,6 +4643,15 @@ func testTocodeCLIRunnerAndIPC() {
     let response = TocodeIPCResponse(id: "r1", ok: true, data: "/tmp", error: nil)
     let responseData = try! JSONEncoder().encode(response)
     expect(TocodeIPCFraming.decodeResponse(responseData) == response, "IPC 响应编解码")
+
+    let prepared = TocodeCLIArgumentPrep.prepared(["wechat", "send", "--text", "hi", "rel.jpg"])
+    expect(prepared.dropLast() == ["wechat", "send", "--text", "hi"], "CLI 保留 wechat send 标志")
+    expect(prepared.last?.hasPrefix("/") == true, "CLI 把发送文件收成绝对路径")
+    expect(
+        TocodeCLIArgumentPrep.timeout(for: ["wechat", "send", "--text", "x"]) == 60,
+        "wechat send 使用 60 秒超时"
+    )
+    expect(TocodeCLIArgumentPrep.timeout(for: ["status"]) == 10, "普通命令保持 10 秒超时")
 }
 
 extension Result where Failure == TocodeCommandError {
@@ -4802,6 +4893,166 @@ func testWeChatCommandConsumption() async {
 }
 
 @MainActor
+func testWeChatCLISend() async {
+    let unbound = WeChatAssociationService(
+        transport: MockWeChatTransport(),
+        credentialStore: MemoryWeChatCredentialStore(),
+        stateStore: MemoryWeChatStateStore(),
+        archiver: MockWeChatArchiver(),
+        pageWriter: MockWeChatBindingPage(),
+        opener: MockWeChatOpener(),
+        notifier: MockWeChatNotifier(),
+        sleeper: MockWeChatSleeper()
+    )
+    let unboundResult = await unbound.sendOutbound(
+        TocodeWechatSendPayload(toUserID: nil, text: "hi", files: [])
+    )
+    expect(!unboundResult.isSuccess, "未绑定不能发送")
+
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("tocode-wechat-send-\(UUID().uuidString)", isDirectory: true)
+    try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let imageURL = directory.appendingPathComponent("photo.png")
+    let fileURL = directory.appendingPathComponent("notes.pdf")
+    try! Data("img".utf8).write(to: imageURL)
+    try! Data("pdf".utf8).write(to: fileURL)
+
+    do {
+        let transport = MockWeChatTransport()
+        let states = MemoryWeChatStateStore()
+        let service = WeChatAssociationService(
+            transport: transport,
+            credentialStore: MemoryWeChatCredentialStore(
+                WeChatCredential(token: "t", baseURL: WeChatILinkClient.officialBaseURL)
+            ),
+            stateStore: states,
+            archiver: MockWeChatArchiver(),
+            pageWriter: MockWeChatBindingPage(),
+            opener: MockWeChatOpener(),
+            notifier: MockWeChatNotifier(),
+            sleeper: MockWeChatSleeper()
+        )
+        let missing = await service.sendOutbound(
+            TocodeWechatSendPayload(toUserID: nil, text: "hi", files: [])
+        )
+        expect(!missing.isSuccess, "没有可回复会话时失败")
+        if case .failure(let error) = missing {
+            expect(error.message.contains("还没有可回复的会话"), "没有会话时提示先收消息")
+        }
+    }
+
+    do {
+        let transport = MockWeChatTransport()
+        var state = WeChatReceiveState.empty
+        state.lastReply = WeChatReplyTarget(userID: "u1", contextToken: "ctx-1")
+        state.recentReplies = [WeChatReplyTarget(userID: "u1", contextToken: "ctx-1")]
+        let states = MemoryWeChatStateStore(state)
+        let archiver = MockWeChatArchiver()
+        let service = WeChatAssociationService(
+            transport: transport,
+            credentialStore: MemoryWeChatCredentialStore(
+                WeChatCredential(token: "t", baseURL: WeChatILinkClient.officialBaseURL)
+            ),
+            stateStore: states,
+            archiver: archiver,
+            pageWriter: MockWeChatBindingPage(),
+            opener: MockWeChatOpener(),
+            notifier: MockWeChatNotifier(),
+            sleeper: MockWeChatSleeper()
+        )
+        let unknown = await service.sendOutbound(
+            TocodeWechatSendPayload(toUserID: "u-missing", text: "hi", files: [])
+        )
+        expect(!unknown.isSuccess, "--to 未见过的用户失败")
+
+        let sent = await service.sendOutbound(
+            TocodeWechatSendPayload(
+                toUserID: nil,
+                text: "你好",
+                files: [imageURL.path, fileURL.path]
+            )
+        )
+        expect(sent.isSuccess, "默认最近会话发送成功")
+        expect(transport.sentItems.count == 3, "文字和两个文件各发一条")
+        expect(
+            {
+                if case .text("你好") = transport.sentItems[0].items.first { return true }
+                return false
+            }(),
+            "先发送文字"
+        )
+        expect(transport.uploaded.map(\.kind) == [.image, .file], "图与附件分流")
+        expect(transport.sentItems[0].toUserID == "u1", "默认发给最近入站用户")
+        expect(archiver.messages.isEmpty, "出站不写入归档")
+        expect(states.state.lastReply?.userID == "u1", "出站不改写最近会话")
+
+        transport.uploadError = TestWeChatError.forced
+        transport.sentItems.removeAll()
+        transport.uploaded.removeAll()
+        let stopped = await service.sendOutbound(
+            TocodeWechatSendPayload(
+                toUserID: "u1",
+                text: "第二段",
+                files: [imageURL.path, fileURL.path]
+            )
+        )
+        expect(!stopped.isSuccess, "上传失败则整条失败")
+        expect(transport.sentItems.count == 1, "中途失败停止后续文件")
+        if case .text("第二段") = transport.sentItems.first?.items.first {
+            expect(true, "失败前已发出的文字保留")
+        } else {
+            expect(false, "失败前已发出的文字保留")
+        }
+        expect(transport.uploaded.isEmpty, "上传失败时后续文件不再上传")
+    }
+
+    do {
+        let transport = MockWeChatTransport()
+        transport.updates = [
+            .success(WeChatUpdates(
+                ret: 0,
+                messages: [weChatTextMessage("普通归档", id: "msg-remember")],
+                cursor: "cursor-remember"
+            )),
+            .failure(CancellationError())
+        ]
+        let states = MemoryWeChatStateStore()
+        let service = WeChatAssociationService(
+            transport: transport,
+            credentialStore: MemoryWeChatCredentialStore(
+                WeChatCredential(token: "t", baseURL: WeChatILinkClient.officialBaseURL)
+            ),
+            stateStore: states,
+            archiver: MockWeChatArchiver(),
+            pageWriter: MockWeChatBindingPage(),
+            opener: MockWeChatOpener(),
+            notifier: MockWeChatNotifier(),
+            sleeper: MockWeChatSleeper()
+        )
+        service.startBoundListener()
+        _ = await waitUntil { states.state.lastReply != nil }
+        expect(states.state.lastReply?.userID == "u", "归档入站后记住最近会话")
+        service.stop()
+    }
+
+    let mockWeChat = MockTocodeWeChat()
+    mockWeChat.bound = true
+    let executor = TocodeCommandExecutor(
+        launchAtLogin: MockTocodeLaunchAtLogin(),
+        mouseWheel: MockTocodeWheel(),
+        shortcuts: MockTocodeShortcuts(),
+        codexModels: MockTocodeCodexModels(),
+        weChat: mockWeChat,
+        screenBlackout: ScreenBlackoutService(overlay: MockTocodeScreenBlackout()),
+        notify: { _, _ in }
+    )
+    let mapped = await executor.executeAsync("wechat send --text ping")
+    expect(mapped.isSuccess, "执行器异步转发 wechat send")
+    expect(mockWeChat.sendPayloads.first?.text == "ping", "执行器把载荷交给微信服务")
+}
+
+@MainActor
 func testWeChatHelpFormatting() {
     let text = TocodeCommandParser.weChatHelpText
     expect(text.contains("```\n.help\n```"), "微信 help 每条命令用代码框包裹")
@@ -4811,6 +5062,7 @@ func testWeChatHelpFormatting() {
     expect(text.contains("\u{201C}你好\u{201D}"), "微信 help 文末含中文引号文字示例")
     expect(text.contains("\u{201C}你好\u{201D}{enter}"), "微信 help 文末含组合示例")
     expect(!text.contains(".{space}"), "快捷输入示例不是 . 命令")
+    expect(text.contains("wechat send"), "微信 help 包含 wechat send")
 }
 
 @main
@@ -4864,6 +5116,7 @@ struct TestRunnerMain {
         await testWeChatAssociationAndFaults()
         await testWeChatBindingToArchiveIntegration()
         await testWeChatCommandConsumption()
+        await testWeChatCLISend()
         testWeChatHelpFormatting()
         testTocodeCommandParser()
         testTocodeWeChatCommandGate()

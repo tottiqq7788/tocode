@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Network
 
@@ -42,6 +43,22 @@ final class TocodeSocketTransport: TocodeIPCTransport {
             return .failure(.notRunning)
         }
 
+        var timeoutValue = timeval(tv_sec: __darwin_time_t(timeout), tv_usec: 0)
+        _ = setsockopt(
+            socket,
+            SOL_SOCKET,
+            SO_RCVTIMEO,
+            &timeoutValue,
+            socklen_t(MemoryLayout<timeval>.size)
+        )
+        _ = setsockopt(
+            socket,
+            SOL_SOCKET,
+            SO_SNDTIMEO,
+            &timeoutValue,
+            socklen_t(MemoryLayout<timeval>.size)
+        )
+
         guard let payload = try? TocodeIPCFraming.encodeRequest(request) else {
             return .failure(.transport("无法编码请求"))
         }
@@ -66,6 +83,9 @@ final class TocodeSocketTransport: TocodeIPCTransport {
             }
             if count < 0 {
                 if errno == EINTR { continue }
+                if errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT {
+                    return .failure(.timedOut)
+                }
                 break
             }
             accumulated.append(contentsOf: buffer.prefix(count))

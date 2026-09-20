@@ -17,6 +17,15 @@ final class MockWeChatTransport: WeChatILinkTransporting, @unchecked Sendable {
     var updateCursors: [String] = []
     var mediaDescriptors: [WeChatMediaDescriptor] = []
     var sentTexts: [(credential: WeChatCredential, toUserID: String, contextToken: String, text: String)] = []
+    var sentItems: [(
+        credential: WeChatCredential,
+        toUserID: String,
+        contextToken: String,
+        items: [WeChatOutboundMessageItem]
+    )] = []
+    var uploaded: [(toUserID: String, fileName: String, kind: WeChatOutboundMediaKind, data: Data)] = []
+    var sendError: Error?
+    var uploadError: Error?
 
     func fetchQRCode() async throws -> WeChatQRCode {
         fetchedQRCodes += 1
@@ -43,7 +52,42 @@ final class MockWeChatTransport: WeChatILinkTransporting, @unchecked Sendable {
     }
 
     func sendText(credential: WeChatCredential, toUserID: String, contextToken: String, text: String) async throws {
-        sentTexts.append((credential, toUserID, contextToken, text))
+        try await sendItems(
+            credential: credential,
+            toUserID: toUserID,
+            contextToken: contextToken,
+            items: [.text(text)]
+        )
+    }
+
+    func sendItems(
+        credential: WeChatCredential,
+        toUserID: String,
+        contextToken: String,
+        items: [WeChatOutboundMessageItem]
+    ) async throws {
+        if let sendError { throw sendError }
+        sentItems.append((credential, toUserID, contextToken, items))
+        if case .text(let text) = items.first {
+            sentTexts.append((credential, toUserID, contextToken, text))
+        }
+    }
+
+    func uploadMedia(
+        credential: WeChatCredential,
+        toUserID: String,
+        fileName: String,
+        data: Data,
+        kind: WeChatOutboundMediaKind
+    ) async throws -> WeChatUploadedMedia {
+        _ = credential
+        if let uploadError { throw uploadError }
+        uploaded.append((toUserID, fileName, kind, data))
+        return WeChatUploadedMedia(
+            encryptQueryParameter: "enc-\(fileName)",
+            aesKey: "aes",
+            byteCount: data.count
+        )
     }
 
     private func record(_ descriptor: WeChatMediaDescriptor) {
@@ -85,6 +129,25 @@ final class CancellationAwareWeChatTransport: WeChatILinkTransporting, @unchecke
     }
 
     func sendText(credential: WeChatCredential, toUserID: String, contextToken: String, text: String) async throws {
+        throw TestWeChatError.forced
+    }
+
+    func sendItems(
+        credential: WeChatCredential,
+        toUserID: String,
+        contextToken: String,
+        items: [WeChatOutboundMessageItem]
+    ) async throws {
+        throw TestWeChatError.forced
+    }
+
+    func uploadMedia(
+        credential: WeChatCredential,
+        toUserID: String,
+        fileName: String,
+        data: Data,
+        kind: WeChatOutboundMediaKind
+    ) async throws -> WeChatUploadedMedia {
         throw TestWeChatError.forced
     }
 
@@ -243,6 +306,7 @@ final class FailingWeChatFileSystem: WeChatFileSystem {
 
 final class WeChatURLProtocol: URLProtocol {
     static var handler: ((URLRequest) throws -> (Int, Data))?
+    static var extraHeaders: [String: String] = [:]
     static var requests: [URLRequest] = []
 
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -268,11 +332,13 @@ final class WeChatURLProtocol: URLProtocol {
         do {
             guard let handler = Self.handler else { throw TestWeChatError.forced }
             let (status, data) = try handler(captured)
+            var headers = ["Content-Type": "application/json"]
+            headers.merge(Self.extraHeaders) { _, new in new }
             let response = HTTPURLResponse(
                 url: captured.url!,
                 statusCode: status,
                 httpVersion: "HTTP/1.1",
-                headerFields: ["Content-Type": "application/json"]
+                headerFields: headers
             )!
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             client?.urlProtocol(self, didLoad: data)
@@ -286,6 +352,7 @@ final class WeChatURLProtocol: URLProtocol {
 
     static func reset() {
         handler = nil
+        extraHeaders = [:]
         requests = []
     }
 }

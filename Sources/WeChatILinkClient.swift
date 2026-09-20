@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 enum WeChatTransportError: Error, Equatable {
     case invalidURL
@@ -9,6 +10,39 @@ enum WeChatTransportError: Error, Equatable {
     case serverFailure(Int)
     case apiFailure(Int)
     case emptyQRCode
+    case emptyUploadParam
+    case missingEncryptedParam
+}
+
+enum WeChatOutboundMediaKind: Equatable {
+    case image
+    case file
+
+    var mediaType: Int {
+        switch self {
+        case .image: return 1
+        case .file: return 3
+        }
+    }
+
+    static let imageExtensions: Set<String> = ["jpg", "jpeg", "png", "gif", "webp"]
+
+    static func classify(path: String) -> WeChatOutboundMediaKind {
+        let ext = URL(fileURLWithPath: path).pathExtension.lowercased()
+        return imageExtensions.contains(ext) ? .image : .file
+    }
+}
+
+struct WeChatUploadedMedia: Equatable {
+    var encryptQueryParameter: String
+    var aesKey: String
+    var byteCount: Int
+}
+
+enum WeChatOutboundMessageItem: Equatable {
+    case text(String)
+    case image(WeChatUploadedMedia)
+    case file(name: String, media: WeChatUploadedMedia)
 }
 
 protocol WeChatILinkTransporting: AnyObject {
@@ -17,6 +51,19 @@ protocol WeChatILinkTransporting: AnyObject {
     func getUpdates(credential: WeChatCredential, cursor: String) async throws -> WeChatUpdates
     func downloadMedia(_ descriptor: WeChatMediaDescriptor) async throws -> Data
     func sendText(credential: WeChatCredential, toUserID: String, contextToken: String, text: String) async throws
+    func sendItems(
+        credential: WeChatCredential,
+        toUserID: String,
+        contextToken: String,
+        items: [WeChatOutboundMessageItem]
+    ) async throws
+    func uploadMedia(
+        credential: WeChatCredential,
+        toUserID: String,
+        fileName: String,
+        data: Data,
+        kind: WeChatOutboundMediaKind
+    ) async throws -> WeChatUploadedMedia
 }
 
 final class WeChatILinkClient: WeChatILinkTransporting, @unchecked Sendable {
@@ -123,6 +170,20 @@ final class WeChatILinkClient: WeChatILinkTransporting, @unchecked Sendable {
         contextToken: String,
         text: String
     ) async throws {
+        try await sendItems(
+            credential: credential,
+            toUserID: toUserID,
+            contextToken: contextToken,
+            items: [.text(text)]
+        )
+    }
+
+    func sendItems(
+        credential: WeChatCredential,
+        toUserID: String,
+        contextToken: String,
+        items: [WeChatOutboundMessageItem]
+    ) async throws {
         let url = credential.baseURL.appendingPathComponent("ilink/bot/sendmessage")
         let message = OutboundMessage(
             fromUserID: "",
@@ -131,7 +192,7 @@ final class WeChatILinkClient: WeChatILinkTransporting, @unchecked Sendable {
             messageType: 2,
             messageState: 2,
             contextToken: contextToken,
-            items: [WeChatOutboundItem(type: 1, textItem: WeChatTextItem(text: text))]
+            items: items.map(WeChatOutboundItem.init)
         )
         let body = OutboundEnvelope(msg: message, baseInfo: BaseInfo(channelVersion: Self.channelVersion))
         let encoded = try encoder.encode(body)
@@ -146,6 +207,86 @@ final class WeChatILinkClient: WeChatILinkTransporting, @unchecked Sendable {
                 throw WeChatTransportError.apiFailure(outbound.ret)
             }
         }
+    }
+
+    func uploadMedia(
+        credential: WeChatCredential,
+        toUserID: String,
+        fileName: String,
+        data: Data,
+        kind: WeChatOutboundMediaKind
+    ) async throws -> WeChatUploadedMedia {
+        _ = fileName
+        let keyData = randomBytes(16)
+        let aesHex = keyData.map { String(format: "%02x", $0) }.joined()
+        let filekey = randomBytes(16).map { String(format: "%02x", $0) }.joined()
+        let ciphertext = try WeChatCrypto.encryptAESData(data, key: aesHex)
+        let uploadURL = credential.baseURL.appendingPathComponent("ilink/bot/getuploadurl")
+        let requestBody = UploadURLBody(
+            filekey: filekey,
+            mediaType: kind.mediaType,
+            toUserID: toUserID,
+            rawsize: data.count,
+            rawfilemd5: WeChatCrypto.md5Hex(data),
+            filesize: ciphertext.count,
+            noNeedThumb: true,
+            aeskey: aesHex,
+            baseInfo: BaseInfo(channelVersion: Self.channelVersion)
+        )
+        let encoded = try encoder.encode(requestBody)
+        let responseData = try await perform(
+            request(url: uploadURL, method: "POST", token: credential.token, body: encoded),
+            timeout: 20
+        )
+        let parsed = try decoder.decode(UploadURLResponse.self, from: responseData)
+        if let ret = parsed.ret, ret != 0 {
+            throw WeChatTransportError.apiFailure(ret)
+        }
+        guard let uploadParam = parsed.uploadParam, !uploadParam.isEmpty else {
+            throw WeChatTransportError.emptyUploadParam
+        }
+
+        var components = URLComponents(
+            url: Self.cdnBaseURL.appendingPathComponent("upload"),
+            resolvingAgainstBaseURL: false
+        )!
+        components.queryItems = [
+            URLQueryItem(name: "encrypted_query_param", value: uploadParam),
+            URLQueryItem(name: "filekey", value: filekey)
+        ]
+        guard let cdnURL = components.url else { throw WeChatTransportError.invalidURL }
+        var cdnRequest = URLRequest(url: cdnURL)
+        cdnRequest.httpMethod = "POST"
+        cdnRequest.httpBody = ciphertext
+        cdnRequest.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        let result = try await performResult(cdnRequest, timeout: 45, requiresTrustedFinalURL: false)
+        let encryptedParam = headerValue("x-encrypted-param", in: result.headers)
+        guard let encryptedParam, !encryptedParam.isEmpty else {
+            throw WeChatTransportError.missingEncryptedParam
+        }
+        return WeChatUploadedMedia(
+            encryptQueryParameter: encryptedParam,
+            aesKey: Data(aesHex.utf8).base64EncodedString(),
+            byteCount: data.count
+        )
+    }
+
+    private func randomBytes(_ count: Int) -> Data {
+        var data = Data(count: count)
+        data.withUnsafeMutableBytes { buffer in
+            guard let pointer = buffer.baseAddress else { return }
+            _ = SecRandomCopyBytes(kSecRandomDefault, count, pointer)
+        }
+        return data
+    }
+
+    private func headerValue(_ name: String, in headers: [AnyHashable: Any]) -> String? {
+        for (key, value) in headers {
+            guard String(describing: key).lowercased() == name.lowercased() else { continue }
+            if let text = value as? String { return text }
+            return String(describing: value)
+        }
+        return nil
     }
 
     func makeHeaders(token: String?) -> [String: String] {
@@ -173,14 +314,29 @@ final class WeChatILinkClient: WeChatILinkTransporting, @unchecked Sendable {
     }
 
     private func perform(_ request: URLRequest, timeout: TimeInterval) async throws -> Data {
+        try await performResult(
+            request,
+            timeout: timeout,
+            requiresTrustedFinalURL: request.value(forHTTPHeaderField: "Authorization") != nil
+        ).data
+    }
+
+    private struct HTTPResult {
+        let data: Data
+        let headers: [AnyHashable: Any]
+    }
+
+    private func performResult(
+        _ request: URLRequest,
+        timeout: TimeInterval,
+        requiresTrustedFinalURL: Bool
+    ) async throws -> HTTPResult {
         var request = request
         request.timeoutInterval = timeout
         let (data, response) = try await session.data(for: request)
-        try validate(
-            response,
-            requiresTrustedFinalURL: request.value(forHTTPHeaderField: "Authorization") != nil
-        )
-        return data
+        try validate(response, requiresTrustedFinalURL: requiresTrustedFinalURL)
+        let headers = (response as? HTTPURLResponse)?.allHeaderFields ?? [:]
+        return HTTPResult(data: data, headers: headers)
     }
 
     private func validate(_ response: URLResponse, requiresTrustedFinalURL: Bool) throws {
@@ -256,11 +412,107 @@ final class WeChatILinkClient: WeChatILinkTransporting, @unchecked Sendable {
 
     private struct WeChatOutboundItem: Encodable {
         let type: Int
-        let textItem: WeChatTextItem
+        let textItem: WeChatTextItem?
+        let imageItem: WeChatOutboundImageItem?
+        let fileItem: WeChatOutboundFileItem?
 
         enum CodingKeys: String, CodingKey {
             case type
             case textItem = "text_item"
+            case imageItem = "image_item"
+            case fileItem = "file_item"
+        }
+
+        init(_ item: WeChatOutboundMessageItem) {
+            switch item {
+            case .text(let text):
+                type = 1
+                textItem = WeChatTextItem(text: text)
+                imageItem = nil
+                fileItem = nil
+            case .image(let media):
+                type = 2
+                textItem = nil
+                imageItem = WeChatOutboundImageItem(media: WeChatOutboundMedia(media))
+                fileItem = nil
+            case .file(let name, let media):
+                type = 4
+                textItem = nil
+                imageItem = nil
+                fileItem = WeChatOutboundFileItem(
+                    media: WeChatOutboundMedia(media),
+                    fileName: name,
+                    len: String(media.byteCount)
+                )
+            }
+        }
+    }
+
+    private struct WeChatOutboundMedia: Encodable {
+        let encryptQueryParameter: String
+        let aesKey: String
+        let encryptType: Int
+
+        enum CodingKeys: String, CodingKey {
+            case encryptQueryParameter = "encrypt_query_param"
+            case aesKey = "aes_key"
+            case encryptType = "encrypt_type"
+        }
+
+        init(_ media: WeChatUploadedMedia) {
+            encryptQueryParameter = media.encryptQueryParameter
+            aesKey = media.aesKey
+            encryptType = 1
+        }
+    }
+
+    private struct WeChatOutboundImageItem: Encodable {
+        let media: WeChatOutboundMedia
+    }
+
+    private struct WeChatOutboundFileItem: Encodable {
+        let media: WeChatOutboundMedia
+        let fileName: String
+        let len: String
+
+        enum CodingKeys: String, CodingKey {
+            case media
+            case fileName = "file_name"
+            case len
+        }
+    }
+
+    private struct UploadURLBody: Encodable {
+        let filekey: String
+        let mediaType: Int
+        let toUserID: String
+        let rawsize: Int
+        let rawfilemd5: String
+        let filesize: Int
+        let noNeedThumb: Bool
+        let aeskey: String
+        let baseInfo: BaseInfo
+
+        enum CodingKeys: String, CodingKey {
+            case filekey
+            case mediaType = "media_type"
+            case toUserID = "to_user_id"
+            case rawsize
+            case rawfilemd5
+            case filesize
+            case noNeedThumb = "no_need_thumb"
+            case aeskey
+            case baseInfo = "base_info"
+        }
+    }
+
+    private struct UploadURLResponse: Decodable {
+        let ret: Int?
+        let uploadParam: String?
+
+        enum CodingKeys: String, CodingKey {
+            case ret
+            case uploadParam = "upload_param"
         }
     }
 

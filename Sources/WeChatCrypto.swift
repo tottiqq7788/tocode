@@ -5,6 +5,7 @@ enum WeChatCryptoError: Error, Equatable {
     case invalidKey
     case invalidCiphertext
     case decryptionFailed(Int32)
+    case encryptionFailed(Int32)
 }
 
 enum WeChatCrypto {
@@ -41,6 +42,46 @@ enum WeChatCrypto {
         }
         output.removeSubrange(outputLength..<output.count)
         return output
+    }
+
+    static func encryptAESData(_ plaintext: Data, key encodedKey: String) throws -> Data {
+        let key = try parseAESKey(encodedKey)
+        let outputCapacity = plaintext.count + kCCBlockSizeAES128
+        var output = Data(count: outputCapacity)
+        var outputLength = 0
+
+        let status = output.withUnsafeMutableBytes { outputBuffer in
+            plaintext.withUnsafeBytes { plainBuffer in
+                key.withUnsafeBytes { keyBuffer in
+                    CCCrypt(
+                        CCOperation(kCCEncrypt),
+                        CCAlgorithm(kCCAlgorithmAES),
+                        CCOptions(kCCOptionECBMode | kCCOptionPKCS7Padding),
+                        keyBuffer.baseAddress,
+                        key.count,
+                        nil,
+                        plainBuffer.baseAddress,
+                        plaintext.count,
+                        outputBuffer.baseAddress,
+                        outputCapacity,
+                        &outputLength
+                    )
+                }
+            }
+        }
+        guard status == kCCSuccess else {
+            throw WeChatCryptoError.encryptionFailed(status)
+        }
+        output.removeSubrange(outputLength..<output.count)
+        return output
+    }
+
+    static func md5Hex(_ data: Data) -> String {
+        var digest = [UInt8](repeating: 0, count: Int(CC_MD5_DIGEST_LENGTH))
+        data.withUnsafeBytes { bytes in
+            _ = CC_MD5(bytes.baseAddress, CC_LONG(data.count), &digest)
+        }
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 
     static func parseAESKey(_ encodedKey: String) throws -> Data {
