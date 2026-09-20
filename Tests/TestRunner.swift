@@ -334,6 +334,22 @@ func testTocodePortableSettingsTransfer() {
     expect(other.bool(forKey: CodexSyncSettingsStore.syncEnabledKey), "导入不改同步项目夹")
 }
 
+func testUserManualPages() {
+    let titles = UserManual.pages.map(\.title)
+    expect(titles == ["入门", "目录树", "访达与目录", "mac", "微信", "命令行", "设置"], "说明书 Tab 分页完整")
+    expect(Set(titles).count == titles.count, "说明书 Tab 标题不重复")
+    expect(UserManual.pages.allSatisfy { !$0.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }, "每页都有正文")
+
+    let joined = UserManual.pages.map(\.body).joined(separator: "\n")
+    expect(joined.contains("Option"), "说明书覆盖删除模式")
+    expect(joined.contains("Command"), "说明书覆盖访问模式")
+    expect(joined.contains("导出配置"), "说明书覆盖导入导出")
+    expect(joined.contains("wechat send") || joined.contains("快捷输入"), "说明书覆盖微信命令或快捷输入")
+    expect(joined.contains("tocode help"), "说明书覆盖 CLI")
+    expect(!joined.contains("ANKER_API_KEY"), "说明书不含密钥字段")
+    expect(!joined.contains("wechat-credential.json"), "说明书不展示凭据文件")
+}
+
 func testRootPathStore() {
     let suite = "tocode-test-\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suite)!
@@ -5318,6 +5334,7 @@ struct TestRunnerMain {
         testTocodePreferencesMigration()
         testTocodePreferencesMigrationKeepsSuiteOnlyKeys()
         testTocodePortableSettingsTransfer()
+        testUserManualPages()
         testRootPathStore()
         testClipboardService()
         testCodexProjectService()

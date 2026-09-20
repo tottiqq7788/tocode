@@ -417,6 +417,13 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         )
         importSettings.target = self
         importSettings.image = NSImage(systemSymbolName: "square.and.arrow.down", accessibilityDescription: "导入配置")
+        let manual = settings.addItem(
+            withTitle: "说明书",
+            action: #selector(showUserManual),
+            keyEquivalent: ""
+        )
+        manual.target = self
+        manual.image = NSImage(systemSymbolName: "book", accessibilityDescription: "说明书")
         let extendedItem = settings.addItem(
             withTitle: ExtendedSettingsStore.folderTitle,
             action: nil,
@@ -772,6 +779,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         if case .failure(let error) = result {
             notifyLaunchAtLoginFailure(error)
         }
+    }
+
+    @objc private func showUserManual() {
+        UserManual.present()
     }
 
     @objc private func exportPortableSettings() {
