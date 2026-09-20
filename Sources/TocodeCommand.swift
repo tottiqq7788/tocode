@@ -197,6 +197,17 @@ enum TocodeCommandParser {
             lines.append(entry.description)
             lines.append("")
         }
+        lines.append("快捷输入（整条消息，不要加点号）：")
+        lines.append("")
+        lines.append("```\n{space}\n```")
+        lines.append("按下空格")
+        lines.append("")
+        lines.append("```\n\u{201C}\u{4F60}\u{597D}\u{201D}\n```")
+        lines.append("输入文字")
+        lines.append("")
+        lines.append("```\n\u{201C}\u{4F60}\u{597D}\u{201D}{enter}\n```")
+        lines.append("先输入文字再回车")
+        lines.append("")
         return lines.joined(separator: "\n")
     }
 
@@ -378,16 +389,34 @@ enum TocodeCommandParser {
     }
 }
 
-/// 微信 `.` 前缀命令判定：首项为文本且 trim 后以 `.` 开头即视为命令。
+enum TocodeWeChatRoutedInput: Equatable {
+    case command(String)
+    case quickInput([WeChatQuickInputSegment])
+}
+
+/// 微信入口分流：`.` 前缀命令优先；否则尝试拆成快捷输入段序列。
 enum TocodeWeChatCommandGate {
-    static func commandBody(from message: WeChatMessage) -> String? {
+    static func routedInput(from message: WeChatMessage) -> TocodeWeChatRoutedInput? {
         guard let first = message.items.first, first.type == 1,
               let raw = first.textItem?.text else {
             return nil
         }
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.hasPrefix(".") else { return nil }
-        return String(trimmed.dropFirst())
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix(".") {
+            let body = String(trimmed.dropFirst())
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return .command(body)
+        }
+        if let segments = WeChatQuickInput.tokenize(trimmed) {
+            return .quickInput(segments)
+        }
+        return nil
+    }
+
+    static func commandBody(from message: WeChatMessage) -> String? {
+        if case .command(let body) = routedInput(from: message) {
+            return body
+        }
+        return nil
     }
 }

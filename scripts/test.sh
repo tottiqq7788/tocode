@@ -45,6 +45,7 @@ swiftc Tests/TestRunner.swift \
   Sources/WeChatArchiveService.swift \
   Sources/WeChatBindingPage.swift \
   Sources/WeChatAssociationService.swift \
+  Sources/WeChatQuickInput.swift \
   Sources/TocodeCommand.swift \
   Sources/TocodeRootChooser.swift \
   Sources/TocodeCommandExecutor.swift \

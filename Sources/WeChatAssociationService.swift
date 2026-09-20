@@ -52,6 +52,7 @@ final class WeChatAssociationService: WeChatAssociationControlling {
     private let opener: WeChatURLOpening
     private let notifier: WeChatNotifying
     var commandExecutor: TocodeCommandExecutor?
+    var quickInput: WeChatQuickInputPerforming
     private let sleeper: WeChatSleeping
     private let now: () -> Date
     private let archiveRoot: URL
@@ -70,6 +71,7 @@ final class WeChatAssociationService: WeChatAssociationControlling {
         opener: WeChatURLOpening = WorkspaceWeChatURLOpener(),
         notifier: WeChatNotifying = UserNotificationWeChatNotifier(),
         commandExecutor: TocodeCommandExecutor? = nil,
+        quickInput: WeChatQuickInputPerforming = WeChatQuickInputService(),
         sleeper: WeChatSleeping = SystemWeChatSleeper(),
         now: @escaping () -> Date = Date.init,
         archiveRoot: URL = WeChatArchiveService.defaultRoot,
@@ -84,6 +86,7 @@ final class WeChatAssociationService: WeChatAssociationControlling {
         self.opener = opener
         self.notifier = notifier
         self.commandExecutor = commandExecutor
+        self.quickInput = quickInput
         self.sleeper = sleeper
         self.now = now
         self.archiveRoot = archiveRoot
@@ -273,11 +276,11 @@ final class WeChatAssociationService: WeChatAssociationControlling {
                         continue
                     }
 
-                    if let body = TocodeWeChatCommandGate.commandBody(from: message) {
-                        try await consumeCommand(
+                    if let routed = TocodeWeChatCommandGate.routedInput(from: message) {
+                        try await consumeRouted(
                             message: message,
                             key: key,
-                            body: body,
+                            routed: routed,
                             cursor: updates.cursor,
                             state: &state,
                             known: &known
@@ -321,12 +324,12 @@ final class WeChatAssociationService: WeChatAssociationControlling {
         }
     }
 
-    /// 命令消息消费语义：执行前先写入去重 key 并推进游标；不归档、不保存附件。
-    /// 执行结果通过 sendmessage 回复到原会话，且该回复不入正式归档（由上游发消息时判定为命令）。
-    private func consumeCommand(
+    /// 点号命令与快捷输入共用消费语义：执行前先写入去重 key 并推进游标；不归档、不保存附件。
+    /// 执行结果通过 sendmessage 回复到原会话，且该回复不入正式归档。
+    private func consumeRouted(
         message: WeChatMessage,
         key: String,
-        body: String,
+        routed: TocodeWeChatRoutedInput,
         cursor: String,
         state: inout WeChatReceiveState,
         known: inout Set<String>
@@ -344,16 +347,23 @@ final class WeChatAssociationService: WeChatAssociationControlling {
         known.insert(key)
 
         let result: TocodeCommandResult
-        if let executor = commandExecutor {
-            result = executor.execute(body)
-        } else {
-            result = .failure(.operationFailed("命令执行器未就绪"))
+        var helpBody: String?
+        switch routed {
+        case .command(let body):
+            helpBody = body
+            if let executor = commandExecutor {
+                result = executor.execute(body)
+            } else {
+                result = .failure(.operationFailed("命令执行器未就绪"))
+            }
+        case .quickInput(let segments):
+            result = quickInput.perform(segments)
         }
 
         let rawReply: String
         switch result {
         case .success(let output):
-            if TocodeCommandParser.isHelpCommand(body) {
+            if let helpBody, TocodeCommandParser.isHelpCommand(helpBody) {
                 rawReply = TocodeCommandParser.weChatHelpText
             } else {
                 rawReply = "✅ \(output.text)"
