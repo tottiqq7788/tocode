@@ -1,31 +1,39 @@
 import AppKit
 
 /// 目录树菜单构建器：把目录内容渲染为 NSMenu 树，子文件夹惰性递归展开。
-/// 普通模式点击条目复制路径；按住 Command 进入删除模式，点击条目改为删除，
-/// 且每个目录菜单底部的「新增」实时变为「清空」。松开 Command 后恢复。
+/// 普通模式点击条目复制路径；按住 Option 进入删除模式；按住 Command 进入访问模式。
 @MainActor
 final class MenuBuilder: NSObject, NSMenuDelegate {
     private let fs = FileSystemService()
     private let clipboard = ClipboardService()
+    private let opener: WorkspaceItemOpening
     private var menuDirectoryMap: [ObjectIdentifier: String] = [:]
     private var includeHidden = true
-    private var deleteMode = false
+    private var mode: DirectoryMenuMode = .normal
 
-    /// 已渲染、需要在 Command 切换时改动的项（直接保存强引用）。
+    /// 已渲染、需要在修饰键切换时改动的项（直接保存强引用）。
     private var entryItems: [EntryItem] = []
     private var bottomItems: [BottomItem] = []
 
     private static let placeholderTitle = "\u{2026}"
     private static let newTitle = "新增"
     private static let clearTitle = "清空"
+    private static let accessTitle = "访问"
+
+    init(opener: WorkspaceItemOpening = NSWorkspaceItemOpener()) {
+        self.opener = opener
+        super.init()
+    }
 
     private final class EntryItem {
         weak var item: NSMenuItem?
         let path: String
+        let kind: FileSystemService.Kind
         let submenu: NSMenu?
-        init(item: NSMenuItem, path: String, submenu: NSMenu?) {
+        init(item: NSMenuItem, path: String, kind: FileSystemService.Kind, submenu: NSMenu?) {
             self.item = item
             self.path = path
+            self.kind = kind
             self.submenu = submenu
         }
     }
@@ -42,7 +50,7 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
     /// 立即填充根菜单（根目录内容在弹出前就绪）。子菜单沿用同一显示状态。
     func fillRoot(_ menu: NSMenu, with directory: String, includeHidden: Bool = true) {
         self.includeHidden = includeHidden
-        self.deleteMode = false
+        self.mode = .normal
         entryItems.removeAll()
         bottomItems.removeAll()
         fill(menu, with: directory)
@@ -56,34 +64,22 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
         fill(menu, with: dir)
     }
 
-    /// 由外部（Command 轮询）在菜单打开期间实时切换模式。
-    func setDeleteMode(_ isDelete: Bool) {
-        guard isDelete != deleteMode else { return }
-        deleteMode = isDelete
+    /// 由外部（修饰键轮询）在菜单打开期间实时切换模式。
+    func setMode(_ mode: DirectoryMenuMode) {
+        guard mode != self.mode else { return }
+        self.mode = mode
 
         for wrapper in entryItems {
             guard let item = wrapper.item else { continue }
-            if isDelete {
-                // 保留子菜单：悬停仍可进入下层菜单（下层菜单会在填充时读取当前删除模式）。
-                item.action = #selector(deleteItem(_:))
-            } else {
-                item.action = #selector(copyItem(_:))
-            }
-            // 条目不设置图标：避免给每行加图标导致标题列整体右移/抖动。
+            // 保留子菜单：悬停仍可进入下层菜单（下层菜单会在填充时读取当前模式）。
+            item.action = entrySelector(for: wrapper.kind)
+            item.isAlternate = false
             notifyChanged(item)
         }
 
         for wrapper in bottomItems {
             guard let item = wrapper.item else { continue }
-            if isDelete {
-                item.title = Self.clearTitle
-                item.action = #selector(clearDirectory(_:))
-                item.image = NSImage(systemSymbolName: "trash", accessibilityDescription: "清空")
-            } else {
-                item.title = Self.newTitle
-                item.action = #selector(newItem(_:))
-                item.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "新增")
-            }
+            applyBottomAppearance(item)
             notifyChanged(item)
         }
     }
@@ -109,9 +105,10 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
     }
 
     private func makeItem(for entry: FileSystemService.Entry) -> NSMenuItem {
-        let item = NSMenuItem(title: entry.name, action: deleteMode ? #selector(deleteItem(_:)) : #selector(copyItem(_:)), keyEquivalent: "")
+        let item = NSMenuItem(title: entry.name, action: entrySelector(for: entry.kind), keyEquivalent: "")
         item.target = self
         item.representedObject = entry.path
+        item.isAlternate = false
 
         var submenu: NSMenu? = nil
         if entry.kind == .directory {
@@ -128,22 +125,47 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
             item.submenu = menu
         }
 
-        entryItems.append(EntryItem(item: item, path: entry.path, submenu: submenu))
+        entryItems.append(EntryItem(item: item, path: entry.path, kind: entry.kind, submenu: submenu))
         return item
     }
 
     private func makeBottomActionItem(for directory: String) -> NSMenuItem {
-        let title = deleteMode ? Self.clearTitle : Self.newTitle
-        let action: Selector = deleteMode ? #selector(clearDirectory(_:)) : #selector(newItem(_:))
-        let symbol = deleteMode ? "trash" : "plus"
-        let description = deleteMode ? "清空" : "新增"
-
-        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        let item = NSMenuItem(title: Self.newTitle, action: #selector(newItem(_:)), keyEquivalent: "")
         item.target = self
         item.representedObject = directory
-        item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: description)
+        item.isAlternate = false
+        applyBottomAppearance(item)
         bottomItems.append(BottomItem(item: item, directory: directory))
         return item
+    }
+
+    private func entrySelector(for kind: FileSystemService.Kind) -> Selector {
+        switch mode.action(for: kind) {
+        case .copy:
+            return #selector(copyItem(_:))
+        case .delete:
+            return #selector(deleteItem(_:))
+        case .openDirectory, .openFile:
+            return #selector(accessEntry(_:))
+        }
+    }
+
+    private func applyBottomAppearance(_ item: NSMenuItem) {
+        switch mode.bottomAction() {
+        case .create:
+            item.title = Self.newTitle
+            item.action = #selector(newItem(_:))
+            item.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "新增")
+        case .clear:
+            item.title = Self.clearTitle
+            item.action = #selector(clearDirectory(_:))
+            item.image = NSImage(systemSymbolName: "trash", accessibilityDescription: "清空")
+        case .access:
+            item.title = Self.accessTitle
+            item.action = #selector(accessDirectory(_:))
+            item.image = NSImage(systemSymbolName: "folder", accessibilityDescription: "访问")
+        }
+        item.isAlternate = false
     }
 
     // MARK: - 普通模式
@@ -168,6 +190,27 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
             }
         } catch {
             presentError(error, title: "新增失败")
+        }
+    }
+
+    // MARK: - 访问模式
+
+    @objc private func accessEntry(_ sender: NSMenuItem) {
+        guard let path = sender.representedObject as? String,
+              let kind = entryItems.first(where: { $0.path == path })?.kind else { return }
+        do {
+            try DirectoryMenuAccess.perform(path: path, kind: kind, opener: opener)
+        } catch {
+            presentError(error, title: "打开失败")
+        }
+    }
+
+    @objc private func accessDirectory(_ sender: NSMenuItem) {
+        guard let directory = sender.representedObject as? String else { return }
+        do {
+            try DirectoryMenuAccess.perform(path: directory, kind: .directory, opener: opener)
+        } catch {
+            presentError(error, title: "打开失败")
         }
     }
 

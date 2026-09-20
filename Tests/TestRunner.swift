@@ -116,6 +116,80 @@ func testFileCreationAndTrash() {
     expect(fs.entries(in: tmp).isEmpty, "清空后目录为空")
 }
 
+final class MockWorkspaceItemOpener: WorkspaceItemOpening {
+    var revealed: [String] = []
+    var opened: [String] = []
+    var revealError: Error?
+    var openError: Error?
+
+    func revealDirectoryInFinder(_ path: String) throws {
+        if let revealError { throw revealError }
+        revealed.append(path)
+    }
+
+    func openFileWithDefaultApplication(_ path: String) throws {
+        if let openError { throw openError }
+        opened.append(path)
+    }
+}
+
+func testDirectoryMenuModeResolve() {
+    expect(DirectoryMenuMode.resolve(option: false, command: false) == .normal, "无修饰键是普通模式")
+    expect(DirectoryMenuMode.resolve(option: true, command: false) == .delete, "Option 是删除模式")
+    expect(DirectoryMenuMode.resolve(option: false, command: true) == .access, "Command 是访问模式")
+    expect(DirectoryMenuMode.resolve(option: true, command: true) == .delete, "Option+Command 优先删除")
+
+    expect(DirectoryMenuMode.normal.action(for: .file) == .copy, "普通模式文件复制")
+    expect(DirectoryMenuMode.normal.action(for: .directory) == .copy, "普通模式文件夹复制")
+    expect(DirectoryMenuMode.delete.action(for: .file) == .delete, "删除模式文件删除")
+    expect(DirectoryMenuMode.delete.action(for: .directory) == .delete, "删除模式文件夹删除")
+    expect(DirectoryMenuMode.access.action(for: .file) == .openFile, "访问模式打开文件")
+    expect(DirectoryMenuMode.access.action(for: .directory) == .openDirectory, "访问模式打开文件夹")
+    expect(DirectoryMenuMode.normal.bottomAction() == .create, "普通底部新增")
+    expect(DirectoryMenuMode.delete.bottomAction() == .clear, "删除底部清空")
+    expect(DirectoryMenuMode.access.bottomAction() == .access, "访问底部访问")
+}
+
+func testDirectoryMenuAccessOpener() {
+    let opener = MockWorkspaceItemOpener()
+    try! DirectoryMenuAccess.perform(path: "/tmp/dir", kind: .directory, opener: opener)
+    expect(opener.revealed == ["/tmp/dir"], "访问目录走访达")
+    expect(opener.opened.isEmpty, "访问目录不打开文件")
+
+    try! DirectoryMenuAccess.perform(path: "/tmp/file.txt", kind: .file, opener: opener)
+    expect(opener.opened == ["/tmp/file.txt"], "访问文件走默认应用")
+
+    opener.revealError = WorkspaceItemOpenError.directoryUnavailable("/missing")
+    do {
+        try DirectoryMenuAccess.perform(path: "/missing", kind: .directory, opener: opener)
+        expect(false, "访达打开失败应抛错")
+    } catch {
+        expect(true, "访达打开失败抛错")
+    }
+
+    opener.openError = WorkspaceItemOpenError.fileUnavailable("/missing.txt")
+    do {
+        try DirectoryMenuAccess.perform(path: "/missing.txt", kind: .file, opener: opener)
+        expect(false, "默认应用打开失败应抛错")
+    } catch {
+        expect(true, "默认应用打开失败抛错")
+    }
+
+    let real = NSWorkspaceItemOpener()
+    do {
+        try real.revealDirectoryInFinder("/tmp/tocode-missing-\(UUID().uuidString)")
+        expect(false, "缺失目录不得假装打开成功")
+    } catch {
+        expect(true, "缺失目录打开失败")
+    }
+    do {
+        try real.openFileWithDefaultApplication("/tmp/tocode-missing-\(UUID().uuidString)")
+        expect(false, "缺失文件不得假装打开成功")
+    } catch {
+        expect(true, "缺失文件打开失败")
+    }
+}
+
 func testRootPathStore() {
     let suite = "tocode-test-\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suite)!
@@ -5091,6 +5165,8 @@ struct TestRunnerMain {
     static func main() async {
         testFileSystemService()
         testFileCreationAndTrash()
+        testDirectoryMenuModeResolve()
+        testDirectoryMenuAccessOpener()
         testRootPathStore()
         testClipboardService()
         testCodexProjectService()

@@ -33,7 +33,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private var modelLoadGeneration = UUID()
     private var isSwitchingModel = false
     private var isUpdatingCredentials = false
-    private var commandPollingTimer: Timer?
+    private var modifierPollingTimer: Timer?
     private weak var liveCodexMenu: NSMenu?
     private weak var liveSettingsMenu: NSMenu?
     private static let ankerKeyItemID = "tocode.extended.ankerKey"
@@ -126,8 +126,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     /// 左键：弹出目录树（路径选择框），不含功能项。
-    /// 菜单打开期间用 eventTracking 模式的定时器轮询 Command 键状态，
-    /// 实时在普通模式与删除模式之间切换；松开后恢复。
+    /// 菜单打开期间用 eventTracking 模式的定时器轮询 Option/Command，
+    /// 实时在普通、删除与访问模式之间切换；松开后恢复。
     private func showDirectoryMenu() {
         let menu = NSMenu()
         menu.autoenablesItems = false
@@ -137,32 +137,35 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
         addBottomSpacer(to: menu)
 
-        startCommandPolling()
+        startModifierPolling()
 
         if let button = statusItem.button {
             menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
         }
 
-        stopCommandPolling()
+        stopModifierPolling()
     }
 
-    /// 在菜单跟踪期间轮询 Command 修饰键状态并同步到菜单构建器。
-    private func startCommandPolling() {
-        stopCommandPolling()
+    /// 在菜单跟踪期间轮询 Option/Command 并同步到菜单构建器。Option 优先于 Command。
+    private func startModifierPolling() {
+        stopModifierPolling()
         let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                let isDelete = NSEvent.modifierFlags.contains(.command)
-                self.builder.setDeleteMode(isDelete)
+                let flags = NSEvent.modifierFlags
+                self.builder.setMode(.resolve(
+                    option: flags.contains(.option),
+                    command: flags.contains(.command)
+                ))
             }
         }
         RunLoop.current.add(timer, forMode: .eventTracking)
-        commandPollingTimer = timer
+        modifierPollingTimer = timer
     }
 
-    private func stopCommandPolling() {
-        commandPollingTimer?.invalidate()
-        commandPollingTimer = nil
+    private func stopModifierPolling() {
+        modifierPollingTimer?.invalidate()
+        modifierPollingTimer = nil
     }
 
     /// 右键：功能菜单。访达与 mac 子菜单分别收拢相关系统控制。
