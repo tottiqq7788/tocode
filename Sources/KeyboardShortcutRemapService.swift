@@ -18,6 +18,7 @@ protocol KeyboardShortcutRemapTapControlling: AnyObject {
 
 protocol KeyboardShortcutRemapControlling: AnyObject {
     var mappings: [KeyboardShortcutMapping] { get }
+    func applySavedSettings()
     func setInputCaptureSuspended(_ suspended: Bool)
     func claims(type: CGEventType, event: CGEvent) -> Bool
     @discardableResult

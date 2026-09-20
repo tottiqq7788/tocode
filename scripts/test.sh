@@ -22,6 +22,8 @@ swiftc Tests/TestRunner.swift \
   Sources/ShortcutMenuAppearance.swift \
   Sources/AlertFocus.swift \
   Sources/DirectoryMenuMode.swift \
+  Sources/TocodePreferences.swift \
+  Sources/TocodePortableSettings.swift \
   Sources/GlobalShortcutState.swift \
   Sources/KeyboardEventSynthesizer.swift \
   Sources/TrackpadShortcut.swift \

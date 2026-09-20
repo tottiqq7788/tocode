@@ -63,7 +63,7 @@ struct TrackpadShortcutStore {
 
     let defaults: UserDefaults
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = TocodePreferences.shared) {
         self.defaults = defaults
     }
 
@@ -112,8 +112,12 @@ struct TrackpadShortcutStore {
         removeBinding(for: gesture)
     }
 
+    static func defaultsKey(for gesture: TrackpadTapGesture) -> String {
+        "\(keyPrefix).\(gesture.rawValue)FingerTap"
+    }
+
     private func key(for gesture: TrackpadTapGesture) -> String {
-        "\(Self.keyPrefix).\(gesture.rawValue)FingerTap"
+        Self.defaultsKey(for: gesture)
     }
 }
 

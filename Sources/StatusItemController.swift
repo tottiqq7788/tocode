@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 import UserNotifications
 
 /// 菜单栏图标控制器：左键弹目录树，右键弹功能菜单。
@@ -39,6 +40,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private static let ankerKeyItemID = "tocode.extended.ankerKey"
     private static let codexModelItemID = "tocode.extended.codexModel"
     private static let codexModelSeparatorID = "tocode.extended.codexModelSeparator"
+    private static let portableSettingsType =
+        UTType(tag: "tocode", tagClass: .filenameExtension, conformingTo: .json) ?? .json
 
     init(
         shortcuts: GlobalShortcutService,
@@ -400,6 +403,20 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             enabled: launchAtLogin.isEnabled,
             action: #selector(toggleLaunchAtLogin(_:))
         )
+        let exportSettings = settings.addItem(
+            withTitle: "导出配置",
+            action: #selector(exportPortableSettings),
+            keyEquivalent: ""
+        )
+        exportSettings.target = self
+        exportSettings.image = NSImage(systemSymbolName: "square.and.arrow.up", accessibilityDescription: "导出配置")
+        let importSettings = settings.addItem(
+            withTitle: "导入配置",
+            action: #selector(importPortableSettings),
+            keyEquivalent: ""
+        )
+        importSettings.target = self
+        importSettings.image = NSImage(systemSymbolName: "square.and.arrow.down", accessibilityDescription: "导入配置")
         let extendedItem = settings.addItem(
             withTitle: ExtendedSettingsStore.folderTitle,
             action: nil,
@@ -755,6 +772,59 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         if case .failure(let error) = result {
             notifyLaunchAtLoginFailure(error)
         }
+    }
+
+    @objc private func exportPortableSettings() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [Self.portableSettingsType]
+        panel.nameFieldStringValue = "tocode-settings.tocode"
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let settings = TocodePortableSettingsTransfer.make(from: TocodePreferences.shared)
+            try TocodePortableSettingsTransfer.encode(settings).write(to: url, options: .atomic)
+        } catch {
+            presentSettingsAlert(title: "导出失败", message: error.localizedDescription)
+        }
+    }
+
+    @objc private func importPortableSettings() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [Self.portableSettingsType]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let url = panel.urls.first else { return }
+        let settings: TocodePortableSettings
+        do {
+            settings = try TocodePortableSettingsTransfer.decode(Data(contentsOf: url))
+        } catch {
+            presentSettingsAlert(title: "导入失败", message: error.localizedDescription)
+            return
+        }
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "覆盖可分享配置？"
+        alert.informativeText = "将整段替换键盘映射、触控板轻点、快捷键开关与滚轮设置，且不可自动撤销。根目录、开机自启、微信、密钥与拓展设置不受影响。"
+        alert.addButton(withTitle: "覆盖")
+        alert.addButton(withTitle: "取消")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        TocodePortableSettingsTransfer.apply(settings, to: TocodePreferences.shared)
+        shortcuts.applySavedSettings()
+        trackpadShortcuts.applySavedSettings()
+        keyboardRemaps.applySavedSettings()
+        mouseWheel.applySavedSettings()
+    }
+
+    private func presentSettingsAlert(title: String, message: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: "好")
+        alert.runModal()
     }
 
     @objc private func toggleReverseVerticalWheel(_ sender: NSMenuItem) {

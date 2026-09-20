@@ -388,7 +388,7 @@ struct KeyboardShortcutMappingStore {
 
     let defaults: UserDefaults
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = TocodePreferences.shared) {
         self.defaults = defaults
     }
 
@@ -457,6 +457,10 @@ struct KeyboardShortcutMappingStore {
     func delete(id: UUID) {
         var mappings = allMappings()
         mappings.removeAll { $0.id == id }
+        persist(mappings)
+    }
+
+    func replaceAll(_ mappings: [KeyboardShortcutMapping]) {
         persist(mappings)
     }
 

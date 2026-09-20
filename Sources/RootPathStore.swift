@@ -6,7 +6,7 @@ struct RootPathStore {
     static let defaultRoot = "/Users/admin/Documents"
     let defaults: UserDefaults
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = TocodePreferences.shared) {
         self.defaults = defaults
     }
 

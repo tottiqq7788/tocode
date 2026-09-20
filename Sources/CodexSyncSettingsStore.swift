@@ -6,7 +6,7 @@ struct CodexSyncSettingsStore {
 
     let defaults: UserDefaults
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = TocodePreferences.shared) {
         self.defaults = defaults
     }
 

@@ -3,6 +3,7 @@ import CoreGraphics
 import Foundation
 
 protocol TrackpadShortcutControlling: AnyObject {
+    func applySavedSettings()
     func binding(for gesture: TrackpadTapGesture) -> KeyboardShortcutMappingTarget?
     @discardableResult
     func setBinding(_ target: KeyboardShortcutMappingTarget, for gesture: TrackpadTapGesture) -> Bool

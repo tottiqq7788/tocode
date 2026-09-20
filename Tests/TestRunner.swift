@@ -190,6 +190,150 @@ func testDirectoryMenuAccessOpener() {
     }
 }
 
+func testTocodePreferencesMigration() {
+    let canonicalName = "tocode-canonical-\(UUID().uuidString)"
+    let legacyName = "tocode-legacy-\(UUID().uuidString)"
+    let canonical = UserDefaults(suiteName: canonicalName)!
+    let legacy = UserDefaults(suiteName: legacyName)!
+    canonical.removePersistentDomain(forName: canonicalName)
+    legacy.removePersistentDomain(forName: legacyName)
+    defer {
+        canonical.removePersistentDomain(forName: canonicalName)
+        legacy.removePersistentDomain(forName: legacyName)
+    }
+
+    legacy.set("/tmp/from-legacy", forKey: RootPathStore.key)
+    legacy.set(true, forKey: ShortcutSettingsStore.finderMoveKey)
+    TocodePreferences.migrateIfNeeded(canonical: canonical, legacy: legacy)
+    expect(canonical.string(forKey: RootPathStore.key) == "/tmp/from-legacy", "空 suite 迁入根目录")
+    expect(canonical.bool(forKey: ShortcutSettingsStore.finderMoveKey), "空 suite 迁入开关")
+    expect(canonical.bool(forKey: TocodePreferences.migratedKey), "迁移后打标")
+
+    legacy.set("/tmp/newer", forKey: RootPathStore.key)
+    TocodePreferences.migrateIfNeeded(canonical: canonical, legacy: legacy)
+    expect(canonical.string(forKey: RootPathStore.key) == "/tmp/from-legacy", "已迁过不再从 mac 覆盖")
+}
+
+func testTocodePreferencesMigrationKeepsSuiteOnlyKeys() {
+    let canonicalName = "tocode-canonical-keep-\(UUID().uuidString)"
+    let legacyName = "tocode-legacy-keep-\(UUID().uuidString)"
+    let canonical = UserDefaults(suiteName: canonicalName)!
+    let legacy = UserDefaults(suiteName: legacyName)!
+    canonical.removePersistentDomain(forName: canonicalName)
+    legacy.removePersistentDomain(forName: legacyName)
+    defer {
+        canonical.removePersistentDomain(forName: canonicalName)
+        legacy.removePersistentDomain(forName: legacyName)
+    }
+
+    canonical.set("/Users/keep", forKey: RootPathStore.key)
+    canonical.set(true, forKey: ExtendedSettingsStore.akEnabledKey)
+    let mapping = KeyboardShortcutMapping(
+        id: UUID(),
+        name: "打开路径",
+        source: RecordedShortcut(keyCode: 0, modifiers: [.command], keyLabel: "A"),
+        target: .action(.openFinderAtRoot)
+    )
+    let mappingData = try! JSONEncoder().encode([mapping])
+    legacy.set(mappingData, forKey: KeyboardShortcutMappingStore.defaultsKey)
+
+    TocodePreferences.migrateIfNeeded(canonical: canonical, legacy: legacy)
+    expect(canonical.string(forKey: RootPathStore.key) == "/Users/keep", "suite 独有根目录保留")
+    expect(canonical.bool(forKey: ExtendedSettingsStore.akEnabledKey), "suite 独有 AK 开关保留")
+    expect(
+        canonical.data(forKey: KeyboardShortcutMappingStore.defaultsKey) == mappingData,
+        "mac 已有映射覆盖写入"
+    )
+}
+
+func testTocodePortableSettingsTransfer() {
+    let suite = "tocode-portable-\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defaults.removePersistentDomain(forName: suite)
+    defer { defaults.removePersistentDomain(forName: suite) }
+
+    defaults.set("/Users/secret-root", forKey: RootPathStore.key)
+    defaults.set(true, forKey: ExtendedSettingsStore.akEnabledKey)
+    defaults.set(true, forKey: CodexSyncSettingsStore.syncEnabledKey)
+    let mapping = KeyboardShortcutMapping(
+        id: UUID(),
+        name: "黑屏",
+        source: RecordedShortcut(keyCode: 11, modifiers: [.control], keyLabel: "B"),
+        target: .action(.blackout)
+    )
+    KeyboardShortcutMappingStore(defaults: defaults).replaceAll([mapping])
+    TrackpadShortcutStore(defaults: defaults).setBinding(
+        .action(.switchDesktopLeft),
+        for: .threeFingerTap
+    )
+    let shortcuts = ShortcutSettingsStore(defaults: defaults)
+    shortcuts.finderMoveHotkeysEnabled = true
+    shortcuts.doubleCommandQEnabled = true
+    shortcuts.finderCommandQEnabled = false
+    let wheel = MouseWheelReverseStore(defaults: defaults)
+    wheel.reverseVerticalEnabled = true
+    wheel.reverseHorizontalEnabled = false
+
+    let exported = TocodePortableSettingsTransfer.make(from: defaults)
+    let data = try! TocodePortableSettingsTransfer.encode(exported)
+    let text = String(data: data, encoding: .utf8) ?? ""
+    expect(text.contains("tocode.settings"), "导出含 format")
+    expect(!text.contains("secret-root"), "导出不含根目录")
+    expect(!text.contains("extendedSettings"), "导出不含拓展设置键")
+    expect(!text.contains("akEnabled"), "导出不含 AK 开关")
+    expect(!text.contains("wechat"), "导出不含微信字段")
+    expect(!text.contains("rootFolder"), "导出不含根目录字段名")
+
+    do {
+        _ = try TocodePortableSettingsTransfer.decode(Data("{\"format\":\"nope\",\"version\":1}".utf8))
+        expect(false, "错误 format 应失败")
+    } catch {
+        expect(true, "错误 format 失败")
+    }
+    do {
+        var bad = exported
+        bad.version = 9
+        _ = try TocodePortableSettingsTransfer.decode(try TocodePortableSettingsTransfer.encode(bad))
+        expect(false, "高版本应失败")
+    } catch {
+        expect(true, "高版本失败")
+    }
+
+    let otherSuite = "tocode-portable-apply-\(UUID().uuidString)"
+    let other = UserDefaults(suiteName: otherSuite)!
+    other.removePersistentDomain(forName: otherSuite)
+    defer { other.removePersistentDomain(forName: otherSuite) }
+    other.set("/Users/keep-root", forKey: RootPathStore.key)
+    other.set(true, forKey: ExtendedSettingsStore.akEnabledKey)
+    other.set(true, forKey: CodexSyncSettingsStore.syncEnabledKey)
+    KeyboardShortcutMappingStore(defaults: other).replaceAll([
+        KeyboardShortcutMapping(
+            id: UUID(),
+            name: "旧规则",
+            source: RecordedShortcut(keyCode: 8, modifiers: [.option], keyLabel: "C"),
+            target: .action(.copyFinderSelectedPath)
+        )
+    ])
+
+    let decoded = try! TocodePortableSettingsTransfer.decode(data)
+    TocodePortableSettingsTransfer.apply(decoded, to: other)
+    let applied = KeyboardShortcutMappingStore(defaults: other).allMappings()
+    expect(applied.map(\.name) == ["黑屏"], "导入整段替换键盘映射")
+    expect(
+        TrackpadShortcutStore(defaults: other).binding(for: .threeFingerTap) == .action(.switchDesktopLeft),
+        "导入写入触控板绑定"
+    )
+    expect(TrackpadShortcutStore(defaults: other).binding(for: .fourFingerTap) == nil, "导入清除未列出的触控板绑定")
+    expect(ShortcutSettingsStore(defaults: other).finderMoveHotkeysEnabled, "导入写入 x/v 开关")
+    expect(ShortcutSettingsStore(defaults: other).doubleCommandQEnabled, "导入写入双击⌘Q")
+    expect(!ShortcutSettingsStore(defaults: other).finderCommandQEnabled, "导入写入⌘Q强关访达关闭")
+    expect(MouseWheelReverseStore(defaults: other).reverseVerticalEnabled, "导入写入垂直滚轮")
+    expect(!MouseWheelReverseStore(defaults: other).reverseHorizontalEnabled, "导入写入横向滚轮关闭")
+    expect(other.string(forKey: RootPathStore.key) == "/Users/keep-root", "导入不改根目录")
+    expect(other.bool(forKey: ExtendedSettingsStore.akEnabledKey), "导入不改 AK 开关")
+    expect(other.bool(forKey: CodexSyncSettingsStore.syncEnabledKey), "导入不改同步项目夹")
+}
+
 func testRootPathStore() {
     let suite = "tocode-test-\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suite)!
@@ -4583,7 +4727,11 @@ func testTocodeCommandExecutorMapping() {
     try! FileManager.default.createDirectory(at: rootDir, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: rootDir) }
 
-    let store = RootPathStore()
+    let storeSuite = "tocode-executor-root-\(UUID().uuidString)"
+    let storeDefaults = UserDefaults(suiteName: storeSuite)!
+    storeDefaults.removePersistentDomain(forName: storeSuite)
+    defer { storeDefaults.removePersistentDomain(forName: storeSuite) }
+    let store = RootPathStore(defaults: storeDefaults)
     store.save(rootDir.path)
 
     let codexJSON = """
@@ -5167,6 +5315,9 @@ struct TestRunnerMain {
         testFileCreationAndTrash()
         testDirectoryMenuModeResolve()
         testDirectoryMenuAccessOpener()
+        testTocodePreferencesMigration()
+        testTocodePreferencesMigrationKeepsSuiteOnlyKeys()
+        testTocodePortableSettingsTransfer()
         testRootPathStore()
         testClipboardService()
         testCodexProjectService()

@@ -21,6 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var ipcServer: TocodeIPCServer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        TocodePreferences.migrateIfNeeded()
         let service = GlobalShortcutService()
         service.applySavedSettings()
         shortcuts = service
