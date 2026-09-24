@@ -129,29 +129,47 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     /// 左键：弹出目录树（路径选择框），不含功能项。
-    /// 菜单打开期间用 eventTracking 模式的定时器轮询 Option/Command，
-    /// 实时在普通、删除与访问模式之间切换；松开后恢复。
-    /// 普通模式下按住 Shift 连续点条目可多选复制路径且菜单保持打开；
-    /// 若系统仍关闭了菜单，则立刻再弹出同一菜单以继续多选。
+    /// 默认打开上次展开到的文件夹；菜单打开期间轮询 Option/Command。
+    /// Shift 连续多选尽量保持同一菜单；上一级/根目录则重建后再弹。
     private func showDirectoryMenu() {
-        let menu = NSMenu()
-        menu.autoenablesItems = false
-
-        let root = resolveDirectoryRoot()
-        builder.fillRoot(menu, with: root, includeHidden: visibility.currentShowAllFiles())
-
-        addBottomSpacer(to: menu)
-
         startModifierPolling()
         builder.resetMultiCopySession()
 
-        repeat {
+        var activeMenu: NSMenu?
+        var continueLoop = true
+        while continueLoop {
+            let rebuild = activeMenu == nil || builder.consumeRebuildRepopRequest()
+            if rebuild {
+                let fresh = NSMenu()
+                fresh.autoenablesItems = false
+                let root = resolveDirectoryRoot()
+                let display = builder.resolveDisplayDirectory(treeRoot: root)
+                builder.fillRoot(
+                    fresh,
+                    with: display,
+                    treeRoot: root,
+                    includeHidden: visibility.currentShowAllFiles()
+                )
+                addBottomSpacer(to: fresh)
+                activeMenu = fresh
+            }
+            guard let menu = activeMenu else { break }
+
             builder.beginTracking(rootMenu: menu)
             if let button = statusItem.button {
                 menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
             }
             builder.endTracking()
-        } while builder.consumeRepopRequest()
+
+            if builder.consumeRebuildRepopRequest() {
+                activeMenu = nil
+                continueLoop = true
+            } else if builder.consumeSameMenuRepopRequest() {
+                continueLoop = true
+            } else {
+                continueLoop = false
+            }
+        }
 
         builder.resetMultiCopySession()
         stopModifierPolling()

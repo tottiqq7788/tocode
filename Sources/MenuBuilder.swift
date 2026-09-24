@@ -1,15 +1,20 @@
 import AppKit
 
 /// 目录树菜单构建器：把目录内容渲染为 NSMenu 树，子文件夹惰性递归展开。
-/// 普通模式点击条目复制路径；按住 Shift 可连续多选复制并保持菜单；按住 Option 进入删除模式；按住 Command 进入访问模式。
+/// 记住上次展开文件夹并在下次打开时恢复；普通模式点击复制路径；Shift 多选；Option 删除；Command 访问。
 @MainActor
 final class MenuBuilder: NSObject, NSMenuDelegate {
     private let fs = FileSystemService()
     private let clipboard = ClipboardService()
     private let opener: WorkspaceItemOpening
+    private let resumeStore: DirectoryMenuResumeStore
     private var menuDirectoryMap: [ObjectIdentifier: String] = [:]
     private var includeHidden = true
     private var mode: DirectoryMenuMode = .normal
+    /// 当前左键树的权威根（手动根或 Codex 同步根）。
+    private var treeRoot: String = RootPathStore.defaultRoot
+    /// 本次弹出实际展示的目录（可能是恢复位置）。
+    private var displayDirectory: String = RootPathStore.defaultRoot
 
     /// 已渲染、需要在修饰键切换时改动的项（直接保存强引用）。
     private var entryItems: [EntryItem] = []
@@ -19,27 +24,41 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
     private var multiCopyPaths: [String] = []
     private var shiftClickMonitor: Any?
     private weak var trackingRootMenu: NSMenu?
-    /// 若 Shift 多选未能拦住菜单关闭，外部应立刻再弹出同一菜单。
-    private(set) var needsRepopAfterShiftCopy = false
+    /// Shift 多选回退：同一菜单再弹一次。
+    private var needsSameMenuRepop = false
+    /// 上一级/根目录：重建菜单再弹。
+    private var needsRebuildRepop = false
 
     private static let placeholderTitle = "\u{2026}"
     private static let newTitle = "新增"
     private static let clearTitle = "清空"
     private static let accessTitle = "访问"
+    private static let parentTitle = "上一级"
+    private static let rootTitle = "根目录"
 
-    init(opener: WorkspaceItemOpening = NSWorkspaceItemOpener()) {
+    init(
+        opener: WorkspaceItemOpening = NSWorkspaceItemOpener(),
+        resumeStore: DirectoryMenuResumeStore = DirectoryMenuResumeStore()
+    ) {
         self.opener = opener
+        self.resumeStore = resumeStore
         super.init()
     }
 
     func resetMultiCopySession() {
         multiCopyPaths = []
-        needsRepopAfterShiftCopy = false
+        needsSameMenuRepop = false
     }
 
-    func consumeRepopRequest() -> Bool {
-        let value = needsRepopAfterShiftCopy
-        needsRepopAfterShiftCopy = false
+    func consumeSameMenuRepopRequest() -> Bool {
+        let value = needsSameMenuRepop
+        needsSameMenuRepop = false
+        return value
+    }
+
+    func consumeRebuildRepopRequest() -> Bool {
+        let value = needsRebuildRepop
+        needsRebuildRepop = false
         return value
     }
 
@@ -84,17 +103,39 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
         }
     }
 
-    /// 立即填充根菜单（根目录内容在弹出前就绪）。子菜单沿用同一显示状态。
-    func fillRoot(_ menu: NSMenu, with directory: String, includeHidden: Bool = true) {
+    /// 按记忆位置解析本次应展示的目录，并写入当前树根。
+    func resolveDisplayDirectory(treeRoot: String) -> String {
+        self.treeRoot = DirectoryMenuResume.standardize(treeRoot)
+        let display = DirectoryMenuResume.resolveDisplayDirectory(
+            saved: resumeStore.load(),
+            root: self.treeRoot,
+            isDirectory: { self.fs.isExistingDirectory($0) }
+        )
+        self.displayDirectory = display
+        resumeStore.save(display)
+        return display
+    }
+
+    /// 立即填充展示目录内容。非根层时在顶部加入面包屑与导航项。
+    func fillRoot(_ menu: NSMenu, with directory: String, treeRoot: String, includeHidden: Bool = true) {
         self.includeHidden = includeHidden
         self.mode = .normal
+        self.treeRoot = DirectoryMenuResume.standardize(treeRoot)
+        self.displayDirectory = DirectoryMenuResume.standardize(directory)
         entryItems.removeAll()
         bottomItems.removeAll()
-        fill(menu, with: directory)
+        menuDirectoryMap.removeAll()
+
+        if self.displayDirectory != self.treeRoot {
+            insertResumeChrome(into: menu)
+        }
+        fill(menu, with: self.displayDirectory)
+        resumeStore.save(self.displayDirectory)
     }
 
     func menuWillOpen(_ menu: NSMenu) {
         guard let dir = menuDirectoryMap[ObjectIdentifier(menu)] else { return }
+        resumeStore.save(dir)
         // 首次展开：移除占位项，填充真实子项
         guard let idx = menu.items.firstIndex(where: { $0.title == Self.placeholderTitle }) else { return }
         menu.removeItem(at: idx)
@@ -215,11 +256,59 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
                 multiCopyPaths.append(path)
             }
             clipboard.copyPaths(multiCopyPaths)
-            needsRepopAfterShiftCopy = true
+            needsSameMenuRepop = true
             return
         }
         multiCopyPaths = []
         clipboard.copyPath(path)
+    }
+
+    private func insertResumeChrome(into menu: NSMenu) {
+        let crumb = NSMenuItem(
+            title: DirectoryMenuResume.breadcrumb(from: treeRoot, to: displayDirectory),
+            action: nil,
+            keyEquivalent: ""
+        )
+        crumb.isEnabled = false
+
+        let parent = NSMenuItem(
+            title: Self.parentTitle,
+            action: #selector(goToParentDirectory(_:)),
+            keyEquivalent: ""
+        )
+        parent.target = self
+        parent.image = NSImage(systemSymbolName: "chevron.up", accessibilityDescription: Self.parentTitle)
+
+        let root = NSMenuItem(
+            title: Self.rootTitle,
+            action: #selector(goToTreeRoot(_:)),
+            keyEquivalent: ""
+        )
+        root.target = self
+        root.image = NSImage(systemSymbolName: "house", accessibilityDescription: Self.rootTitle)
+
+        menu.addItem(crumb)
+        menu.addItem(parent)
+        menu.addItem(root)
+        menu.addItem(.separator())
+    }
+
+    @objc private func goToParentDirectory(_ sender: NSMenuItem) {
+        let parent = DirectoryMenuResume.parentDirectory(of: displayDirectory)
+        let next = DirectoryMenuResume.resolveDisplayDirectory(
+            saved: parent,
+            root: treeRoot,
+            isDirectory: { fs.isExistingDirectory($0) }
+        )
+        resumeStore.save(next)
+        needsRebuildRepop = true
+        sender.menu?.cancelTracking()
+    }
+
+    @objc private func goToTreeRoot(_ sender: NSMenuItem) {
+        resumeStore.save(treeRoot)
+        needsRebuildRepop = true
+        sender.menu?.cancelTracking()
     }
 
     /// Shift+普通模式点击条目：追加路径、写剪贴板并吞掉事件以保持菜单打开。

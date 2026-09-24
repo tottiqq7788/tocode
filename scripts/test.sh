@@ -22,6 +22,7 @@ swiftc Tests/TestRunner.swift \
   Sources/ShortcutMenuAppearance.swift \
   Sources/AlertFocus.swift \
   Sources/DirectoryMenuMode.swift \
+  Sources/DirectoryMenuResume.swift \
   Sources/TocodePreferences.swift \
   Sources/TocodePortableSettings.swift \
   Sources/UserManual.swift \

@@ -404,6 +404,8 @@ func testUserManualPages() {
     expect(joined.contains("Command"), "说明书覆盖访问模式")
     expect(joined.contains("Shift"), "说明书覆盖 Shift 多选复制")
     expect(joined.contains("一行一条") || joined.contains("换行"), "说明书说明多路径换行")
+    expect(joined.contains("上次展开"), "说明书覆盖目录树恢复展开位置")
+    expect(joined.contains("上一级"), "说明书覆盖上一级导航")
     expect(joined.contains("创建成功后会自动把新建项"), "说明书覆盖新增成功复制路径")
     expect(joined.contains("配置 → 导出配置"), "说明书覆盖配置夹导入导出")
     expect(joined.contains("右键 → 说明书"), "说明书写明顶层入口")
@@ -482,6 +484,62 @@ func testClipboardService() {
         ClipboardService.formatPaths(["/a", "/b"]) == "「/a」\n「/b」",
         "formatPaths 纯函数换行拼接"
     )
+}
+
+func testDirectoryMenuResume() {
+    let root = "/Users/totti/project"
+    let deep = "/Users/totti/project/a/b/c"
+    let sibling = "/Users/totti/other/x"
+
+    expect(DirectoryMenuResume.standardize(root + "/") == root || DirectoryMenuResume.standardize(root + "/").hasSuffix("project"), "标准化路径")
+    expect(DirectoryMenuResume.isUnderRoot(path: deep, root: root), "深路径在根下")
+    expect(DirectoryMenuResume.isUnderRoot(path: root, root: root), "根在根下")
+    expect(!DirectoryMenuResume.isUnderRoot(path: sibling, root: root), "旁路不在根下")
+
+    let existing: Set<String> = [
+        DirectoryMenuResume.standardize(root),
+        DirectoryMenuResume.standardize(root + "/a"),
+        DirectoryMenuResume.standardize(root + "/a/b")
+    ]
+    let isDir = { existing.contains(DirectoryMenuResume.standardize($0)) }
+
+    expect(
+        DirectoryMenuResume.resolveDisplayDirectory(saved: deep, root: root, isDirectory: isDir)
+            == DirectoryMenuResume.standardize(root + "/a/b"),
+        "失效深层回退到仍存在的上级"
+    )
+    expect(
+        DirectoryMenuResume.resolveDisplayDirectory(saved: sibling, root: root, isDirectory: isDir)
+            == DirectoryMenuResume.standardize(root),
+        "根外路径回退到根"
+    )
+    expect(
+        DirectoryMenuResume.resolveDisplayDirectory(saved: nil, root: root, isDirectory: isDir)
+            == DirectoryMenuResume.standardize(root),
+        "无记忆时用根"
+    )
+    expect(
+        DirectoryMenuResume.breadcrumb(from: root, to: deep) == "a/b/c",
+        "面包屑为相对路径"
+    )
+    expect(
+        DirectoryMenuResume.breadcrumb(from: root, to: root) == "根目录",
+        "根层面包屑"
+    )
+    expect(
+        DirectoryMenuResume.parentDirectory(of: deep) == DirectoryMenuResume.standardize(root + "/a/b"),
+        "上一级路径"
+    )
+
+    let suite = "tocode-resume-\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defaults.removePersistentDomain(forName: suite)
+    let store = DirectoryMenuResumeStore(defaults: defaults)
+    expect(store.load() == nil, "空存储无记忆")
+    store.save(deep)
+    expect(store.load() == DirectoryMenuResume.standardize(deep), "存储记忆路径")
+    store.clear()
+    expect(store.load() == nil, "清除记忆")
 }
 
 func testDirectoryMenuMultiCopy() {
@@ -5582,6 +5640,7 @@ struct TestRunnerMain {
         testUserManualPages()
         testRootPathStore()
         testClipboardService()
+        testDirectoryMenuResume()
         testDirectoryMenuMultiCopy()
         testCodexProjectService()
         testCodexSyncSettingsStore()
