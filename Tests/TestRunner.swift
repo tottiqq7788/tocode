@@ -94,6 +94,12 @@ func testFileCreationAndTrash() {
     expect(created == (tmp as NSString).appendingPathComponent("note.md"), "创建 note.md")
     expect(fm.fileExists(atPath: created), "note.md 存在")
 
+    let pbName = NSPasteboard.Name("tocode-test-create-clip-\(UUID().uuidString)")
+    let clip = ClipboardService(pasteboard: NSPasteboard(name: pbName))
+    clip.copy("sentinel")
+    clip.copyPath(created)
+    expect(clip.read() == "「\(created)」", "新增文件成功后剪贴板为该「路径」")
+
     let withExt = try! fs.createFile(in: tmp, name: "data.json", format: .txt)
     expect(withExt == (tmp as NSString).appendingPathComponent("data.json"), "已有扩展名按输入创建")
 
@@ -105,6 +111,26 @@ func testFileCreationAndTrash() {
         else { expect(false, "重复文件名抛 fileAlreadyExists") }
     } catch {
         expect(false, "重复文件名应抛 FileSystemServiceError")
+    }
+
+    let folder = try! fs.createDirectory(in: tmp, name: "new-folder")
+    expect(folder == (tmp as NSString).appendingPathComponent("new-folder"), "创建文件夹返回路径")
+    expect(fm.fileExists(atPath: folder), "文件夹存在")
+    clip.copyPath(folder)
+    expect(clip.read() == "「\(folder)」", "新增文件夹成功后剪贴板为该「路径」")
+
+    do {
+        _ = try fs.createDirectory(in: tmp, name: "new-folder")
+        expect(false, "重复文件夹名应抛错")
+    } catch let error as FileSystemServiceError {
+        if case .fileAlreadyExists = error {
+            expect(true, "重复文件夹名抛 fileAlreadyExists")
+            expect(clip.read() == "「\(folder)」", "创建失败不要求改写剪贴板语义由调用方保证")
+        } else {
+            expect(false, "重复文件夹名抛 fileAlreadyExists")
+        }
+    } catch {
+        expect(false, "重复文件夹名应抛 FileSystemServiceError")
     }
 
     // 删除单个文件到废纸篓
@@ -378,6 +404,7 @@ func testUserManualPages() {
     expect(joined.contains("Command"), "说明书覆盖访问模式")
     expect(joined.contains("Shift"), "说明书覆盖 Shift 多选复制")
     expect(joined.contains("一行一条") || joined.contains("换行"), "说明书说明多路径换行")
+    expect(joined.contains("创建成功后会自动把新建项"), "说明书覆盖新增成功复制路径")
     expect(joined.contains("配置 → 导出配置"), "说明书覆盖配置夹导入导出")
     expect(joined.contains("右键 → 说明书"), "说明书写明顶层入口")
     expect(joined.contains("不在设置夹里"), "说明书不在设置夹内")

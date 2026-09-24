@@ -254,12 +254,14 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
         guard let directory = sender.representedObject as? String else { return }
         guard let input = NewItemPrompt.prompt(in: directory) else { return }
         do {
+            let createdPath: String
             switch input.kind {
             case .file:
-                _ = try fs.createFile(in: directory, name: input.name, format: input.format)
+                createdPath = try fs.createFile(in: directory, name: input.name, format: input.format)
             case .folder:
-                _ = try fs.createDirectory(in: directory, name: input.name)
+                createdPath = try fs.createDirectory(in: directory, name: input.name)
             }
+            clipboard.copyPath(createdPath)
         } catch {
             presentError(error, title: "新增失败")
         }
