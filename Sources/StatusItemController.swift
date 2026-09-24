@@ -131,6 +131,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     /// 左键：弹出目录树（路径选择框），不含功能项。
     /// 菜单打开期间用 eventTracking 模式的定时器轮询 Option/Command，
     /// 实时在普通、删除与访问模式之间切换；松开后恢复。
+    /// 普通模式下按住 Shift 连续点条目可多选复制路径且菜单保持打开；
+    /// 若系统仍关闭了菜单，则立刻再弹出同一菜单以继续多选。
     private func showDirectoryMenu() {
         let menu = NSMenu()
         menu.autoenablesItems = false
@@ -141,11 +143,17 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         addBottomSpacer(to: menu)
 
         startModifierPolling()
+        builder.resetMultiCopySession()
 
-        if let button = statusItem.button {
-            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
-        }
+        repeat {
+            builder.beginTracking(rootMenu: menu)
+            if let button = statusItem.button {
+                menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
+            }
+            builder.endTracking()
+        } while builder.consumeRepopRequest()
 
+        builder.resetMultiCopySession()
         stopModifierPolling()
     }
 

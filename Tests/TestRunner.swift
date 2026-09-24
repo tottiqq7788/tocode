@@ -376,6 +376,8 @@ func testUserManualPages() {
     let joined = UserManual.pages.map(\.body).joined(separator: "\n")
     expect(joined.contains("Option"), "说明书覆盖删除模式")
     expect(joined.contains("Command"), "说明书覆盖访问模式")
+    expect(joined.contains("Shift"), "说明书覆盖 Shift 多选复制")
+    expect(joined.contains("一行一条") || joined.contains("换行"), "说明书说明多路径换行")
     expect(joined.contains("配置 → 导出配置"), "说明书覆盖配置夹导入导出")
     expect(joined.contains("右键 → 说明书"), "说明书写明顶层入口")
     expect(joined.contains("不在设置夹里"), "说明书不在设置夹内")
@@ -437,7 +439,103 @@ func testClipboardService() {
 
     clip.copyPath("/Users/test/folder")
     expect(clip.read() == "「/Users/test/folder」", "ClipboardService.copyPath 用「」包裹路径")
+
+    clip.copyPaths([
+        "/Users/totti/Desktop/html-report/references",
+        "/Users/totti/Desktop/html-report/templates"
+    ])
+    expect(
+        clip.read() == """
+        「/Users/totti/Desktop/html-report/references」
+        「/Users/totti/Desktop/html-report/templates」
+        """,
+        "ClipboardService.copyPaths 一行一个「路径」"
+    )
+    expect(
+        ClipboardService.formatPaths(["/a", "/b"]) == "「/a」\n「/b」",
+        "formatPaths 纯函数换行拼接"
+    )
 }
+
+func testDirectoryMenuMultiCopy() {
+    var session: [String] = []
+
+    expect(
+        !DirectoryMenuMultiCopy.handleClick(
+            mode: .normal,
+            shiftHeld: false,
+            entryPath: "/a",
+            sessionPaths: &session
+        ),
+        "未按 Shift 不吞事件"
+    )
+    expect(session.isEmpty, "未按 Shift 不改会话")
+
+    expect(
+        DirectoryMenuMultiCopy.handleClick(
+            mode: .normal,
+            shiftHeld: true,
+            entryPath: "/Users/totti/Desktop/html-report/references",
+            sessionPaths: &session
+        ),
+        "Shift 普通模式追加并保持菜单"
+    )
+    expect(
+        DirectoryMenuMultiCopy.handleClick(
+            mode: .normal,
+            shiftHeld: true,
+            entryPath: "/Users/totti/Desktop/html-report/templates",
+            sessionPaths: &session
+        ),
+        "Shift 第二次继续追加"
+    )
+    expect(
+        session == [
+            "/Users/totti/Desktop/html-report/references",
+            "/Users/totti/Desktop/html-report/templates"
+        ],
+        "多选顺序与点击一致"
+    )
+    expect(
+        ClipboardService.formatPaths(session) == """
+        「/Users/totti/Desktop/html-report/references」
+        「/Users/totti/Desktop/html-report/templates」
+        """,
+        "多选粘贴格式一行一个"
+    )
+
+    expect(
+        !DirectoryMenuMultiCopy.handleClick(
+            mode: .delete,
+            shiftHeld: true,
+            entryPath: "/c",
+            sessionPaths: &session
+        ),
+        "删除模式忽略 Shift 多选"
+    )
+    expect(session.count == 2, "删除模式不改已有会话")
+
+    expect(
+        !DirectoryMenuMultiCopy.handleClick(
+            mode: .access,
+            shiftHeld: true,
+            entryPath: "/d",
+            sessionPaths: &session
+        ),
+        "访问模式忽略 Shift 多选"
+    )
+    expect(
+        !DirectoryMenuMultiCopy.handleClick(
+            mode: .normal,
+            shiftHeld: true,
+            entryPath: nil,
+            sessionPaths: &session
+        ),
+        "非条目点击不吞事件"
+    )
+    expect(session.count == 2, "非条目点击不改会话")
+}
+
 
 func testCodexProjectService() {
     let fm = FileManager.default
@@ -5457,6 +5555,7 @@ struct TestRunnerMain {
         testUserManualPages()
         testRootPathStore()
         testClipboardService()
+        testDirectoryMenuMultiCopy()
         testCodexProjectService()
         testCodexSyncSettingsStore()
         testCodexModelTOMLAndCatalog()

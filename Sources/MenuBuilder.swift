@@ -1,7 +1,7 @@
 import AppKit
 
 /// 目录树菜单构建器：把目录内容渲染为 NSMenu 树，子文件夹惰性递归展开。
-/// 普通模式点击条目复制路径；按住 Option 进入删除模式；按住 Command 进入访问模式。
+/// 普通模式点击条目复制路径；按住 Shift 可连续多选复制并保持菜单；按住 Option 进入删除模式；按住 Command 进入访问模式。
 @MainActor
 final class MenuBuilder: NSObject, NSMenuDelegate {
     private let fs = FileSystemService()
@@ -15,6 +15,13 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
     private var entryItems: [EntryItem] = []
     private var bottomItems: [BottomItem] = []
 
+    /// 本次目录树弹出期间累积的 Shift 多选路径。
+    private var multiCopyPaths: [String] = []
+    private var shiftClickMonitor: Any?
+    private weak var trackingRootMenu: NSMenu?
+    /// 若 Shift 多选未能拦住菜单关闭，外部应立刻再弹出同一菜单。
+    private(set) var needsRepopAfterShiftCopy = false
+
     private static let placeholderTitle = "\u{2026}"
     private static let newTitle = "新增"
     private static let clearTitle = "清空"
@@ -23,6 +30,36 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
     init(opener: WorkspaceItemOpening = NSWorkspaceItemOpener()) {
         self.opener = opener
         super.init()
+    }
+
+    func resetMultiCopySession() {
+        multiCopyPaths = []
+        needsRepopAfterShiftCopy = false
+    }
+
+    func consumeRepopRequest() -> Bool {
+        let value = needsRepopAfterShiftCopy
+        needsRepopAfterShiftCopy = false
+        return value
+    }
+
+    /// 目录树弹出期间安装 Shift 多选监视器；关闭后由 `endTracking` 拆除。
+    /// 不重置多选会话，以便菜单被关闭后立刻再弹出时继续累积。
+    func beginTracking(rootMenu: NSMenu) {
+        endTracking()
+        trackingRootMenu = rootMenu
+        shiftClickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { [weak self] event in
+            guard let self else { return event }
+            return self.handlePotentialShiftMultiCopy(event)
+        }
+    }
+
+    func endTracking() {
+        if let shiftClickMonitor {
+            NSEvent.removeMonitor(shiftClickMonitor)
+        }
+        shiftClickMonitor = nil
+        trackingRootMenu = nil
     }
 
     private final class EntryItem {
@@ -171,9 +208,44 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
     // MARK: - 普通模式
 
     @objc private func copyItem(_ sender: NSMenuItem) {
-        if let path = sender.representedObject as? String {
-            clipboard.copyPath(path)
+        guard let path = sender.representedObject as? String else { return }
+        // 监视器已处理时通常不会走到这里；若 Shift 点击仍触发了 action，作回退累积并请求再弹出。
+        if mode == .normal, NSEvent.modifierFlags.contains(.shift) {
+            if multiCopyPaths.last != path {
+                multiCopyPaths.append(path)
+            }
+            clipboard.copyPaths(multiCopyPaths)
+            needsRepopAfterShiftCopy = true
+            return
         }
+        multiCopyPaths = []
+        clipboard.copyPath(path)
+    }
+
+    /// Shift+普通模式点击条目：追加路径、写剪贴板并吞掉事件以保持菜单打开。
+    private func handlePotentialShiftMultiCopy(_ event: NSEvent) -> NSEvent? {
+        guard let root = trackingRootMenu else { return event }
+        let entryPath = highlightedEntryPath(in: root)
+        let keepOpen = DirectoryMenuMultiCopy.handleClick(
+            mode: mode,
+            shiftHeld: NSEvent.modifierFlags.contains(.shift),
+            entryPath: entryPath,
+            sessionPaths: &multiCopyPaths
+        )
+        guard keepOpen else { return event }
+        clipboard.copyPaths(multiCopyPaths)
+        // 已吞掉 mouseUp，菜单应保持打开；不请求再弹出。
+        return nil
+    }
+
+    /// 从根菜单向下找当前高亮的条目路径（忽略底部「新增/清空/访问」）。
+    private func highlightedEntryPath(in menu: NSMenu) -> String? {
+        guard let item = menu.highlightedItem else { return nil }
+        if let submenu = item.submenu, let nested = highlightedEntryPath(in: submenu) {
+            return nested
+        }
+        guard entryItems.contains(where: { $0.item === item }) else { return nil }
+        return item.representedObject as? String
     }
 
     // MARK: - 新增
