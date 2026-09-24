@@ -128,48 +128,26 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         return store.resolveRoot(isDirectory: { fs.isExistingDirectory($0) })
     }
 
-    /// 左键：弹出目录树（路径选择框），不含功能项。
-    /// 默认打开上次展开到的文件夹；菜单打开期间轮询 Option/Command。
-    /// Shift 连续多选尽量保持同一菜单；上一级/根目录则重建后再弹。
+    /// 左键：弹出目录树（始终从当前根第一层）；根菜单含「历史」与「新增」。
+    /// Shift 连续多选尽量保持同一菜单；若系统仍关闭则立刻再弹同一菜单。
     private func showDirectoryMenu() {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+
+        let root = resolveDirectoryRoot()
+        builder.fillRoot(menu, with: root, includeHidden: visibility.currentShowAllFiles())
+        addBottomSpacer(to: menu)
+
         startModifierPolling()
         builder.resetMultiCopySession()
 
-        var activeMenu: NSMenu?
-        var continueLoop = true
-        while continueLoop {
-            let rebuild = activeMenu == nil || builder.consumeRebuildRepopRequest()
-            if rebuild {
-                let fresh = NSMenu()
-                fresh.autoenablesItems = false
-                let root = resolveDirectoryRoot()
-                let display = builder.resolveDisplayDirectory(treeRoot: root)
-                builder.fillRoot(
-                    fresh,
-                    with: display,
-                    treeRoot: root,
-                    includeHidden: visibility.currentShowAllFiles()
-                )
-                addBottomSpacer(to: fresh)
-                activeMenu = fresh
-            }
-            guard let menu = activeMenu else { break }
-
+        repeat {
             builder.beginTracking(rootMenu: menu)
             if let button = statusItem.button {
                 menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
             }
             builder.endTracking()
-
-            if builder.consumeRebuildRepopRequest() {
-                activeMenu = nil
-                continueLoop = true
-            } else if builder.consumeSameMenuRepopRequest() {
-                continueLoop = true
-            } else {
-                continueLoop = false
-            }
-        }
+        } while builder.consumeSameMenuRepopRequest()
 
         builder.resetMultiCopySession()
         stopModifierPolling()

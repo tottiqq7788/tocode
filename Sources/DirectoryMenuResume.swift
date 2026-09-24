@@ -1,8 +1,10 @@
 import Foundation
 
-/// 左键目录树「恢复上次展开位置」的纯规则与持久化。
+/// 左键目录树「历史」：记住上次点击的文件/文件夹，供根菜单「历史」子菜单展示其同级目录。
 struct DirectoryMenuResumeStore {
-    static let key = "tocode.directoryMenu.resumePath"
+    static let key = "tocode.directoryMenu.lastClickedPath"
+    /// 旧版整菜单恢复用的键，读取时忽略并清理。
+    static let legacyResumeKey = "tocode.directoryMenu.resumePath"
     let defaults: UserDefaults
 
     init(defaults: UserDefaults = TocodePreferences.shared) {
@@ -10,15 +12,20 @@ struct DirectoryMenuResumeStore {
     }
 
     func load() -> String? {
-        defaults.string(forKey: Self.key)
+        if defaults.object(forKey: Self.legacyResumeKey) != nil {
+            defaults.removeObject(forKey: Self.legacyResumeKey)
+        }
+        return defaults.string(forKey: Self.key)
     }
 
     func save(_ path: String) {
         defaults.set(DirectoryMenuResume.standardize(path), forKey: Self.key)
+        defaults.removeObject(forKey: Self.legacyResumeKey)
     }
 
     func clear() {
         defaults.removeObject(forKey: Self.key)
+        defaults.removeObject(forKey: Self.legacyResumeKey)
     }
 }
 
@@ -33,42 +40,22 @@ enum DirectoryMenuResume {
         return p == r || p.hasPrefix(r + "/")
     }
 
-    /// 解析下次应展示的目录：记忆路径仍在根下且存在则用之，否则沿父级回退，最后落到根。
-    static func resolveDisplayDirectory(
-        saved: String?,
-        root: String,
-        isDirectory: (String) -> Bool
-    ) -> String {
-        let rootStd = standardize(root)
-        guard let saved else { return rootStd }
-        var path = standardize(saved)
-        while true {
-            if isUnderRoot(path: path, root: rootStd), isDirectory(path) {
-                return path
-            }
-            if path == rootStd || path == "/" || path.isEmpty {
-                return rootStd
-            }
-            let parent = (path as NSString).deletingLastPathComponent
-            if parent == path { return rootStd }
-            path = parent
-        }
-    }
-
     static func parentDirectory(of path: String) -> String {
         (standardize(path) as NSString).deletingLastPathComponent
     }
 
-    /// 相对根的面包屑，根自身返回「根目录」。
-    static func breadcrumb(from root: String, to path: String) -> String {
+    /// 上次点击项的同级目录（其父文件夹）。无效时返回 nil。
+    static func siblingDirectory(
+        lastClicked: String?,
+        root: String,
+        isDirectory: (String) -> Bool
+    ) -> String? {
+        guard let lastClicked else { return nil }
         let rootStd = standardize(root)
-        let pathStd = standardize(path)
-        if pathStd == rootStd { return "根目录" }
-        guard isUnderRoot(path: pathStd, root: rootStd) else {
-            return (pathStd as NSString).lastPathComponent
-        }
-        let prefix = rootStd.hasSuffix("/") ? rootStd : rootStd + "/"
-        let relative = String(pathStd.dropFirst(prefix.count))
-        return relative.isEmpty ? "根目录" : relative
+        let clicked = standardize(lastClicked)
+        guard isUnderRoot(path: clicked, root: rootStd) else { return nil }
+        let parent = parentDirectory(of: clicked)
+        guard isUnderRoot(path: parent, root: rootStd), isDirectory(parent) else { return nil }
+        return parent
     }
 }

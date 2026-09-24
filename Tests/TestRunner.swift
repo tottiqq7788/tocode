@@ -404,9 +404,14 @@ func testUserManualPages() {
     expect(joined.contains("Command"), "说明书覆盖访问模式")
     expect(joined.contains("Shift"), "说明书覆盖 Shift 多选复制")
     expect(joined.contains("一行一条") || joined.contains("换行"), "说明书说明多路径换行")
-    expect(joined.contains("上次展开"), "说明书覆盖目录树恢复展开位置")
-    expect(joined.contains("上一级"), "说明书覆盖上一级导航")
+    expect(joined.contains("历史"), "说明书覆盖目录树历史同级")
+    expect(joined.contains("始终从当前根目录的第一层开始"), "说明书写明根菜单不整页跳转")
+    expect(joined.contains("分隔线 →「历史」→「新增」"), "说明书写明根菜单底部结构")
+    expect(joined.contains("只悬停展开不会更新"), "说明书写明悬停不写入历史")
+    expect(!joined.contains("上次展开"), "说明书不再描述整菜单跳转恢复")
+    expect(!joined.contains("上一级"), "说明书不再描述上一级顶栏")
     expect(joined.contains("创建成功后会自动把新建项"), "说明书覆盖新增成功复制路径")
+    expect(joined.contains("全角括号包裹"), "说明书写明「路径」格式")
     expect(joined.contains("配置 → 导出配置"), "说明书覆盖配置夹导入导出")
     expect(joined.contains("右键 → 说明书"), "说明书写明顶层入口")
     expect(joined.contains("不在设置夹里"), "说明书不在设置夹内")
@@ -488,56 +493,54 @@ func testClipboardService() {
 
 func testDirectoryMenuResume() {
     let root = "/Users/totti/project"
-    let deep = "/Users/totti/project/a/b/c"
+    let deepFile = "/Users/totti/project/a/b/c.txt"
     let sibling = "/Users/totti/other/x"
 
-    expect(DirectoryMenuResume.standardize(root + "/") == root || DirectoryMenuResume.standardize(root + "/").hasSuffix("project"), "标准化路径")
-    expect(DirectoryMenuResume.isUnderRoot(path: deep, root: root), "深路径在根下")
-    expect(DirectoryMenuResume.isUnderRoot(path: root, root: root), "根在根下")
+    expect(DirectoryMenuResume.isUnderRoot(path: deepFile, root: root), "深路径在根下")
     expect(!DirectoryMenuResume.isUnderRoot(path: sibling, root: root), "旁路不在根下")
 
-    let existing: Set<String> = [
+    let existingDirs: Set<String> = [
         DirectoryMenuResume.standardize(root),
         DirectoryMenuResume.standardize(root + "/a"),
         DirectoryMenuResume.standardize(root + "/a/b")
     ]
-    let isDir = { existing.contains(DirectoryMenuResume.standardize($0)) }
+    let isDir = { existingDirs.contains(DirectoryMenuResume.standardize($0)) }
 
     expect(
-        DirectoryMenuResume.resolveDisplayDirectory(saved: deep, root: root, isDirectory: isDir)
+        DirectoryMenuResume.siblingDirectory(lastClicked: deepFile, root: root, isDirectory: isDir)
             == DirectoryMenuResume.standardize(root + "/a/b"),
-        "失效深层回退到仍存在的上级"
+        "历史同级目录为点击项的父目录"
     )
     expect(
-        DirectoryMenuResume.resolveDisplayDirectory(saved: sibling, root: root, isDirectory: isDir)
-            == DirectoryMenuResume.standardize(root),
-        "根外路径回退到根"
+        DirectoryMenuResume.siblingDirectory(lastClicked: sibling, root: root, isDirectory: isDir) == nil,
+        "根外点击无历史目录"
     )
     expect(
-        DirectoryMenuResume.resolveDisplayDirectory(saved: nil, root: root, isDirectory: isDir)
-            == DirectoryMenuResume.standardize(root),
-        "无记忆时用根"
+        DirectoryMenuResume.siblingDirectory(lastClicked: nil, root: root, isDirectory: isDir) == nil,
+        "无点击记忆无历史目录"
     )
     expect(
-        DirectoryMenuResume.breadcrumb(from: root, to: deep) == "a/b/c",
-        "面包屑为相对路径"
+        DirectoryMenuResume.siblingDirectory(
+            lastClicked: root + "/a/missing/file.txt",
+            root: root,
+            isDirectory: isDir
+        ) == nil,
+        "父目录不存在时无历史目录"
     )
     expect(
-        DirectoryMenuResume.breadcrumb(from: root, to: root) == "根目录",
-        "根层面包屑"
-    )
-    expect(
-        DirectoryMenuResume.parentDirectory(of: deep) == DirectoryMenuResume.standardize(root + "/a/b"),
-        "上一级路径"
+        DirectoryMenuResume.parentDirectory(of: deepFile) == DirectoryMenuResume.standardize(root + "/a/b"),
+        "父目录解析"
     )
 
     let suite = "tocode-resume-\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suite)!
     defaults.removePersistentDomain(forName: suite)
+    defaults.set("/legacy/resume", forKey: DirectoryMenuResumeStore.legacyResumeKey)
     let store = DirectoryMenuResumeStore(defaults: defaults)
-    expect(store.load() == nil, "空存储无记忆")
-    store.save(deep)
-    expect(store.load() == DirectoryMenuResume.standardize(deep), "存储记忆路径")
+    expect(store.load() == nil, "旧 resume 键被清理且无新记忆")
+    expect(defaults.object(forKey: DirectoryMenuResumeStore.legacyResumeKey) == nil, "清理旧键")
+    store.save(deepFile)
+    expect(store.load() == DirectoryMenuResume.standardize(deepFile), "存储上次点击路径")
     store.clear()
     expect(store.load() == nil, "清除记忆")
 }
