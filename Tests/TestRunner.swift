@@ -246,6 +246,35 @@ func testTocodePreferencesMigrationKeepsSuiteOnlyKeys() {
     )
 }
 
+func testTocodePreferencesMigrationReadsProcessStandardDomain() {
+    let canonicalName = "tocode-canonical-standard-\(UUID().uuidString)"
+    let legacyName = "tocode-legacy-empty-\(UUID().uuidString)"
+    let processName = "tocode-process-\(UUID().uuidString)"
+    let canonical = UserDefaults(suiteName: canonicalName)!
+    let legacy = UserDefaults(suiteName: legacyName)!
+    let process = UserDefaults(suiteName: processName)!
+    canonical.removePersistentDomain(forName: canonicalName)
+    legacy.removePersistentDomain(forName: legacyName)
+    process.removePersistentDomain(forName: processName)
+    defer {
+        canonical.removePersistentDomain(forName: canonicalName)
+        legacy.removePersistentDomain(forName: legacyName)
+        process.removePersistentDomain(forName: processName)
+    }
+
+    canonical.set("/Users/old-suite", forKey: RootPathStore.key)
+    process.set("/Users/totti/Desktop", forKey: RootPathStore.key)
+    TocodePreferences.migrateIfNeeded(
+        canonical: canonical,
+        legacy: legacy,
+        processDefaults: process
+    )
+    expect(
+        canonical.string(forKey: RootPathStore.key) == "/Users/totti/Desktop",
+        "标准域现用根目录覆盖空 suite"
+    )
+}
+
 func testTocodePortableSettingsTransfer() {
     let suite = "tocode-portable-\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suite)!
@@ -277,6 +306,9 @@ func testTocodePortableSettingsTransfer() {
     let exported = TocodePortableSettingsTransfer.make(from: defaults)
     let data = try! TocodePortableSettingsTransfer.encode(exported)
     let text = String(data: data, encoding: .utf8) ?? ""
+    expect(TocodePortableSettings.folderTitle == "配置", "配置夹标题")
+    expect(TocodePortableSettings.exportTitle == "导出配置", "导出项标题")
+    expect(TocodePortableSettings.importTitle == "导入配置", "导入项标题")
     expect(text.contains("tocode.settings"), "导出含 format")
     expect(!text.contains("secret-root"), "导出不含根目录")
     expect(!text.contains("extendedSettings"), "导出不含拓展设置键")
@@ -335,6 +367,7 @@ func testTocodePortableSettingsTransfer() {
 }
 
 func testUserManualPages() {
+    expect(UserManual.menuTitle == "说明书", "说明书顶层标题")
     let titles = UserManual.pages.map(\.title)
     expect(titles == ["入门", "目录树", "访达与目录", "mac", "微信", "命令行", "设置"], "说明书 Tab 分页完整")
     expect(Set(titles).count == titles.count, "说明书 Tab 标题不重复")
@@ -343,7 +376,11 @@ func testUserManualPages() {
     let joined = UserManual.pages.map(\.body).joined(separator: "\n")
     expect(joined.contains("Option"), "说明书覆盖删除模式")
     expect(joined.contains("Command"), "说明书覆盖访问模式")
-    expect(joined.contains("导出配置"), "说明书覆盖导入导出")
+    expect(joined.contains("配置 → 导出配置"), "说明书覆盖配置夹导入导出")
+    expect(joined.contains("右键 → 说明书"), "说明书写明顶层入口")
+    expect(joined.contains("不在设置夹里"), "说明书不在设置夹内")
+    expect(joined.contains("文稿/wechat"), "说明书写明归档在本机文稿/wechat")
+    expect(!joined.contains("/Users/admin/Documents/wechat"), "说明书不写死 admin 用户路径")
     expect(joined.contains("wechat send") || joined.contains("快捷输入"), "说明书覆盖微信命令或快捷输入")
     expect(joined.contains("tocode help"), "说明书覆盖 CLI")
     expect(!joined.contains("ANKER_API_KEY"), "说明书不含密钥字段")
@@ -3564,6 +3601,88 @@ func testWeChatArchiveNaming() {
     )
 }
 
+@MainActor
+func testWeChatArchiveLocation() {
+    let expected = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Documents/wechat", isDirectory: true)
+    expect(
+        WeChatArchiveService.defaultRoot.standardizedFileURL.path == expected.standardizedFileURL.path,
+        "默认归档目录为当前用户文稿/wechat"
+    )
+    expect(
+        WeChatArchiveService.defaultRoot.path.hasSuffix("/Documents/wechat"),
+        "归档目录固定为 Documents/wechat"
+    )
+
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent(
+        "tocode-wechat-location-\(UUID().uuidString)",
+        isDirectory: true
+    )
+    defer { try? fm.removeItem(at: root) }
+    let opener = MockWeChatOpener()
+    let notifier = MockWeChatNotifier()
+    let service = WeChatAssociationService(
+        transport: MockWeChatTransport(),
+        credentialStore: MemoryWeChatCredentialStore(nil),
+        stateStore: MemoryWeChatStateStore(),
+        archiver: MockWeChatArchiver(),
+        opener: opener,
+        notifier: notifier,
+        archiveRoot: root
+    )
+    service.openArchiveLocation()
+    var isDirectory: ObjCBool = false
+    expect(fm.fileExists(atPath: root.path, isDirectory: &isDirectory) && isDirectory.boolValue, "文件位置会创建归档目录")
+    expect(opener.urls == [root], "文件位置用访达打开归档目录")
+    expect(notifier.notifications.isEmpty, "创建并打开成功时不通知失败")
+
+    let blocker = fm.temporaryDirectory.appendingPathComponent("tocode-wechat-blocked-\(UUID().uuidString)")
+    fm.createFile(atPath: blocker.path, contents: Data())
+    defer { try? fm.removeItem(at: blocker) }
+    let unwritable = blocker.appendingPathComponent("wechat", isDirectory: true)
+    let failOpener = MockWeChatOpener()
+    let failNotifier = MockWeChatNotifier()
+    let failService = WeChatAssociationService(
+        transport: MockWeChatTransport(),
+        credentialStore: MemoryWeChatCredentialStore(nil),
+        stateStore: MemoryWeChatStateStore(),
+        archiver: MockWeChatArchiver(),
+        opener: failOpener,
+        notifier: failNotifier,
+        archiveRoot: unwritable
+    )
+    failService.openArchiveLocation()
+    expect(failOpener.urls.isEmpty, "无法创建时不打开访达")
+    expect(
+        failNotifier.notifications.contains { $0.0 == "无法创建微信归档目录" && $0.1 == unwritable.path },
+        "无法创建时通知归档路径"
+    )
+
+    let openFail = MockWeChatOpener()
+    openFail.shouldOpen = false
+    let openNotifier = MockWeChatNotifier()
+    let openRoot = fm.temporaryDirectory.appendingPathComponent(
+        "tocode-wechat-openfail-\(UUID().uuidString)",
+        isDirectory: true
+    )
+    defer { try? fm.removeItem(at: openRoot) }
+    let openService = WeChatAssociationService(
+        transport: MockWeChatTransport(),
+        credentialStore: MemoryWeChatCredentialStore(nil),
+        stateStore: MemoryWeChatStateStore(),
+        archiver: MockWeChatArchiver(),
+        opener: openFail,
+        notifier: openNotifier,
+        archiveRoot: openRoot
+    )
+    openService.openArchiveLocation()
+    expect(
+        openNotifier.notifications.contains { $0.0 == "无法打开微信文件位置" && $0.1 == openRoot.path },
+        "目录已创建但访达打开失败时通知"
+    )
+}
+
 func testWeChatBindingPage() {
     let fm = FileManager.default
     let directory = fm.temporaryDirectory.appendingPathComponent(
@@ -5333,6 +5452,7 @@ struct TestRunnerMain {
         testDirectoryMenuAccessOpener()
         testTocodePreferencesMigration()
         testTocodePreferencesMigrationKeepsSuiteOnlyKeys()
+        testTocodePreferencesMigrationReadsProcessStandardDomain()
         testTocodePortableSettingsTransfer()
         testUserManualPages()
         testRootPathStore()
@@ -5375,6 +5495,7 @@ struct TestRunnerMain {
         testScreenBlackoutService()
         testWeChatModelsCryptoAndState()
         testWeChatArchiveNaming()
+        testWeChatArchiveLocation()
         testWeChatBindingPage()
         await testWeChatArchive()
         await testWeChatProtocolContract()

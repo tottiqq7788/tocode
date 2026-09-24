@@ -392,7 +392,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         )
         macItem.submenu = macMenu
 
-        // 设置：开机自启、拓展类型，以及类型勾选后才出现的专用项。
+        // 设置：开机自启、可分享配置夹、拓展类型，以及类型勾选后才出现的专用项。
         let settingsItem = menu.addItem(withTitle: "设置", action: nil, keyEquivalent: "")
         settingsItem.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil)
         let settings = NSMenu()
@@ -403,27 +403,38 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             enabled: launchAtLogin.isEnabled,
             action: #selector(toggleLaunchAtLogin(_:))
         )
-        let exportSettings = settings.addItem(
-            withTitle: "导出配置",
+        let configItem = settings.addItem(
+            withTitle: TocodePortableSettings.folderTitle,
+            action: nil,
+            keyEquivalent: ""
+        )
+        configItem.image = NSImage(
+            systemSymbolName: "doc.badge.gearshape",
+            accessibilityDescription: TocodePortableSettings.folderTitle
+        )
+        let configMenu = NSMenu()
+        configMenu.autoenablesItems = false
+        let exportSettings = configMenu.addItem(
+            withTitle: TocodePortableSettings.exportTitle,
             action: #selector(exportPortableSettings),
             keyEquivalent: ""
         )
         exportSettings.target = self
-        exportSettings.image = NSImage(systemSymbolName: "square.and.arrow.up", accessibilityDescription: "导出配置")
-        let importSettings = settings.addItem(
-            withTitle: "导入配置",
+        exportSettings.image = NSImage(
+            systemSymbolName: "square.and.arrow.up",
+            accessibilityDescription: TocodePortableSettings.exportTitle
+        )
+        let importSettings = configMenu.addItem(
+            withTitle: TocodePortableSettings.importTitle,
             action: #selector(importPortableSettings),
             keyEquivalent: ""
         )
         importSettings.target = self
-        importSettings.image = NSImage(systemSymbolName: "square.and.arrow.down", accessibilityDescription: "导入配置")
-        let manual = settings.addItem(
-            withTitle: "说明书",
-            action: #selector(showUserManual),
-            keyEquivalent: ""
+        importSettings.image = NSImage(
+            systemSymbolName: "square.and.arrow.down",
+            accessibilityDescription: TocodePortableSettings.importTitle
         )
-        manual.target = self
-        manual.image = NSImage(systemSymbolName: "book", accessibilityDescription: "说明书")
+        configItem.submenu = configMenu
         let extendedItem = settings.addItem(
             withTitle: ExtendedSettingsStore.folderTitle,
             action: nil,
@@ -445,6 +456,14 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         liveSettingsMenu = settings
         syncAnkerKeyItem(in: settings)
         settingsItem.submenu = settings
+
+        let manual = menu.addItem(
+            withTitle: UserManual.menuTitle,
+            action: #selector(showUserManual),
+            keyEquivalent: ""
+        )
+        manual.target = self
+        manual.image = NSImage(systemSymbolName: "book", accessibilityDescription: UserManual.menuTitle)
 
         menu.addItem(.separator())
 

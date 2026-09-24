@@ -3,6 +3,9 @@ import Foundation
 struct TocodePortableSettings: Codable, Equatable {
     static let formatID = "tocode.settings"
     static let currentVersion = 1
+    static let folderTitle = "配置"
+    static let exportTitle = "导出配置"
+    static let importTitle = "导入配置"
 
     struct Shortcuts: Codable, Equatable {
         var finderMove: Bool

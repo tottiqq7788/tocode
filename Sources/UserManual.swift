@@ -1,6 +1,8 @@
 import AppKit
 
 enum UserManual {
+    static let menuTitle = "说明书"
+
     struct Page: Equatable {
         let title: String
         let body: String
@@ -11,7 +13,7 @@ enum UserManual {
         Tocode 是菜单栏里的本机文件与系统助手，没有主窗口。
 
         • 左键图标：打开当前根目录的目录树。
-        • 右键图标：打开功能菜单（访达、目录、codex、mac、微信、设置、退出）。
+        • 右键图标：打开功能菜单（访达、目录、codex、mac、微信、设置、说明书、退出）。
 
         根目录保存在本机。从未设置过时默认为「文稿」目录；路径失效时也会回到该默认位置。
 
@@ -92,9 +94,10 @@ enum UserManual {
         Page(title: "设置", body: """
         右键 → 设置
         • 开机自启：随系统登录启动 Tocode。菜单显示的是系统里的真实状态。
-        • 导出配置 / 导入配置：生成或读入 .tocode 文件。只含键盘映射、触控板、快捷键开关和滚轮。导入前会确认，确认后整段覆盖这些项。根目录、开机自启、同步项目夹、拓展设置、微信凭据和密钥不会进出该文件。
-        • 说明书：就是本窗口。
+        • 配置 → 导出配置 / 导入配置：生成或读入 .tocode 文件。只含键盘映射、触控板、快捷键开关和滚轮。导入前会确认，确认后整段覆盖这些项。根目录、开机自启、同步项目夹、拓展设置、微信凭据和密钥不会进出该文件。
         • 拓展设置 → AK（默认关）：勾选后才出现 codex 模型切换，以及设置里的 AK密钥。关闭只隐藏入口，不删除已保存密钥。
+
+        右键 → 说明书：就是本窗口。位于设置下方、退出上方，不在设置夹里。
 
         访达子菜单里的 x/v 移动文件、⌘Q 强关访达，以及 mac 里的双击 ⌘Q，也都是默认关闭的开关。
         • x/v：只在访达前台把 ⌘X/⌘V 变成「剪切后粘贴即移动」，目标是访达当前窗口，不是 Tocode 根目录。
@@ -120,7 +123,7 @@ private final class UserManualWindowController: NSWindowController, NSWindowDele
             backing: .buffered,
             defer: false
         )
-        window.title = "说明书"
+        window.title = UserManual.menuTitle
         window.isReleasedWhenClosed = false
         self.init(window: window)
         window.delegate = self

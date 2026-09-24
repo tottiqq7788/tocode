@@ -56,7 +56,10 @@ protocol WeChatArchiving: AnyObject {
 }
 
 actor WeChatArchiveService: WeChatArchiving {
-    static let defaultRoot = URL(fileURLWithPath: "/Users/admin/Documents/wechat", isDirectory: true)
+    static var defaultRoot: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Documents/wechat", isDirectory: true)
+    }
 
     private let root: URL
     private let transport: WeChatILinkTransporting
