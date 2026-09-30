@@ -23,6 +23,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private let weChat: WeChatAssociationControlling
     private let codex: CodexProjectService
     private let codexSync: CodexSyncSettingsStore
+    private let finderFollow: FinderFollowSettingsStore
     private let codexModels: CodexModelSwitching
     private let codexRestarter: CodexApplicationRestarting
     private let ankerCredentials: AnkerCredentialUpdating
@@ -41,11 +42,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private var timerMenuRefreshTimer: Timer?
     private weak var liveTimerMenu: NSMenu?
     private var liveTimerMenuItems: [UUID: NSMenuItem] = [:]
-    private weak var liveCodexMenu: NSMenu?
+    private weak var liveModelMenuItem: NSMenuItem?
     private weak var liveSettingsMenu: NSMenu?
     private static let ankerKeyItemID = "tocode.extended.ankerKey"
+    private static let secretsFolderItemID = "tocode.extended.secretsFolder"
     private static let codexModelItemID = "tocode.extended.codexModel"
-    private static let codexModelSeparatorID = "tocode.extended.codexModelSeparator"
     private static let portableSettingsType =
         UTType(tag: "tocode", tagClass: .filenameExtension, conformingTo: .json) ?? .json
 
@@ -61,6 +62,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         weChat: WeChatAssociationControlling,
         codex: CodexProjectService = CodexProjectService(),
         codexSync: CodexSyncSettingsStore = CodexSyncSettingsStore(),
+        finderFollow: FinderFollowSettingsStore = FinderFollowSettingsStore(),
         codexModels: CodexModelSwitching = CodexModelSwitchService(),
         codexRestarter: CodexApplicationRestarting = CodexApplicationRestarter(),
         ankerCredentials: AnkerCredentialUpdating = AnkerCredentialService(),
@@ -79,6 +81,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         self.weChat = weChat
         self.codex = codex
         self.codexSync = codexSync
+        self.finderFollow = finderFollow
         self.codexModels = codexModels
         self.codexRestarter = codexRestarter
         self.ankerCredentials = ankerCredentials
@@ -137,22 +140,35 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
     }
 
-    /// 左键根目录解析：同步开启且 Codex 项目有效时跟随，否则用手动根目录。
+    /// 左键根目录解析：访达跟随 > codex跟随 > 手动根。
     private func resolveDirectoryRoot() -> String {
-        if codexSync.syncEnabled, let project = codex.resolveProject() {
-            return project.rootPath
+        let finderDirectory: String?
+        if case .success(let path) = finderSelection.resolveInitializationDirectory() {
+            finderDirectory = path
+        } else {
+            finderDirectory = nil
         }
-        return store.resolveRoot(isDirectory: { fs.isExistingDirectory($0) })
+        return DirectoryRootResolver.resolve(
+            finderFollowEnabled: finderFollow.followEnabled,
+            finderDirectory: finderDirectory,
+            codexFollowEnabled: codexSync.syncEnabled,
+            codexRoot: codex.resolveProject()?.rootPath,
+            manualRoot: store.resolveRoot(isDirectory: { fs.isExistingDirectory($0) })
+        )
     }
 
-    /// 左键：弹出目录树（始终从当前根第一层）；根菜单含「历史」与「新增」。
+    /// 左键：弹出目录树（始终从当前根第一层）；根菜单含「历史」「根目录」与「新增」。
     /// Shift 连续多选尽量保持同一菜单；若系统仍关闭则立刻再弹同一菜单。
     private func showDirectoryMenu() {
         let menu = NSMenu()
         menu.autoenablesItems = false
 
         let root = resolveDirectoryRoot()
+        builder.makeRootConfigItem = { [weak self] in
+            self?.makeRootConfigMenuItem() ?? NSMenuItem()
+        }
         builder.fillRoot(menu, with: root, includeHidden: visibility.currentShowAllFiles())
+        builder.makeRootConfigItem = nil
         addBottomSpacer(to: menu)
 
         startModifierPolling()
@@ -168,6 +184,70 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
         builder.resetMultiCopySession()
         stopModifierPolling()
+    }
+
+    private func makeRootConfigMenuItem() -> NSMenuItem {
+        let item = NSMenuItem(title: "根目录", action: nil, keyEquivalent: "")
+        item.image = NSImage(systemSymbolName: "folder.badge.gearshape", accessibilityDescription: "根目录")
+        let submenu = NSMenu()
+        submenu.autoenablesItems = false
+
+        let copyPath = submenu.addItem(
+            withTitle: "复制路径",
+            action: #selector(copyFinderSelectedPath),
+            keyEquivalent: ""
+        )
+        copyPath.target = self
+        copyPath.image = NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: nil)
+
+        submenu.addItem(.separator())
+
+        let readClip = submenu.addItem(
+            withTitle: "读取剪贴板",
+            action: #selector(readClipboard),
+            keyEquivalent: ""
+        )
+        readClip.target = self
+        readClip.image = NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: nil)
+
+        let changeDir = submenu.addItem(
+            withTitle: "更改目录",
+            action: #selector(chooseRoot),
+            keyEquivalent: ""
+        )
+        changeDir.target = self
+        changeDir.image = NSImage(systemSymbolName: "folder.badge.plus", accessibilityDescription: nil)
+
+        let resetRoot = submenu.addItem(
+            withTitle: "重置初始目录",
+            action: #selector(resetRoot),
+            keyEquivalent: ""
+        )
+        resetRoot.target = self
+        resetRoot.image = NSImage(systemSymbolName: "arrow.counterclockwise", accessibilityDescription: nil)
+
+        let syncLocksManual = codexSync.syncEnabled
+        readClip.isEnabled = !syncLocksManual
+        changeDir.isEnabled = !syncLocksManual
+        resetRoot.isEnabled = !syncLocksManual
+
+        submenu.addItem(.separator())
+
+        addShortcutToggle(
+            to: submenu,
+            title: "访达跟随",
+            enabled: finderFollow.followEnabled,
+            action: #selector(toggleFinderFollow(_:))
+        )
+        addShortcutToggle(
+            to: submenu,
+            title: "codex跟随",
+            enabled: syncLocksManual,
+            action: #selector(toggleCodexProjectSync(_:))
+        )
+
+        item.submenu = submenu
+        return item
     }
 
     /// 在菜单跟踪期间轮询 Option/Command 并同步到菜单构建器。Option 优先于 Command。
@@ -192,33 +272,16 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         modifierPollingTimer = nil
     }
 
-    /// 右键：功能菜单。访达与 mac 子菜单分别收拢相关系统控制。
+    /// 右键：功能菜单。访达 / 输入 / 工具 / 模型 / 微信 / 设置。
     private func showActionMenu() {
         let menu = NSMenu()
         menu.autoenablesItems = false
-        let syncEnabled = codexSync.syncEnabled
 
-        // 访达：路径操作、隐藏文件与 Finder 专属快捷键。
+        // 访达
         let finderItem = menu.addItem(withTitle: "访达", action: nil, keyEquivalent: "")
         finderItem.image = NSImage(systemSymbolName: "macwindow", accessibilityDescription: nil)
         let finderMenu = NSMenu()
         finderMenu.autoenablesItems = false
-
-        let accessPath = finderMenu.addItem(withTitle: "访问路径", action: #selector(openFinderAtRoot), keyEquivalent: "")
-        accessPath.target = self
-        accessPath.image = NSImage(systemSymbolName: "macwindow", accessibilityDescription: nil)
-
-        let copyFinderPath = finderMenu.addItem(withTitle: "复制路径", action: #selector(copyFinderSelectedPath), keyEquivalent: "")
-        copyFinderPath.target = self
-        copyFinderPath.image = NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: nil)
-
-        if case .success = finderSelection.resolveInitializationDirectory() {
-            let initRoot = finderMenu.addItem(withTitle: "目录初始化", action: #selector(initRootFromFinder), keyEquivalent: "")
-            initRoot.target = self
-            initRoot.image = NSImage(systemSymbolName: "folder.badge.gearshape", accessibilityDescription: nil)
-        }
-
-        finderMenu.addItem(.separator())
         let showAll = visibility.currentShowAllFiles()
         let toggleTitle = showAll ? "隐藏隐藏文件" : "显示隐藏文件"
         let toggle = finderMenu.addItem(withTitle: toggleTitle, action: #selector(toggleHiddenVisibility), keyEquivalent: "")
@@ -239,98 +302,16 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             enabled: shortcuts.isFinderCommandQEffective,
             action: #selector(toggleFinderCommandQ(_:))
         )
-
         finderItem.submenu = finderMenu
 
-        // 目录：读取剪贴板、更改目录、重置初始目录。
-        let directoryItem = menu.addItem(withTitle: "目录", action: nil, keyEquivalent: "")
-        directoryItem.image = NSImage(systemSymbolName: "folder", accessibilityDescription: nil)
-        let directoryMenu = NSMenu()
-        directoryMenu.autoenablesItems = false
+        // 输入
+        let inputItem = menu.addItem(withTitle: "输入", action: nil, keyEquivalent: "")
+        inputItem.image = NSImage(systemSymbolName: "keyboard", accessibilityDescription: nil)
+        let inputMenu = NSMenu()
+        inputMenu.autoenablesItems = false
 
-        let readClip = directoryMenu.addItem(withTitle: "读取剪贴板", action: #selector(readClipboard), keyEquivalent: "")
-        readClip.target = self
-        readClip.image = NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: nil)
-
-        let changeDir = directoryMenu.addItem(withTitle: "更改目录", action: #selector(chooseRoot), keyEquivalent: "")
-        changeDir.target = self
-        changeDir.image = NSImage(systemSymbolName: "folder.badge.plus", accessibilityDescription: nil)
-
-        let resetRoot = directoryMenu.addItem(withTitle: "重置初始目录", action: #selector(resetRoot), keyEquivalent: "")
-        resetRoot.target = self
-        resetRoot.image = NSImage(systemSymbolName: "arrow.counterclockwise", accessibilityDescription: nil)
-
-        directoryItem.submenu = directoryMenu
-
-        // codex 子菜单：状态展示 + 「同步项目夹」开关。
-        let codexItem = menu.addItem(withTitle: "codex", action: nil, keyEquivalent: "")
-        codexItem.image = NSImage(systemSymbolName: "terminal", accessibilityDescription: nil)
-        let codexMenu = NSMenu()
-        codexMenu.autoenablesItems = false
-        if let project = codex.resolveProject() {
-            let nameRow = codexMenu.addItem(withTitle: "项目：\(project.name)", action: nil, keyEquivalent: "")
-            nameRow.isEnabled = false
-            let rootRow = codexMenu.addItem(withTitle: project.rootPath, action: nil, keyEquivalent: "")
-            rootRow.isEnabled = false
-        } else {
-            let missingRow = codexMenu.addItem(withTitle: "未检测到 Codex 项目", action: nil, keyEquivalent: "")
-            missingRow.isEnabled = false
-        }
-        let syncItem = codexMenu.addItem(withTitle: "同步项目夹", action: #selector(toggleCodexProjectSync(_:)), keyEquivalent: "")
-        syncItem.target = self
-        ShortcutMenuAppearance.apply(to: syncItem, enabled: syncEnabled)
-        activeModelMenu = nil
-        activeModelParentItem = nil
-        currentModelID = nil
-        syncCodexModelItem(in: codexMenu)
-        liveCodexMenu = codexMenu
-        codexItem.submenu = codexMenu
-
-        let weChatItem = menu.addItem(withTitle: "微信关联", action: nil, keyEquivalent: "")
-        weChatItem.image = NSImage(systemSymbolName: "link", accessibilityDescription: nil)
-        let weChatMenu = NSMenu()
-        weChatMenu.autoenablesItems = false
-        let bindWeChat = weChatMenu.addItem(
-            withTitle: "绑定微信",
-            action: #selector(bindWeChat),
-            keyEquivalent: ""
-        )
-        bindWeChat.target = self
-        ShortcutMenuAppearance.apply(to: bindWeChat, enabled: weChat.isBound)
-        let openWeChatLocation = weChatMenu.addItem(
-            withTitle: "文件位置",
-            action: #selector(openWeChatLocation),
-            keyEquivalent: ""
-        )
-        openWeChatLocation.target = self
-        openWeChatLocation.image = NSImage(
-            systemSymbolName: "folder",
-            accessibilityDescription: nil
-        )
-        weChatItem.submenu = weChatMenu
-
-        // mac 子菜单：显示、触控板、键盘、鼠标滚轮与全局退出保护。
-        let macItem = menu.addItem(withTitle: "mac", action: nil, keyEquivalent: "")
-        macItem.image = NSImage(systemSymbolName: "display", accessibilityDescription: nil)
-        let macMenu = NSMenu()
-        macMenu.autoenablesItems = false
-        let blackoutItem = macMenu.addItem(
-            withTitle: "临时黑屏",
-            action: #selector(activateScreenBlackout),
-            keyEquivalent: ""
-        )
-        blackoutItem.target = self
-        blackoutItem.image = NSImage(systemSymbolName: "display.trianglebadge.exclamationmark", accessibilityDescription: nil)
-
-        let trackpadItem = macMenu.addItem(
-            withTitle: "触控板",
-            action: nil,
-            keyEquivalent: ""
-        )
-        trackpadItem.image = NSImage(
-            systemSymbolName: "hand.tap",
-            accessibilityDescription: nil
-        )
+        let trackpadItem = inputMenu.addItem(withTitle: "触控板", action: nil, keyEquivalent: "")
+        trackpadItem.image = NSImage(systemSymbolName: "hand.tap", accessibilityDescription: nil)
         let trackpadMenu = NSMenu()
         trackpadMenu.autoenablesItems = false
         for gesture in TrackpadTapGesture.allCases {
@@ -345,15 +326,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
         trackpadItem.submenu = trackpadMenu
 
-        let keyboardItem = macMenu.addItem(
-            withTitle: "键盘",
-            action: nil,
-            keyEquivalent: ""
-        )
-        keyboardItem.image = NSImage(
-            systemSymbolName: "keyboard",
-            accessibilityDescription: nil
-        )
+        let keyboardItem = inputMenu.addItem(withTitle: "键盘", action: nil, keyEquivalent: "")
+        keyboardItem.image = NSImage(systemSymbolName: "keyboard", accessibilityDescription: nil)
         let keyboardMenu = NSMenu()
         keyboardMenu.autoenablesItems = false
         let addKeyboardMapping = keyboardMenu.addItem(
@@ -362,10 +336,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             keyEquivalent: ""
         )
         addKeyboardMapping.target = self
-        addKeyboardMapping.image = NSImage(
-            systemSymbolName: "plus",
-            accessibilityDescription: "新增"
-        )
+        addKeyboardMapping.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "新增")
         if !keyboardRemaps.mappings.isEmpty {
             keyboardMenu.addItem(.separator())
             for mapping in keyboardRemaps.mappings {
@@ -383,24 +354,47 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 case .action(let action):
                     symbolName = action.menuSymbolName
                 }
-                item.image = NSImage(
-                    systemSymbolName: symbolName,
-                    accessibilityDescription: "已配置"
-                )
+                item.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "已配置")
                 item.toolTip = "\(mapping.source.displayName) → \(mapping.target.displayText)"
             }
         }
         keyboardItem.submenu = keyboardMenu
 
-        let timerItem = macMenu.addItem(
-            withTitle: "定时器",
-            action: nil,
+        addShortcutToggle(
+            to: inputMenu,
+            title: MouseWheelReverseStore.verticalTitle,
+            enabled: mouseWheel.isVerticalEffective,
+            action: #selector(toggleReverseVerticalWheel(_:))
+        )
+        addShortcutToggle(
+            to: inputMenu,
+            title: MouseWheelReverseStore.horizontalTitle,
+            enabled: mouseWheel.isHorizontalEffective,
+            action: #selector(toggleReverseHorizontalWheel(_:))
+        )
+        addShortcutToggle(
+            to: inputMenu,
+            title: "双击⌘Q",
+            enabled: shortcuts.isDoubleCommandQEffective,
+            action: #selector(toggleDoubleCommandQ(_:))
+        )
+        inputItem.submenu = inputMenu
+
+        // 工具
+        let toolsItem = menu.addItem(withTitle: "工具", action: nil, keyEquivalent: "")
+        toolsItem.image = NSImage(systemSymbolName: "wrench.and.screwdriver", accessibilityDescription: nil)
+        let toolsMenu = NSMenu()
+        toolsMenu.autoenablesItems = false
+        let blackoutItem = toolsMenu.addItem(
+            withTitle: "临时黑屏",
+            action: #selector(activateScreenBlackout),
             keyEquivalent: ""
         )
-        timerItem.image = NSImage(
-            systemSymbolName: "timer",
-            accessibilityDescription: nil
-        )
+        blackoutItem.target = self
+        blackoutItem.image = NSImage(systemSymbolName: "display.trianglebadge.exclamationmark", accessibilityDescription: nil)
+
+        let timerItem = toolsMenu.addItem(withTitle: "定时器", action: nil, keyEquivalent: "")
+        timerItem.image = NSImage(systemSymbolName: "timer", accessibilityDescription: nil)
         let timerMenu = NSMenu()
         timerMenu.autoenablesItems = false
         let addTimer = timerMenu.addItem(
@@ -409,10 +403,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             keyEquivalent: ""
         )
         addTimer.target = self
-        addTimer.image = NSImage(
-            systemSymbolName: "plus",
-            accessibilityDescription: "新增"
-        )
+        addTimer.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "新增")
         liveTimerMenuItems.removeAll()
         if !macTimers.timers.isEmpty {
             timerMenu.addItem(.separator())
@@ -437,34 +428,61 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         timerItem.submenu = timerMenu
         liveTimerMenu = timerMenu
 
-        macMenu.addItem(.separator())
         addShortcutToggle(
-            to: macMenu,
-            title: MouseWheelReverseStore.verticalTitle,
-            enabled: mouseWheel.isVerticalEffective,
-            action: #selector(toggleReverseVerticalWheel(_:))
-        )
-        addShortcutToggle(
-            to: macMenu,
-            title: MouseWheelReverseStore.horizontalTitle,
-            enabled: mouseWheel.isHorizontalEffective,
-            action: #selector(toggleReverseHorizontalWheel(_:))
-        )
-        addShortcutToggle(
-            to: macMenu,
-            title: "双击⌘Q",
-            enabled: shortcuts.isDoubleCommandQEffective,
-            action: #selector(toggleDoubleCommandQ(_:))
-        )
-        addShortcutToggle(
-            to: macMenu,
+            to: toolsMenu,
             title: DockAutohideRestrictStore.menuTitle,
             enabled: dockAutohideRestrict.isEffective,
             action: #selector(toggleDockAutohideRestrict(_:))
         )
-        macItem.submenu = macMenu
+        toolsItem.submenu = toolsMenu
 
-        // 设置：开机自启、可分享配置夹、拓展类型，以及类型勾选后才出现的专用项。
+        // 模型（AK 门控）
+        activeModelMenu = nil
+        activeModelParentItem = nil
+        currentModelID = nil
+        liveModelMenuItem = nil
+        if extendedSettings.akEnabled {
+            let modelItem = menu.addItem(withTitle: "模型", action: nil, keyEquivalent: "")
+            modelItem.image = NSImage(systemSymbolName: "cpu", accessibilityDescription: nil)
+            modelItem.representedObject = Self.codexModelItemID
+            let modelMenu = NSMenu()
+            modelMenu.autoenablesItems = false
+            modelMenu.delegate = self
+            addModelStatusItem("悬停后实时加载", to: modelMenu)
+            modelItem.submenu = modelMenu
+            activeModelMenu = modelMenu
+            activeModelParentItem = modelItem
+            liveModelMenuItem = modelItem
+            if let state = try? codexModels.currentState() {
+                currentModelID = state.liveModelID
+                if !state.isConsistent {
+                    modelItem.toolTip = "Codex 实时配置与 CC Switch Provider 模板当前不一致"
+                }
+            }
+        }
+
+        // 微信
+        let weChatItem = menu.addItem(withTitle: "微信关联", action: nil, keyEquivalent: "")
+        weChatItem.image = NSImage(systemSymbolName: "link", accessibilityDescription: nil)
+        let weChatMenu = NSMenu()
+        weChatMenu.autoenablesItems = false
+        let bindWeChat = weChatMenu.addItem(
+            withTitle: "绑定微信",
+            action: #selector(bindWeChat),
+            keyEquivalent: ""
+        )
+        bindWeChat.target = self
+        ShortcutMenuAppearance.apply(to: bindWeChat, enabled: weChat.isBound)
+        let openWeChatLocation = weChatMenu.addItem(
+            withTitle: "文件位置",
+            action: #selector(openWeChatLocation),
+            keyEquivalent: ""
+        )
+        openWeChatLocation.target = self
+        openWeChatLocation.image = NSImage(systemSymbolName: "folder", accessibilityDescription: nil)
+        weChatItem.submenu = weChatMenu
+
+        // 设置
         let settingsItem = menu.addItem(withTitle: "设置", action: nil, keyEquivalent: "")
         settingsItem.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil)
         let settings = NSMenu()
@@ -512,10 +530,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             action: nil,
             keyEquivalent: ""
         )
-        extendedItem.image = NSImage(
-            systemSymbolName: "ellipsis.circle",
-            accessibilityDescription: nil
-        )
+        extendedItem.image = NSImage(systemSymbolName: "ellipsis.circle", accessibilityDescription: nil)
         let extendedMenu = NSMenu()
         extendedMenu.autoenablesItems = false
         addShortcutToggle(
@@ -526,24 +541,19 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         )
         extendedItem.submenu = extendedMenu
         liveSettingsMenu = settings
-        syncAnkerKeyItem(in: settings)
-        settingsItem.submenu = settings
-
-        let manual = menu.addItem(
+        syncSecretsFolder(in: settings)
+        let manual = settings.addItem(
             withTitle: UserManual.menuTitle,
             action: #selector(showUserManual),
             keyEquivalent: ""
         )
         manual.target = self
         manual.image = NSImage(systemSymbolName: "book", accessibilityDescription: UserManual.menuTitle)
+        settingsItem.submenu = settings
 
         menu.addItem(.separator())
-
         let quit = menu.addItem(withTitle: "退出", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quit.image = NSImage(systemSymbolName: "power", accessibilityDescription: nil)
-
-        // 同步开启时，「目录」父项置灰（父项禁用即无法展开下层）；关闭时恢复。
-        directoryItem.isEnabled = !syncEnabled
 
         addBottomSpacer(to: menu)
 
@@ -552,7 +562,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
         }
         stopTimerMenuRefresh()
-        liveCodexMenu = nil
+        liveModelMenuItem = nil
         liveSettingsMenu = nil
         liveTimerMenu = nil
         liveTimerMenuItems.removeAll()
@@ -588,43 +598,62 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         notifyRootChanged(RootPathStore.defaultRoot)
     }
 
-    /// 切换「同步项目夹」开关并更新勾选圆。
+    /// 切换「codex跟随」开关并更新勾选圆。
     @objc private func toggleCodexProjectSync(_ sender: NSMenuItem) {
         codexSync.syncEnabled = !codexSync.syncEnabled
         ShortcutMenuAppearance.apply(to: sender, enabled: codexSync.syncEnabled)
+    }
+
+    /// 切换「访达跟随」开关并更新勾选圆。
+    @objc private func toggleFinderFollow(_ sender: NSMenuItem) {
+        finderFollow.followEnabled = !finderFollow.followEnabled
+        ShortcutMenuAppearance.apply(to: sender, enabled: finderFollow.followEnabled)
     }
 
     @objc private func toggleExtendedSettingAK(_ sender: NSMenuItem) {
         extendedSettings.akEnabled = !extendedSettings.akEnabled
         ShortcutMenuAppearance.apply(to: sender, enabled: extendedSettings.akEnabled)
         if let settings = liveSettingsMenu {
-            syncAnkerKeyItem(in: settings)
-        }
-        if let codex = liveCodexMenu {
-            syncCodexModelItem(in: codex)
+            syncSecretsFolder(in: settings)
         }
     }
 
-    private func syncAnkerKeyItem(in settings: NSMenu) {
-        let existing = settings.items.first {
-            ($0.representedObject as? String) == Self.ankerKeyItemID
+    private func syncSecretsFolder(in settings: NSMenu) {
+        let existingFolder = settings.items.first {
+            ($0.representedObject as? String) == Self.secretsFolderItemID
         }
         if extendedSettings.akEnabled {
-            guard existing == nil else {
-                existing?.title = ankerKeyItemTitle
-                existing?.isEnabled = !isUpdatingCredentials && !isSwitchingModel
+            if let existingFolder {
+                if let ai = existingFolder.submenu?.items.first(where: {
+                    ($0.representedObject as? String) == Self.ankerKeyItemID
+                }) {
+                    ai.title = ankerKeyItemTitle
+                    ai.isEnabled = !isUpdatingCredentials && !isSwitchingModel
+                }
                 return
             }
-            let item = makeAnkerKeyItem()
-            if let extendedIndex = settings.items.firstIndex(where: {
+            let folder = NSMenuItem(
+                title: ExtendedSettingsStore.secretsFolderTitle,
+                action: nil,
+                keyEquivalent: ""
+            )
+            folder.image = NSImage(systemSymbolName: "key", accessibilityDescription: nil)
+            folder.representedObject = Self.secretsFolderItemID
+            let secretsMenu = NSMenu()
+            secretsMenu.autoenablesItems = false
+            secretsMenu.addItem(makeAnkerKeyItem())
+            folder.submenu = secretsMenu
+            if let manualIndex = settings.items.firstIndex(where: { $0.title == UserManual.menuTitle }) {
+                settings.insertItem(folder, at: manualIndex)
+            } else if let extendedIndex = settings.items.firstIndex(where: {
                 $0.title == ExtendedSettingsStore.folderTitle
             }) {
-                settings.insertItem(item, at: extendedIndex)
+                settings.insertItem(folder, at: extendedIndex + 1)
             } else {
-                settings.addItem(item)
+                settings.addItem(folder)
             }
-        } else if let existing {
-            settings.removeItem(existing)
+        } else if let existingFolder {
+            settings.removeItem(existingFolder)
         }
     }
 
@@ -641,56 +670,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             keyEquivalent: ""
         )
         item.target = self
-        item.image = NSImage(systemSymbolName: "key", accessibilityDescription: nil)
+        item.image = NSImage(systemSymbolName: "key.fill", accessibilityDescription: nil)
         item.isEnabled = !isUpdatingCredentials && !isSwitchingModel
         item.representedObject = Self.ankerKeyItemID
         return item
-    }
-
-    private func syncCodexModelItem(in codexMenu: NSMenu) {
-        let separator = codexMenu.items.first {
-            ($0.representedObject as? String) == Self.codexModelSeparatorID
-        }
-        let modelItem = codexMenu.items.first {
-            ($0.representedObject as? String) == Self.codexModelItemID
-        }
-        if extendedSettings.akEnabled {
-            guard modelItem == nil else { return }
-            let sep = NSMenuItem.separator()
-            sep.representedObject = Self.codexModelSeparatorID
-            codexMenu.addItem(sep)
-
-            let modelState = try? codexModels.currentState()
-            currentModelID = modelState?.liveModelID
-            let modelTitle = modelState.map {
-                CodexModelCatalog.displayName(for: $0.liveModelID)
-            } ?? "模型不可用"
-            let item = codexMenu.addItem(withTitle: modelTitle, action: nil, keyEquivalent: "")
-            item.image = NSImage(systemSymbolName: "cpu", accessibilityDescription: nil)
-            item.representedObject = Self.codexModelItemID
-            if let modelState, !modelState.isConsistent {
-                item.toolTip = "Codex 实时配置与 CC Switch Provider 模板当前不一致"
-            }
-            let modelMenu = NSMenu()
-            modelMenu.autoenablesItems = false
-            modelMenu.delegate = self
-            addModelStatusItem("悬停后实时加载", to: modelMenu)
-            item.submenu = modelMenu
-            activeModelMenu = modelMenu
-            activeModelParentItem = item
-        } else {
-            if let separator {
-                codexMenu.removeItem(separator)
-            }
-            if let modelItem {
-                codexMenu.removeItem(modelItem)
-            }
-            if activeModelParentItem == nil || activeModelParentItem === modelItem {
-                activeModelMenu = nil
-                activeModelParentItem = nil
-            }
-            currentModelID = nil
-        }
     }
 
     func menuWillOpen(_ menu: NSMenu) {
@@ -712,7 +695,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
         if let state = try? codexModels.currentState() {
             currentModelID = state.liveModelID
-            activeModelParentItem?.title = CodexModelCatalog.displayName(for: state.liveModelID)
+            activeModelParentItem?.title = "模型"
             activeModelParentItem?.toolTip = state.isConsistent
                 ? nil
                 : "Codex 实时配置与 CC Switch Provider 模板当前不一致"
@@ -836,7 +819,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 switch result {
                 case .success:
                     self.currentModelID = modelID
-                    self.activeModelParentItem?.title = descriptor.displayName
+                    self.activeModelParentItem?.title = "模型"
                     self.notifyCodexModelSwitchScheduled(descriptor.displayName)
                     self.codexRestarter.forceRestart(after: 2) { restartResult in
                         DispatchQueue.main.async {
@@ -1204,15 +1187,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         let root = resolveDirectoryRoot()
         guard fs.isExistingDirectory(root) else { return }
         NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: root)
-    }
-
-    /// 点击时重新解析访达单选项；失效则不改写根目录。
-    @objc private func initRootFromFinder() {
-        guard case .success(let directory) = finderSelection.resolveInitializationDirectory() else {
-            return
-        }
-        store.save(directory)
-        notifyRootChanged(directory)
     }
 
     // MARK: - 通知

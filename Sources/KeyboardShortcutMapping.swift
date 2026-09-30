@@ -143,7 +143,7 @@ enum KeyboardMappingAction: String, Codable, CaseIterable, Equatable, Hashable {
         case .copyFinderSelectedPath:
             return "复制路径"
         case .initRootFromFinder:
-            return "目录初始化"
+            return "访达跟随"
         case .toggleHidden:
             return "显示/隐藏隐藏文件"
         case .toggleFinderMove:
@@ -155,7 +155,7 @@ enum KeyboardMappingAction: String, Codable, CaseIterable, Equatable, Hashable {
         case .resetRoot:
             return "重置初始目录"
         case .toggleCodexSync:
-            return "同步项目夹"
+            return "codex跟随"
         case .openWeChatLocation:
             return "文件位置"
         case .blackout:
@@ -218,17 +218,16 @@ enum KeyboardMappingAction: String, Codable, CaseIterable, Equatable, Hashable {
         switch self {
         case .switchDesktopLeft, .switchDesktopRight:
             return .system
-        case .openFinderAtRoot, .copyFinderSelectedPath, .initRootFromFinder,
-            .toggleHidden, .toggleFinderMove, .toggleFinderCommandQ:
+        case .openFinderAtRoot, .toggleHidden, .toggleFinderMove, .toggleFinderCommandQ:
             return .finder
-        case .readClipboardRoot, .resetRoot:
+        case .copyFinderSelectedPath, .initRootFromFinder, .readClipboardRoot, .resetRoot, .toggleCodexSync:
             return .directory
-        case .toggleCodexSync:
-            return .codex
         case .openWeChatLocation:
             return .wechat
-        case .blackout, .toggleVerticalWheel, .toggleHorizontalWheel, .toggleDoubleCommandQ:
-            return .mac
+        case .toggleVerticalWheel, .toggleHorizontalWheel, .toggleDoubleCommandQ:
+            return .input
+        case .blackout:
+            return .tools
         case .toggleLaunchAtLogin:
             return .settings
         case .quit:
@@ -256,7 +255,7 @@ enum KeyboardMappingAction: String, Codable, CaseIterable, Equatable, Hashable {
     var command: TocodeCommand? {
         switch self {
         case .initRootFromFinder:
-            return .root(.initFromFinder)
+            return .root(.finderFollow(.toggle))
         case .toggleHidden:
             return .hidden(.toggle)
         case .toggleFinderMove:
@@ -289,7 +288,7 @@ enum KeyboardMappingAction: String, Codable, CaseIterable, Equatable, Hashable {
 
     var mutatesManualRoot: Bool {
         switch self {
-        case .readClipboardRoot, .resetRoot, .initRootFromFinder:
+        case .readClipboardRoot, .resetRoot:
             return true
         default:
             return false
@@ -299,7 +298,7 @@ enum KeyboardMappingAction: String, Codable, CaseIterable, Equatable, Hashable {
     var notifiesToggleResult: Bool {
         switch self {
         case .toggleHidden, .toggleFinderMove, .toggleFinderCommandQ, .toggleCodexSync,
-            .toggleVerticalWheel, .toggleHorizontalWheel, .toggleDoubleCommandQ,
+            .initRootFromFinder, .toggleVerticalWheel, .toggleHorizontalWheel, .toggleDoubleCommandQ,
             .toggleLaunchAtLogin:
             return true
         default:
@@ -312,9 +311,9 @@ enum KeyboardMappingActionGroup: String, CaseIterable, Equatable {
     case system
     case finder
     case directory
-    case codex
     case wechat
-    case mac
+    case input
+    case tools
     case settings
     case application
 
@@ -325,13 +324,13 @@ enum KeyboardMappingActionGroup: String, CaseIterable, Equatable {
         case .finder:
             return "访达"
         case .directory:
-            return "目录"
-        case .codex:
-            return "codex"
+            return "根目录"
         case .wechat:
             return "微信关联"
-        case .mac:
-            return "mac"
+        case .input:
+            return "输入"
+        case .tools:
+            return "工具"
         case .settings:
             return "设置"
         case .application:

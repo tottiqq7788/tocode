@@ -42,7 +42,7 @@ final class KeyboardMappingActionDispatcher {
 
     func perform(_ action: KeyboardMappingAction) {
         if action.mutatesManualRoot && syncEnabled() {
-            notify(action.title, "同步项目夹开启时不能改手动根目录")
+            notify(action.title, "codex跟随开启时不能改手动根目录")
             return
         }
         if action == .blackout {

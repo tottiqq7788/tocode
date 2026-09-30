@@ -48,6 +48,7 @@ final class TocodeCommandExecutor {
     private let shortcuts: any TocodeShortcutCommanding
     private let codex: CodexProjectService
     private let codexSync: CodexSyncSettingsStore
+    private let finderFollow: FinderFollowSettingsStore
     private let codexModels: CodexModelSwitching
     private let codexRestarter: CodexApplicationRestarting
     private var weChat: WeChatAssociationControlling
@@ -65,6 +66,7 @@ final class TocodeCommandExecutor {
         shortcuts: any TocodeShortcutCommanding,
         codex: CodexProjectService = CodexProjectService(),
         codexSync: CodexSyncSettingsStore = CodexSyncSettingsStore(),
+        finderFollow: FinderFollowSettingsStore = FinderFollowSettingsStore(),
         codexModels: CodexModelSwitching,
         codexRestarter: CodexApplicationRestarting = CodexApplicationRestarter(),
         weChat: WeChatAssociationControlling,
@@ -93,6 +95,7 @@ final class TocodeCommandExecutor {
         self.shortcuts = shortcuts
         self.codex = codex
         self.codexSync = codexSync
+        self.finderFollow = finderFollow
         self.codexModels = codexModels
         self.codexRestarter = codexRestarter
         self.weChat = weChat
@@ -211,7 +214,8 @@ final class TocodeCommandExecutor {
             "⌘Q 强关访达：\(shortcuts.isFinderCommandQEffective ? "开" : "关")",
             "微信绑定：\(weChat.isBound ? "已绑定" : "未绑定")",
             projectLine,
-            "同步项目夹：\(syncEnabled ? "开" : "关")",
+            "访达跟随：\(finderFollow.followEnabled ? "开" : "关")",
+            "codex跟随：\(syncEnabled ? "开" : "关")",
             modelLine
         ]
     }
@@ -243,14 +247,10 @@ final class TocodeCommandExecutor {
             store.reset()
             notify("根目录已更新", RootPathStore.defaultRoot)
             return .success(TocodeCommandOutput("已重置根目录：\(RootPathStore.defaultRoot)"))
-        case .initFromFinder:
-            switch finderSelection.resolveInitializationDirectory() {
-            case .success(let path):
-                store.save(path)
-                notify("根目录已更新", path)
-                return .success(TocodeCommandOutput("已设置根目录：\(path)"))
-            case .failure(let error):
-                return .failure(.finderSelectionFailed(error.localizedDescription))
+        case .finderFollow(let toggle):
+            return applyToggle(toggle, current: finderFollow.followEnabled) { target in
+                finderFollow.followEnabled = target
+                return .success(())
             }
         }
     }

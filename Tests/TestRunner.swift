@@ -389,13 +389,13 @@ func testTocodePortableSettingsTransfer() {
     expect(!MouseWheelReverseStore(defaults: other).reverseHorizontalEnabled, "导入写入横向滚轮关闭")
     expect(other.string(forKey: RootPathStore.key) == "/Users/keep-root", "导入不改根目录")
     expect(other.bool(forKey: ExtendedSettingsStore.akEnabledKey), "导入不改 AK 开关")
-    expect(other.bool(forKey: CodexSyncSettingsStore.syncEnabledKey), "导入不改同步项目夹")
+    expect(other.bool(forKey: CodexSyncSettingsStore.syncEnabledKey), "导入不改 codex跟随")
 }
 
 func testUserManualPages() {
     expect(UserManual.menuTitle == "说明书", "说明书顶层标题")
     let titles = UserManual.pages.map(\.title)
-    expect(titles == ["入门", "目录树", "访达与目录", "mac", "微信", "命令行", "设置"], "说明书 Tab 分页完整")
+    expect(titles == ["入门", "目录树", "访达与目录", "输入与工具", "微信", "命令行", "设置"], "说明书 Tab 分页完整")
     expect(Set(titles).count == titles.count, "说明书 Tab 标题不重复")
     expect(UserManual.pages.allSatisfy { !$0.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }, "每页都有正文")
 
@@ -405,8 +405,8 @@ func testUserManualPages() {
     expect(joined.contains("Shift"), "说明书覆盖 Shift 多选复制")
     expect(joined.contains("一行一条") || joined.contains("换行"), "说明书说明多路径换行")
     expect(joined.contains("历史"), "说明书覆盖目录树历史同级")
-    expect(joined.contains("始终从当前根目录的第一层开始"), "说明书写明根菜单不整页跳转")
-    expect(joined.contains("分隔线 →「历史」→「新增」"), "说明书写明根菜单底部结构")
+    expect(joined.contains("始终从当前解析根的第一层开始"), "说明书写明根菜单不整页跳转")
+    expect(joined.contains("分隔线 →「历史」→「根目录」→「新增」"), "说明书写明根菜单底部结构")
     expect(joined.contains("只悬停展开不会更新"), "说明书写明悬停不写入历史")
     expect(joined.contains("限制程序坞弹出"), "说明书覆盖限制程序坞弹出")
     expect(joined.contains("自动隐藏和显示程序坞"), "说明书写明需系统自动隐藏")
@@ -419,8 +419,8 @@ func testUserManualPages() {
     expect(joined.contains("创建成功后会自动把新建项"), "说明书覆盖新增成功复制路径")
     expect(joined.contains("全角括号包裹"), "说明书写明「路径」格式")
     expect(joined.contains("配置 → 导出配置"), "说明书覆盖配置夹导入导出")
-    expect(joined.contains("右键 → 说明书"), "说明书写明顶层入口")
-    expect(joined.contains("不在设置夹里"), "说明书不在设置夹内")
+    expect(joined.contains("设置夹最底部"), "说明书写明在设置夹底部")
+    expect(joined.contains("密钥 → AI"), "说明书覆盖密钥夹")
     expect(joined.contains("文稿/wechat"), "说明书写明归档在本机文稿/wechat")
     expect(!joined.contains("/Users/admin/Documents/wechat"), "说明书不写死 admin 用户路径")
     expect(joined.contains("wechat send") || joined.contains("快捷输入"), "说明书覆盖微信命令或快捷输入")
@@ -1282,7 +1282,7 @@ func testExtendedSettingsStore() {
     expect(!store.akEnabled, "AK 类型默认关闭")
     expect(ExtendedSettingsStore.folderTitle == "拓展设置", "拓展设置夹标题")
     expect(ExtendedSettingsStore.akTitle == "AK", "AK 类型标题")
-    expect(ExtendedSettingsStore.akCredentialTitle == "AK密钥", "安克入口菜单名为 AK密钥")
+    expect(ExtendedSettingsStore.akCredentialTitle == "AI", "安克入口菜单名为 AI")
 
     store.akEnabled = true
     expect(store.akEnabled, "AK 类型可持久化为开启")
@@ -2197,6 +2197,58 @@ func testKeyboardShortcutMappingStoreAndEngine() {
     expect(store.allMappings().isEmpty, "删除只移除指定键盘映射")
 }
 
+func testDirectoryRootResolverPriority() {
+    let manual = "/manual"
+    let finder = "/finder"
+    let codex = "/codex"
+    expect(
+        DirectoryRootResolver.resolve(
+            finderFollowEnabled: true,
+            finderDirectory: finder,
+            codexFollowEnabled: true,
+            codexRoot: codex,
+            manualRoot: manual
+        ) == finder,
+        "访达跟随触发时优先于 codex跟随"
+    )
+    expect(
+        DirectoryRootResolver.resolve(
+            finderFollowEnabled: true,
+            finderDirectory: nil,
+            codexFollowEnabled: true,
+            codexRoot: codex,
+            manualRoot: manual
+        ) == codex,
+        "访达跟随未触发时回落 codex跟随"
+    )
+    expect(
+        DirectoryRootResolver.resolve(
+            finderFollowEnabled: false,
+            finderDirectory: finder,
+            codexFollowEnabled: true,
+            codexRoot: nil,
+            manualRoot: manual
+        ) == manual,
+        "codex 无项目时回落手动根"
+    )
+    expect(
+        DirectoryRootResolver.resolve(
+            finderFollowEnabled: false,
+            finderDirectory: nil,
+            codexFollowEnabled: false,
+            codexRoot: codex,
+            manualRoot: manual
+        ) == manual,
+        "两跟随皆关时用手动根"
+    )
+    expect(KeyboardMappingAction.initRootFromFinder.title == "访达跟随", "映射文案为访达跟随")
+    expect(KeyboardMappingAction.toggleCodexSync.title == "codex跟随", "映射文案为 codex跟随")
+    expect(KeyboardMappingActionGroup.directory.title == "根目录", "映射分组名为根目录")
+    expect(KeyboardMappingActionGroup.input.title == "输入", "映射分组含输入")
+    expect(KeyboardMappingActionGroup.tools.title == "工具", "映射分组含工具")
+    expect(!KeyboardMappingAction.initRootFromFinder.mutatesManualRoot, "访达跟随不置灰手动根")
+}
+
 func testKeyboardShortcutMappingActionTargets() {
     let suite = "tocode-keyboard-action-\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suite)!
@@ -2499,14 +2551,18 @@ func testKeyboardMappingActionDispatchAndYield() {
     readClipboardCalls = 0
     dispatcher.perform(.readClipboardRoot)
     dispatcher.perform(.resetRoot)
-    dispatcher.perform(.initRootFromFinder)
-    expect(executed.isEmpty, "同步开启时根目录动作不调用执行器")
-    expect(readClipboardCalls == 0, "同步开启时不读取剪贴板设根")
-    expect(notices.count == 3, "同步开启时根目录动作通知原因")
+    expect(executed.isEmpty, "codex跟随开启时手动设根动作不调用执行器")
+    expect(readClipboardCalls == 0, "codex跟随开启时不读取剪贴板设根")
+    expect(notices.count == 2, "codex跟随开启时手动设根动作通知原因")
     expect(
-        notices.allSatisfy { $0.1.contains("同步项目夹") },
-        "同步开启通知说明不能改手动根目录"
+        notices.allSatisfy { $0.1.contains("codex跟随") },
+        "codex跟随开启通知说明不能改手动根目录"
     )
+    executed.removeAll()
+    notices.removeAll()
+    dispatcher.perform(.initRootFromFinder)
+    expect(executed == [.root(.finderFollow(.toggle))], "访达跟随映射翻转开关且不受 codex跟随置灰")
+    expect(notices.count == 1 && notices[0].0 == "访达跟随", "访达跟随开关成功发短通知")
 
     let suite = "tocode-keyboard-invoke-\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suite)!
@@ -5103,7 +5159,9 @@ func testTocodeCommandParser() {
     expect(TocodeCommandParser.parse("root set /tmp/a b") == .success(.root(.set("/tmp/a b"))), "root set 保留空格路径")
     expect(TocodeCommandParser.parse("root choose") == .success(.root(.choose)), "root choose")
     expect(TocodeCommandParser.parse("root reset") == .success(.root(.reset)), "root reset")
-    expect(TocodeCommandParser.parse("root init-from-finder") == .success(.root(.initFromFinder)), "root init-from-finder")
+    expect(TocodeCommandParser.parse("root finder-follow on") == .success(.root(.finderFollow(.on))), "root finder-follow on")
+    expect(TocodeCommandParser.parse("root finder-follow toggle") == .success(.root(.finderFollow(.toggle))), "root finder-follow toggle")
+    expect(TocodeCommandParser.parse("root init-from-finder").isFailure, "root init-from-finder 已废止")
 
     expect(TocodeCommandParser.parse("codex") == .success(.codex(.status)), "codex 默认 status")
     expect(TocodeCommandParser.parse("codex status") == .success(.codex(.status)), "codex status")
@@ -5636,6 +5694,8 @@ extension Result where Failure == TocodeCommandError {
         if case .success = self { return true }
         return false
     }
+
+    var isFailure: Bool { !isSuccess }
 }
 
 

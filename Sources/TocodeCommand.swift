@@ -22,7 +22,7 @@ enum TocodeRootCommand: Equatable {
     case set(String)
     case choose
     case reset
-    case initFromFinder
+    case finderFollow(TocodeToggle)
 }
 
 enum TocodeCodexCommand: Equatable {
@@ -145,11 +145,11 @@ enum TocodeCommandParser {
         root set <path>                     校验后设置根目录
         root choose                         弹出系统目录选择器
         root reset                          重置为默认目录
-        root init-from-finder               以访达当前单选项初始化
+        root finder-follow on|off|toggle    访达跟随开关
 
       Codex
         codex status                        当前项目名 + 根目录
-        codex sync on|off|toggle            同步项目夹开关
+        codex sync on|off|toggle            codex跟随开关
         codex model                         当前模型与一致性
         codex model list                    实时拉取 Anker 模型列表
         codex model set <id>                切换模型并强制重启 Codex
@@ -162,7 +162,7 @@ enum TocodeCommandParser {
                                             向最近会话发送文字、图片或附件
 
       其他
-        blackout（别名 .lshp）                mac → 临时黑屏
+        blackout（别名 .lshp）                工具 → 临时黑屏
         login on|off|toggle                 开机自启
         wheel vertical on|off|toggle        对调垂直滚轮
         wheel horizontal on|off|toggle      对调横向滚轮
@@ -181,9 +181,9 @@ enum TocodeCommandParser {
         ("root set <path>", "校验后设置根目录"),
         ("root choose", "弹出系统目录选择器"),
         ("root reset", "重置为默认目录"),
-        ("root init-from-finder", "以访达当前单选项初始化"),
+        ("root finder-follow on|off|toggle", "访达跟随开关"),
         ("codex status", "当前项目名 + 根目录"),
-        ("codex sync on|off|toggle", "同步项目夹开关"),
+        ("codex sync on|off|toggle", "codex跟随开关"),
         ("codex model", "当前模型与一致性"),
         ("codex model list", "实时拉取 Anker 模型列表"),
         ("codex model set <id>", "切换模型并强制重启 Codex"),
@@ -191,7 +191,7 @@ enum TocodeCommandParser {
         ("wechat bind", "触发扫码绑定"),
         ("wechat location", "创建并在访达打开归档目录"),
         ("wechat send [--to <id>] [--text <文字>] [文件...]", "向最近会话发送文字、图片或附件"),
-        ("blackout", "mac → 临时黑屏（别名 .lshp）"),
+        ("blackout", "工具 → 临时黑屏（别名 .lshp）"),
         ("login on|off|toggle", "开机自启"),
         ("wheel vertical on|off|toggle", "对调垂直滚轮"),
         ("wheel horizontal on|off|toggle", "对调横向滚轮"),
@@ -307,8 +307,13 @@ enum TocodeCommandParser {
             guard tokens.count == 1 else { return .failure(.invalidArguments("root reset")) }
             return .success(.root(.reset))
         case "init-from-finder":
-            guard tokens.count == 1 else { return .failure(.invalidArguments("root init-from-finder")) }
-            return .success(.root(.initFromFinder))
+            return .failure(.invalidArguments("root init-from-finder 已改为 root finder-follow on|off|toggle"))
+        case "finder-follow":
+            guard tokens.count == 2 else { return .failure(.invalidArguments("root finder-follow on|off|toggle")) }
+            guard let toggle = parseToggle([tokens[1]], verb: "root finder-follow") else {
+                return .failure(.invalidToggle(tokens[1]))
+            }
+            return .success(.root(.finderFollow(toggle)))
         default:
             return .failure(.unknownCommand("root \(sub)"))
         }

@@ -1,6 +1,6 @@
 import Foundation
 
-/// 「同步项目夹」开关的持久化。缺省关闭。
+/// 「codex跟随」开关的持久化（原「同步项目夹」键名保留）。缺省关闭。
 struct CodexSyncSettingsStore {
     static let syncEnabledKey = "tocode.codexProjectSyncEnabled"
 

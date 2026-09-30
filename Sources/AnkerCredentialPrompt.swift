@@ -6,7 +6,7 @@ enum AnkerCredentialPrompt {
 
     static func prompt() -> String? {
         let alert = NSAlert()
-        alert.messageText = menuTitle
+        alert.messageText = "AI 密钥"
         alert.informativeText = "输入新的安克 API 密钥，保存后替换 pi、Codex（通过 CC Switch）、Hermes 和 OpenCode 的密钥。\n\nHermes 将使用安克 DeepSeek V4 Pro。已打开的会话可能需要重新加载。"
         alert.addButton(withTitle: "保存")
         alert.addButton(withTitle: "取消")
@@ -27,11 +27,11 @@ enum AnkerCredentialPrompt {
         let alert = NSAlert()
         switch result {
         case .success:
-            alert.messageText = "AK密钥已更新"
+            alert.messageText = "AI 密钥已更新"
             alert.informativeText = "已保存到 pi、Codex（通过 CC Switch）、Hermes 和 OpenCode。\n\npi 和 Codex 的后续请求会读取新密钥。已打开的 Hermes、OpenCode 会话请重新加载或重开；若 pi 使用过手动登录凭据，可打开 /model 重新加载配置。"
         case .failure(let error):
             alert.alertStyle = .warning
-            alert.messageText = "AK密钥未保存成功"
+            alert.messageText = "AI 密钥未保存成功"
             alert.informativeText = (error as? AnkerCredentialError)?.localizedDescription
                 ?? AnkerCredentialError.writeFailed.localizedDescription
         }

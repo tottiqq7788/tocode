@@ -22,7 +22,8 @@ enum TocodePreferences {
                 DockAutohideRestrictStore.enabledKey,
                 DockAutohideRestrictStore.backupDelayKey,
                 ExtendedSettingsStore.akEnabledKey,
-                CodexSyncSettingsStore.syncEnabledKey
+                CodexSyncSettingsStore.syncEnabledKey,
+                FinderFollowSettingsStore.followEnabledKey
             ]
             + TrackpadTapGesture.allCases.map(TrackpadShortcutStore.defaultsKey(for:))
     }
