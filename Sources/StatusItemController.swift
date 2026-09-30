@@ -16,6 +16,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private let trackpadShortcuts: TrackpadShortcutControlling
     private let keyboardRemaps: KeyboardShortcutRemapControlling
     private let mouseWheel: MouseWheelReverseService
+    private let dockAutohideRestrict: DockAutohideRestrictService
+    private let macTimers: MacTimerControlling
+    private let shortcutPoster: TrackpadShortcutEventPosting
     private let launchAtLogin: LaunchAtLoginControlling
     private let weChat: WeChatAssociationControlling
     private let codex: CodexProjectService
@@ -35,6 +38,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private var isSwitchingModel = false
     private var isUpdatingCredentials = false
     private var modifierPollingTimer: Timer?
+    private var timerMenuRefreshTimer: Timer?
+    private weak var liveTimerMenu: NSMenu?
+    private var liveTimerMenuItems: [UUID: NSMenuItem] = [:]
     private weak var liveCodexMenu: NSMenu?
     private weak var liveSettingsMenu: NSMenu?
     private static let ankerKeyItemID = "tocode.extended.ankerKey"
@@ -48,6 +54,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         trackpadShortcuts: TrackpadShortcutControlling,
         keyboardRemaps: KeyboardShortcutRemapControlling,
         mouseWheel: MouseWheelReverseService,
+        dockAutohideRestrict: DockAutohideRestrictService = DockAutohideRestrictService(),
+        macTimers: MacTimerControlling = MacTimerService(),
+        shortcutPoster: TrackpadShortcutEventPosting = SystemTrackpadShortcutEventPoster(),
         launchAtLogin: LaunchAtLoginControlling = LaunchAtLoginService(),
         weChat: WeChatAssociationControlling,
         codex: CodexProjectService = CodexProjectService(),
@@ -63,6 +72,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         self.trackpadShortcuts = trackpadShortcuts
         self.keyboardRemaps = keyboardRemaps
         self.mouseWheel = mouseWheel
+        self.dockAutohideRestrict = dockAutohideRestrict
+        self.macTimers = macTimers
+        self.shortcutPoster = shortcutPoster
         self.launchAtLogin = launchAtLogin
         self.weChat = weChat
         self.codex = codex
@@ -98,6 +110,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
         actionDispatcher.activateBlackout = { [weak self] in
             self?.screenBlackout.activate()
+        }
+        macTimers.onChange = { [weak self] in
+            MainActor.assumeIsolated {
+                self?.refreshLiveTimerMenuItems()
+            }
         }
         if let button = statusItem.button {
             button.image = NSImage(systemSymbolName: "folder", accessibilityDescription: "tocode")
@@ -375,6 +392,51 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
         keyboardItem.submenu = keyboardMenu
 
+        let timerItem = macMenu.addItem(
+            withTitle: "定时器",
+            action: nil,
+            keyEquivalent: ""
+        )
+        timerItem.image = NSImage(
+            systemSymbolName: "timer",
+            accessibilityDescription: nil
+        )
+        let timerMenu = NSMenu()
+        timerMenu.autoenablesItems = false
+        let addTimer = timerMenu.addItem(
+            withTitle: "新增",
+            action: #selector(createMacTimer),
+            keyEquivalent: ""
+        )
+        addTimer.target = self
+        addTimer.image = NSImage(
+            systemSymbolName: "plus",
+            accessibilityDescription: "新增"
+        )
+        liveTimerMenuItems.removeAll()
+        if !macTimers.timers.isEmpty {
+            timerMenu.addItem(.separator())
+            let now = Date()
+            for timer in macTimers.timers {
+                let item = timerMenu.addItem(
+                    withTitle: MacTimerRemaining.menuTitle(
+                        name: timer.name,
+                        fireAt: timer.fireAt,
+                        now: now
+                    ),
+                    action: #selector(editMacTimer(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = timer.id.uuidString
+                ShortcutMenuAppearance.apply(to: item, enabled: timer.isRunning)
+                item.toolTip = timer.target.displayText
+                liveTimerMenuItems[timer.id] = item
+            }
+        }
+        timerItem.submenu = timerMenu
+        liveTimerMenu = timerMenu
+
         macMenu.addItem(.separator())
         addShortcutToggle(
             to: macMenu,
@@ -393,6 +455,12 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             title: "双击⌘Q",
             enabled: shortcuts.isDoubleCommandQEffective,
             action: #selector(toggleDoubleCommandQ(_:))
+        )
+        addShortcutToggle(
+            to: macMenu,
+            title: DockAutohideRestrictStore.menuTitle,
+            enabled: dockAutohideRestrict.isEffective,
+            action: #selector(toggleDockAutohideRestrict(_:))
         )
         macItem.submenu = macMenu
 
@@ -479,11 +547,15 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
         addBottomSpacer(to: menu)
 
+        startTimerMenuRefresh()
         if let button = statusItem.button {
             menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
         }
+        stopTimerMenuRefresh()
         liveCodexMenu = nil
         liveSettingsMenu = nil
+        liveTimerMenu = nil
+        liveTimerMenuItems.removeAll()
     }
 
     /// 读取剪贴板：若是纯文件夹路径（不带「」），设为根文件夹并通知。
@@ -886,6 +958,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         ShortcutMenuAppearance.apply(to: sender, enabled: shortcuts.isDoubleCommandQEffective)
     }
 
+    @objc private func toggleDockAutohideRestrict(_ sender: NSMenuItem) {
+        _ = dockAutohideRestrict.setEnabled(!dockAutohideRestrict.isEffective)
+        ShortcutMenuAppearance.apply(to: sender, enabled: dockAutohideRestrict.isEffective)
+    }
+
     @objc private func toggleFinderCommandQ(_ sender: NSMenuItem) {
         _ = shortcuts.setFinderCommandQEnabled(!shortcuts.isFinderCommandQEffective)
         ShortcutMenuAppearance.apply(to: sender, enabled: shortcuts.isFinderCommandQEffective)
@@ -1005,6 +1082,96 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         alert.runModal()
     }
 
+    @objc private func createMacTimer() {
+        presentMacTimerEditor(draft: MacTimerDraft(), mode: .create)
+    }
+
+    @objc private func editMacTimer(_ sender: NSMenuItem) {
+        guard
+            let rawID = sender.representedObject as? String,
+            let id = UUID(uuidString: rawID),
+            let timer = macTimers.timers.first(where: { $0.id == id })
+        else {
+            return
+        }
+        let mode: MacTimerPromptMode = timer.isRunning ? .editRunning : .editIdle
+        presentMacTimerEditor(draft: MacTimerDraft(timer: timer), mode: mode)
+    }
+
+    private func presentMacTimerEditor(draft initialDraft: MacTimerDraft, mode: MacTimerPromptMode) {
+        shortcuts.setInputCaptureSuspended(true)
+        keyboardRemaps.setInputCaptureSuspended(true)
+        defer {
+            keyboardRemaps.setInputCaptureSuspended(false)
+            shortcuts.setInputCaptureSuspended(false)
+        }
+
+        var draft = initialDraft
+        while true {
+            switch MacTimerPrompt.prompt(draft: draft, mode: mode) {
+            case .save(let candidate):
+                switch macTimers.saveAndStart(candidate) {
+                case .success:
+                    return
+                case .failure(let error):
+                    presentMacTimerError(error)
+                    draft = candidate
+                }
+            case .delete:
+                if let id = draft.id {
+                    macTimers.delete(id: id)
+                }
+                return
+            case .cancel:
+                return
+            }
+        }
+    }
+
+    private func presentMacTimerError(_ error: MacTimerValidationError) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "无法保存定时任务"
+        alert.informativeText = error.localizedDescription
+        alert.addButton(withTitle: "好")
+        alert.runModal()
+    }
+
+    private func startTimerMenuRefresh() {
+        stopTimerMenuRefresh()
+        guard liveTimerMenuItems.contains(where: { pair in
+            macTimers.timers.contains { $0.id == pair.key && $0.isRunning }
+        }) else { return }
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.refreshLiveTimerMenuItems()
+            }
+        }
+        RunLoop.current.add(timer, forMode: .eventTracking)
+        timerMenuRefreshTimer = timer
+    }
+
+    private func stopTimerMenuRefresh() {
+        timerMenuRefreshTimer?.invalidate()
+        timerMenuRefreshTimer = nil
+    }
+
+    private func refreshLiveTimerMenuItems() {
+        let now = Date()
+        let timersByID = Dictionary(uniqueKeysWithValues: macTimers.timers.map { ($0.id, $0) })
+        for (id, item) in liveTimerMenuItems {
+            guard let timer = timersByID[id] else { continue }
+            item.title = MacTimerRemaining.menuTitle(
+                name: timer.name,
+                fireAt: timer.fireAt,
+                now: now
+            )
+            ShortcutMenuAppearance.apply(to: item, enabled: timer.isRunning)
+            item.toolTip = timer.target.displayText
+            item.menu?.itemChanged(item)
+        }
+    }
+
     /// 复制当前访达选中文件或文件夹本身的绝对路径。
     @objc private func copyFinderSelectedPath() {
         guard case .success(let path) = finderSelection.resolveSelectedItemPath() else { return }
@@ -1013,6 +1180,20 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     func performMappedAction(_ action: KeyboardMappingAction) {
         actionDispatcher.perform(action)
+    }
+
+    /// 定时器到点：桌面切换与快捷键合成走 poster，其余走动作 dispatcher。
+    func performMappedTarget(_ target: KeyboardShortcutMappingTarget) {
+        switch target.remapStep() {
+        case .emit(let shortcut):
+            if !shortcutPoster.post(shortcut) {
+                notifyMappedAction("定时器执行失败", "目标快捷键未能发送。")
+            }
+        case .invoke(let action):
+            performMappedAction(action)
+        case .pass, .suppress:
+            break
+        }
     }
 
     /// 在访达中打开当前左键目录对应的根目录。

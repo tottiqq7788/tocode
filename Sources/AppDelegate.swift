@@ -15,6 +15,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var trackpadShortcuts: TrackpadShortcutService?
     private var keyboardRemaps: KeyboardShortcutRemapService?
     private var mouseWheel: MouseWheelReverseService?
+    private var dockAutohideRestrict: DockAutohideRestrictService?
+    private var macTimers: MacTimerService?
     private var weChat: WeChatAssociationService?
     private var controller: StatusItemController?
     private var commandExecutor: TocodeCommandExecutor?
@@ -37,6 +39,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let wheel = MouseWheelReverseService()
         wheel.applySavedSettings()
         mouseWheel = wheel
+        let dockRestrict = DockAutohideRestrictService()
+        dockRestrict.applySavedSettings()
+        dockAutohideRestrict = dockRestrict
+        let macTimers = MacTimerService()
+        self.macTimers = macTimers
 
         let blackout = ScreenBlackoutService(overlay: ScreenBlackoutOverlay())
 
@@ -71,6 +78,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             trackpadShortcuts: trackpad,
             keyboardRemaps: keyboardRemaps,
             mouseWheel: wheel,
+            dockAutohideRestrict: dockRestrict,
+            macTimers: macTimers,
             weChat: weChat,
             screenBlackout: blackout,
             commandExecutor: executor
@@ -85,6 +94,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         keyboardRemaps.shouldYieldAllEvents = { [weak blackout] in
             blackout?.isPresented == true
         }
+        macTimers.fireHandler = { [weak controller] target in
+            controller?.performMappedTarget(target)
+        }
+        macTimers.applySavedSettings()
 
         weChat.startBoundListener()
     }
@@ -128,6 +141,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         trackpadShortcuts?.shutdown()
         keyboardRemaps?.shutdown()
         mouseWheel?.shutdown()
+        dockAutohideRestrict?.shutdown()
+        macTimers?.shutdown()
         weChat?.stop()
     }
 }

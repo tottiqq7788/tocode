@@ -16,8 +16,11 @@ enum TocodePreferences {
                 ShortcutSettingsStore.doubleCommandQKey,
                 ShortcutSettingsStore.finderCommandQKey,
                 KeyboardShortcutMappingStore.defaultsKey,
+                MacTimerStore.defaultsKey,
                 MouseWheelReverseStore.verticalKey,
                 MouseWheelReverseStore.horizontalKey,
+                DockAutohideRestrictStore.enabledKey,
+                DockAutohideRestrictStore.backupDelayKey,
                 ExtendedSettingsStore.akEnabledKey,
                 CodexSyncSettingsStore.syncEnabledKey
             ]

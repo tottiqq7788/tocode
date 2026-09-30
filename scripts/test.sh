@@ -35,12 +35,17 @@ swiftc Tests/TestRunner.swift \
   Sources/KeyboardShortcutMapping.swift \
   Sources/KeyboardShortcutRemapService.swift \
   Sources/KeyboardShortcutMappingPrompt.swift \
+  Sources/MacTimer.swift \
+  Sources/MacTimerService.swift \
+  Sources/MacTimerPrompt.swift \
   Sources/CommandQTargetProvider.swift \
   Sources/FinderDismissService.swift \
   Sources/GlobalShortcutService.swift \
   Sources/LaunchAtLoginService.swift \
   Sources/MouseWheelReverseStore.swift \
   Sources/MouseWheelReverseService.swift \
+  Sources/DockAutohideRestrictStore.swift \
+  Sources/DockAutohideRestrictService.swift \
   Sources/ScreenBlackoutService.swift \
   Sources/WeChatModels.swift \
   Sources/WeChatCrypto.swift \

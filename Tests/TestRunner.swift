@@ -408,6 +408,11 @@ func testUserManualPages() {
     expect(joined.contains("始终从当前根目录的第一层开始"), "说明书写明根菜单不整页跳转")
     expect(joined.contains("分隔线 →「历史」→「新增」"), "说明书写明根菜单底部结构")
     expect(joined.contains("只悬停展开不会更新"), "说明书写明悬停不写入历史")
+    expect(joined.contains("限制程序坞弹出"), "说明书覆盖限制程序坞弹出")
+    expect(joined.contains("自动隐藏和显示程序坞"), "说明书写明需系统自动隐藏")
+    expect(joined.contains("定时器"), "说明书覆盖 mac 定时器")
+    expect(joined.contains("到点只执行一次"), "说明书写明定时器到点一次")
+    expect(joined.contains("下次启动不会补执行"), "说明书写明冷启动不补执行")
     expect(!joined.contains("上次展开"), "说明书不再描述整菜单跳转恢复")
     expect(!joined.contains("上一级"), "说明书不再描述上一级顶栏")
     expect(joined.contains("创建成功后会自动把新建项"), "说明书覆盖新增成功复制路径")
@@ -3614,6 +3619,295 @@ func testMouseWheelReverse() {
     }
 }
 
+final class MockDockPreferenceStore: DockPreferenceStore {
+    var autohide: Bool?
+    var delay: Double?
+    var writeShouldFail = false
+    var writeCount = 0
+    var writtenDelays: [Double] = []
+
+    func readAutohide() -> Bool? { autohide }
+    func readAutohideDelay() -> Double? { delay }
+    func writeAutohideDelay(_ value: Double) -> Bool {
+        writeCount += 1
+        writtenDelays.append(value)
+        guard !writeShouldFail else { return false }
+        delay = value
+        return true
+    }
+}
+
+final class MockDockRelauncher: DockRelauncher {
+    var shouldSucceed = true
+    var launchCount = 0
+    func relaunch() -> Bool {
+        launchCount += 1
+        return shouldSucceed
+    }
+}
+
+func makeDockRestrictHarness(
+    autohide: Bool? = true,
+    delay: Double? = 0.15,
+    relaunchOK: Bool = true
+) -> (
+    DockAutohideRestrictService,
+    DockAutohideRestrictStore,
+    MockDockPreferenceStore,
+    MockDockRelauncher,
+    MockAlerts
+) {
+    let suite = "tocode-dock-restrict-\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defaults.removePersistentDomain(forName: suite)
+    let settings = DockAutohideRestrictStore(defaults: defaults)
+    let dock = MockDockPreferenceStore()
+    dock.autohide = autohide
+    dock.delay = delay
+    let relauncher = MockDockRelauncher()
+    relauncher.shouldSucceed = relaunchOK
+    let alerts = MockAlerts()
+    let service = DockAutohideRestrictService(
+        settings: settings,
+        dock: dock,
+        relauncher: relauncher,
+        alerts: alerts
+    )
+    return (service, settings, dock, relauncher, alerts)
+}
+
+func testMacTimerStoreAndService() {
+    expect(MacTimerRemaining.parseMinutes("25") == 25, "合法分钟解析")
+    expect(MacTimerRemaining.parseMinutes(" 1 ") == 1, "分钟 trim")
+    expect(MacTimerRemaining.parseMinutes("0") == nil, "0 分钟非法")
+    expect(MacTimerRemaining.parseMinutes("10081") == nil, "超过上限非法")
+    expect(MacTimerRemaining.parseMinutes("abc") == nil, "非数字非法")
+    expect(MacTimerRemaining.format(seconds: 65) == "01:05", "不足一小时 mm:ss")
+    expect(MacTimerRemaining.format(seconds: 3661) == "1:01:01", "满一小时 h:mm:ss")
+    expect(
+        MacTimerRemaining.menuTitle(
+            name: "休息",
+            fireAt: Date(timeIntervalSince1970: 100),
+            now: Date(timeIntervalSince1970: 40)
+        ) == "休息 · 剩余 01:00",
+        "运行中标题含剩余"
+    )
+    expect(
+        MacTimerRemaining.menuTitle(
+            name: "休息",
+            fireAt: nil,
+            now: Date()
+        ) == "休息",
+        "未启动标题只有名称"
+    )
+
+    let suite = "tocode-mac-timer-\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defaults.removePersistentDomain(forName: suite)
+    defer { defaults.removePersistentDomain(forName: suite) }
+
+    let store = MacTimerStore(defaults: defaults)
+    let now = Date(timeIntervalSince1970: 1_000_000)
+    let draft = MacTimerDraft(
+        name: "提醒",
+        durationMinutesText: "2",
+        target: .action(.blackout)
+    )
+    switch store.saveAndStart(draft, now: now) {
+    case .success(let timer):
+        expect(timer.name == "提醒", "保存名称")
+        expect(timer.durationMinutes == 2, "保存分钟")
+        expect(timer.fireAt == now.addingTimeInterval(120), "启动写入 fireAt")
+        expect(timer.isRunning, "启动后运行中")
+    case .failure:
+        expect(false, "合法草稿应保存成功")
+    }
+
+    expect(store.allTimers().count == 1, "持久化一条")
+    if case .failure(.duplicateName) = store.saveAndStart(
+        MacTimerDraft(name: "提醒", durationMinutesText: "3", target: .action(.quit)),
+        now: now
+    ) {
+        expect(true, "重名拒绝")
+    } else {
+        expect(false, "重名拒绝")
+    }
+    if case .failure(.invalidDuration) = store.saveAndStart(
+        MacTimerDraft(name: "另一", durationMinutesText: "0", target: .action(.quit)),
+        now: now
+    ) {
+        expect(true, "非法分钟拒绝")
+    } else {
+        expect(false, "非法分钟拒绝")
+    }
+    if case .failure(.emptyName) = store.saveAndStart(
+        MacTimerDraft(name: "  ", durationMinutesText: "1", target: .action(.quit)),
+        now: now
+    ) {
+        expect(true, "空名称拒绝")
+    } else {
+        expect(false, "空名称拒绝")
+    }
+    if case .failure(.missingTarget) = store.saveAndStart(
+        MacTimerDraft(name: "无事项", durationMinutesText: "1", target: nil),
+        now: now
+    ) {
+        expect(true, "缺事项拒绝")
+    } else {
+        expect(false, "缺事项拒绝")
+    }
+
+    let clock = MockClock()
+    clock.current = now
+    let scheduler = ManualScheduler()
+    var fired: [KeyboardShortcutMappingTarget] = []
+    let service = MacTimerService(store: store, clock: clock, scheduler: scheduler)
+    service.fireHandler = { fired.append($0) }
+    service.applySavedSettings()
+    expect(service.timers.count == 1, "服务加载已有任务")
+    expect(service.timers[0].isRunning, "未到期仍运行")
+    expect(fired.isEmpty, "加载未到期不执行")
+    expect(scheduler.pending.count == 1, "为最近到期安排调度")
+
+    clock.current = now.addingTimeInterval(120)
+    scheduler.runNext()
+    expect(fired == [.action(.blackout)], "到点执行一次")
+    expect(service.timers.count == 1, "到点后仍保留任务")
+    expect(!service.timers[0].isRunning, "到点后未启动")
+    expect(store.allTimers()[0].fireAt == nil, "到点后持久化清 fireAt")
+    expect(scheduler.pending.isEmpty, "无更多运行中任务则不再调度")
+
+    // 冷启动：磁盘上已有过期 fireAt，不补执行。
+    var stale = store.allTimers()[0]
+    stale.fireAt = now.addingTimeInterval(-10)
+    store.replaceAll([stale])
+    fired.removeAll()
+    let cold = MacTimerService(store: store, clock: clock, scheduler: ManualScheduler())
+    cold.fireHandler = { fired.append($0) }
+    cold.applySavedSettings()
+    expect(fired.isEmpty, "冷启动过点不补执行")
+    expect(!cold.timers[0].isRunning, "冷启动过点变未启动")
+    expect(store.allTimers()[0].fireAt == nil, "冷启动过点写回未启动")
+
+    // 进程内唤醒：过点补执行一次。
+    clock.current = now
+    let wakeScheduler = ManualScheduler()
+    let wakeService = MacTimerService(store: store, clock: clock, scheduler: wakeScheduler)
+    var wakeFired: [KeyboardShortcutMappingTarget] = []
+    wakeService.fireHandler = { wakeFired.append($0) }
+    switch wakeService.saveAndStart(
+        MacTimerDraft(
+            id: store.allTimers()[0].id,
+            name: "提醒",
+            durationMinutesText: "1",
+            target: .action(.quit)
+        )
+    ) {
+    case .success(let timer):
+        expect(timer.isRunning, "再次启动成功")
+    case .failure:
+        expect(false, "再次启动应成功")
+    }
+    clock.current = now.addingTimeInterval(60)
+    wakeService.handleWake()
+    expect(wakeFired == [.action(.quit)], "唤醒时补执行已过点任务")
+    expect(!wakeService.timers[0].isRunning, "唤醒执行后未启动")
+
+    wakeService.delete(id: wakeService.timers[0].id)
+    expect(wakeService.timers.isEmpty, "删除清空列表")
+    expect(store.allTimers().isEmpty, "删除持久化清空")
+}
+
+func testDockAutohideRestrict() {
+    expect(DockAutohideRestrictStore.menuTitle == "限制程序坞弹出", "菜单标题")
+    expect(DockAutohideRestrictStore.restrictedDelay == 1000, "限制 delay 常量")
+
+    do {
+        let suite = "tocode-dock-store-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = DockAutohideRestrictStore(defaults: defaults)
+        expect(!store.isEnabled, "默认关闭")
+        expect(!store.hasBackupDelay, "默认无备份")
+        store.backupDelay = 0.25
+        expect(store.hasBackupDelay && store.backupDelay == 0.25, "备份可读写")
+        store.backupDelay = nil
+        expect(!store.hasBackupDelay, "备份可清除")
+    }
+
+    do {
+        let (service, settings, dock, relauncher, alerts) = makeDockRestrictHarness(autohide: false)
+        expect(!service.setEnabled(true), "未开自动隐藏时开启失败")
+        expect(!settings.isEnabled, "失败后偏好保持关闭")
+        expect(!service.isEffective, "失败后不生效")
+        expect(dock.writeCount == 0, "未开自动隐藏不写 delay")
+        expect(relauncher.launchCount == 0, "未开自动隐藏不重启 Dock")
+        expect(alerts.titles.contains("无法限制程序坞弹出"), "未开自动隐藏给出提示")
+    }
+
+    do {
+        let (service, settings, dock, relauncher, alerts) = makeDockRestrictHarness(delay: 0.2)
+        expect(service.setEnabled(true), "已开自动隐藏时可开启")
+        expect(settings.isEnabled, "开启后偏好为开")
+        expect(service.isEffective, "开启后生效")
+        expect(settings.backupDelay == 0.2, "开启时备份原 delay")
+        expect(dock.delay == DockAutohideRestrictStore.restrictedDelay, "写入限制 delay")
+        expect(relauncher.launchCount == 1, "开启时重启 Dock")
+        expect(alerts.titles.isEmpty, "成功开启不提示")
+
+        expect(service.setEnabled(false), "可关闭")
+        expect(!settings.isEnabled, "关闭后偏好关闭")
+        expect(!service.isEffective, "关闭后不生效")
+        expect(!settings.hasBackupDelay, "关闭后清除备份")
+        expect(dock.delay == 0.2, "关闭时恢复原 delay")
+        expect(relauncher.launchCount == 2, "关闭时再重启 Dock")
+    }
+
+    do {
+        let (service, settings, dock, relauncher, _) = makeDockRestrictHarness(delay: 0.3)
+        expect(service.setEnabled(true), "开启以便测退出恢复")
+        expect(dock.delay == DockAutohideRestrictStore.restrictedDelay, "退出前已限制")
+        service.shutdown()
+        expect(settings.isEnabled, "退出后保留偏好")
+        expect(settings.backupDelay == 0.3, "退出后保留备份")
+        expect(dock.delay == 0.3, "退出时恢复系统 delay")
+        expect(!service.isEffective, "退出后本会话不再生效")
+        expect(relauncher.launchCount == 2, "退出恢复也重启 Dock")
+
+        service.applySavedSettings()
+        expect(service.isEffective, "再次启动按偏好重施")
+        expect(dock.delay == DockAutohideRestrictStore.restrictedDelay, "启动重施限制 delay")
+        expect(settings.backupDelay == 0.3, "重施不覆盖已有备份")
+    }
+
+    do {
+        let (service, settings, dock, _, alerts) = makeDockRestrictHarness()
+        dock.writeShouldFail = true
+        expect(!service.setEnabled(true), "写入失败则开启失败")
+        expect(!settings.isEnabled, "写入失败偏好关闭")
+        expect(!settings.hasBackupDelay, "写入失败不保留半截备份")
+        expect(alerts.titles.contains("无法限制程序坞弹出"), "写入失败提示")
+    }
+
+    do {
+        let (service, settings, dock, relauncher, alerts) = makeDockRestrictHarness(delay: 0.4)
+        relauncher.shouldSucceed = false
+        expect(!service.setEnabled(true), "重启失败则开启失败")
+        expect(!settings.isEnabled, "重启失败偏好关闭")
+        expect(dock.delay == 0.4, "重启失败回滚 delay")
+        expect(alerts.titles.contains("无法限制程序坞弹出"), "重启失败提示")
+    }
+
+    do {
+        let (service, settings, _, _, _) = makeDockRestrictHarness(autohide: false)
+        settings.isEnabled = true
+        service.applySavedSettings()
+        expect(!settings.isEnabled, "启动时仍无自动隐藏则关掉偏好")
+        expect(!service.isEffective, "启动失败不生效")
+    }
+}
+
 func dataFromHex(_ value: String) -> Data {
     var data = Data()
     var index = value.startIndex
@@ -5680,6 +5974,8 @@ struct TestRunnerMain {
         testFinderCommandQServiceEffects()
         testLaunchAtLoginService()
         testMouseWheelReverse()
+        testMacTimerStoreAndService()
+        testDockAutohideRestrict()
         testScreenBlackoutService()
         testWeChatModelsCryptoAndState()
         testWeChatArchiveNaming()
