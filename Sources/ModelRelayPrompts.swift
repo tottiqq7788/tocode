@@ -213,18 +213,63 @@ enum ModelRelayPrompts {
         alert.addButton(withTitle: primary)
         alert.addButton(withTitle: "取消")
 
-        let grid = NSGridView(views: fields.map { label, field in
+        alert.accessoryView = formAccessory(fields: fields)
+        return alert
+    }
+
+    static func formAccessory(fields: [(String, NSTextField)]) -> NSView {
+        let fieldWidth: CGFloat = 330
+        let labelWidth: CGFloat = 78
+        let rowHeight: CGFloat = 26
+        let spacing: CGFloat = 8
+        let totalWidth = labelWidth + 10 + fieldWidth
+        let totalHeight = CGFloat(fields.count) * rowHeight
+            + CGFloat(max(0, fields.count - 1)) * spacing
+
+        let form = NSStackView(frame: NSRect(
+            x: 0,
+            y: 0,
+            width: totalWidth,
+            height: totalHeight
+        ))
+        form.orientation = .vertical
+        form.alignment = .leading
+        form.spacing = spacing
+
+        for (label, field) in fields {
             let text = NSTextField(labelWithString: label)
             text.alignment = .right
+            text.translatesAutoresizingMaskIntoConstraints = false
             field.setAccessibilityLabel(label)
-            field.widthAnchor.constraint(equalToConstant: 330).isActive = true
-            return [text, field]
-        })
-        grid.rowSpacing = 8
-        grid.columnSpacing = 10
-        grid.column(at: 0).xPlacement = .trailing
-        alert.accessoryView = grid
-        return alert
+            field.isEditable = true
+            field.isSelectable = true
+            field.isEnabled = true
+            field.translatesAutoresizingMaskIntoConstraints = false
+
+            let row = NSStackView(frame: NSRect(
+                x: 0,
+                y: 0,
+                width: totalWidth,
+                height: rowHeight
+            ))
+            row.orientation = .horizontal
+            row.alignment = .centerY
+            row.spacing = 10
+            row.translatesAutoresizingMaskIntoConstraints = false
+            row.addArrangedSubview(text)
+            row.addArrangedSubview(field)
+            NSLayoutConstraint.activate([
+                row.widthAnchor.constraint(equalToConstant: totalWidth),
+                row.heightAnchor.constraint(equalToConstant: rowHeight),
+                text.widthAnchor.constraint(equalToConstant: labelWidth),
+                field.widthAnchor.constraint(equalToConstant: fieldWidth),
+                field.heightAnchor.constraint(equalToConstant: 24)
+            ])
+            form.addArrangedSubview(row)
+        }
+        form.frame = NSRect(x: 0, y: 0, width: totalWidth, height: totalHeight)
+        form.layoutSubtreeIfNeeded()
+        return form
     }
 }
 

@@ -6239,6 +6239,7 @@ struct TestRunnerMain {
         testTocodePreferencesMigrationReadsProcessStandardDomain()
         testTocodePortableSettingsTransfer()
         testUserManualPages()
+        await testModelRelayPromptFormLayout()
         testModelRelayValidationConfigAndVault()
         testModelRelayHTTPParser()
         testModelRelayRouterAndControlPlane()

@@ -77,6 +77,7 @@ swiftc Tests/TestRunner.swift \
   Sources/ModelRelayUpstreamClient.swift \
   Sources/ModelRelayHTTPServer.swift \
   Sources/ModelRelayService.swift \
+  Sources/ModelRelayPrompts.swift \
   -o build/tests \
   -framework AppKit \
   -framework ApplicationServices \

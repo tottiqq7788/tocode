@@ -1,4 +1,23 @@
 import Foundation
+import AppKit
+
+@MainActor
+func testModelRelayPromptFormLayout() {
+    let name = NSTextField()
+    let url = NSTextField()
+    let accessory = ModelRelayPrompts.formAccessory(fields: [
+        ("名称", name),
+        ("Base URL", url)
+    ])
+    accessory.layoutSubtreeIfNeeded()
+
+    expect(accessory.frame.width >= 400, "模型弹窗表单保留可输入宽度")
+    expect(accessory.frame.height >= 60, "模型弹窗表单保留两行输入高度")
+    expect(name.frame.width >= 300 && name.frame.height >= 20, "模型弹窗名称框未被压缩")
+    expect(url.frame.width >= 300 && url.frame.height >= 20, "模型弹窗 URL 框未被压缩")
+    expect(name.isEditable && name.isEnabled, "模型弹窗输入框可编辑")
+    expect(AlertFocus.firstEditableTextField(in: accessory) === name, "模型弹窗默认聚焦首个输入框")
+}
 
 func testModelRelayValidationConfigAndVault() {
     expect(
