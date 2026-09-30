@@ -2203,50 +2203,77 @@ func testDirectoryRootResolverPriority() {
     let codex = "/codex"
     expect(
         DirectoryRootResolver.resolve(
+            frontmost: .finder,
             finderFollowEnabled: true,
             finderDirectory: finder,
             codexFollowEnabled: true,
             codexRoot: codex,
             manualRoot: manual
         ) == finder,
-        "访达跟随触发时优先于 codex跟随"
+        "访达前台且访达跟随开时用访达目录"
     )
     expect(
         DirectoryRootResolver.resolve(
+            frontmost: .finder,
             finderFollowEnabled: true,
             finderDirectory: nil,
             codexFollowEnabled: true,
             codexRoot: codex,
             manualRoot: manual
-        ) == codex,
-        "访达跟随未触发时回落 codex跟随"
+        ) == manual,
+        "访达前台但无单选时用固定目录"
     )
     expect(
         DirectoryRootResolver.resolve(
-            finderFollowEnabled: false,
+            frontmost: .codex,
+            finderFollowEnabled: true,
             finderDirectory: finder,
+            codexFollowEnabled: true,
+            codexRoot: codex,
+            manualRoot: manual
+        ) == codex,
+        "Codex 前台且 codex跟随开时用项目根"
+    )
+    expect(
+        DirectoryRootResolver.resolve(
+            frontmost: .codex,
+            finderFollowEnabled: false,
+            finderDirectory: nil,
             codexFollowEnabled: true,
             codexRoot: nil,
             manualRoot: manual
         ) == manual,
-        "codex 无项目时回落手动根"
+        "Codex 前台但无项目时用固定目录"
     )
     expect(
         DirectoryRootResolver.resolve(
-            finderFollowEnabled: false,
-            finderDirectory: nil,
-            codexFollowEnabled: false,
+            frontmost: .other,
+            finderFollowEnabled: true,
+            finderDirectory: finder,
+            codexFollowEnabled: true,
             codexRoot: codex,
             manualRoot: manual
         ) == manual,
-        "两跟随皆关时用手动根"
+        "其它前台即使两跟随皆开仍用固定目录"
+    )
+    expect(
+        DirectoryRootResolver.frontmost(fromBundleIdentifier: "com.apple.finder") == .finder,
+        "访达 bundle 识别"
+    )
+    expect(
+        DirectoryRootResolver.frontmost(fromBundleIdentifier: "com.openai.codex") == .codex,
+        "Codex bundle 识别"
+    )
+    expect(
+        DirectoryRootResolver.frontmost(fromBundleIdentifier: "com.apple.Safari") == .other,
+        "其它应用为 other"
     )
     expect(KeyboardMappingAction.initRootFromFinder.title == "访达跟随", "映射文案为访达跟随")
     expect(KeyboardMappingAction.toggleCodexSync.title == "codex跟随", "映射文案为 codex跟随")
     expect(KeyboardMappingActionGroup.directory.title == "根目录", "映射分组名为根目录")
     expect(KeyboardMappingActionGroup.input.title == "输入", "映射分组含输入")
     expect(KeyboardMappingActionGroup.tools.title == "工具", "映射分组含工具")
-    expect(!KeyboardMappingAction.initRootFromFinder.mutatesManualRoot, "访达跟随不置灰手动根")
+    expect(!KeyboardMappingAction.initRootFromFinder.mutatesManualRoot, "访达跟随不视为改手动根")
 }
 
 func testKeyboardShortcutMappingActionTargets() {
@@ -2505,12 +2532,10 @@ func testKeyboardMappingActionDispatchAndYield() {
     let dispatcher = KeyboardMappingActionDispatcher()
     var executed: [TocodeCommand] = []
     var notices: [(String, String)] = []
-    var syncOn = false
     var openFinderCalls = 0
     var copyPathCalls = 0
     var readClipboardCalls = 0
     var blackoutCalls = 0
-    dispatcher.syncEnabled = { syncOn }
     dispatcher.execute = { command in
         executed.append(command)
         if command == .hidden(.toggle) {
@@ -2518,6 +2543,9 @@ func testKeyboardMappingActionDispatchAndYield() {
         }
         if command == .root(.reset) {
             return .success(TocodeCommandOutput("已重置根目录"))
+        }
+        if command == .root(.finderFollow(.toggle)) {
+            return .success(TocodeCommandOutput("已切换为 开"))
         }
         return .success(TocodeCommandOutput("ok"))
     }
@@ -2545,23 +2573,19 @@ func testKeyboardMappingActionDispatchAndYield() {
     expect(copyPathCalls == 1, "复制路径走菜单方法")
     expect(readClipboardCalls == 1, "读取剪贴板走菜单方法")
 
-    syncOn = true
     executed.removeAll()
     notices.removeAll()
     readClipboardCalls = 0
     dispatcher.perform(.readClipboardRoot)
     dispatcher.perform(.resetRoot)
-    expect(executed.isEmpty, "codex跟随开启时手动设根动作不调用执行器")
-    expect(readClipboardCalls == 0, "codex跟随开启时不读取剪贴板设根")
-    expect(notices.count == 2, "codex跟随开启时手动设根动作通知原因")
-    expect(
-        notices.allSatisfy { $0.1.contains("codex跟随") },
-        "codex跟随开启通知说明不能改手动根目录"
-    )
+    expect(readClipboardCalls == 1, "跟随开关不再拦截读取剪贴板设根")
+    expect(executed == [.root(.reset)], "跟随开关不再拦截重置根目录")
+    expect(notices.isEmpty, "改固定根成功不额外通知")
+
     executed.removeAll()
     notices.removeAll()
     dispatcher.perform(.initRootFromFinder)
-    expect(executed == [.root(.finderFollow(.toggle))], "访达跟随映射翻转开关且不受 codex跟随置灰")
+    expect(executed == [.root(.finderFollow(.toggle))], "访达跟随映射翻转开关")
     expect(notices.count == 1 && notices[0].0 == "访达跟随", "访达跟随开关成功发短通知")
 
     let suite = "tocode-keyboard-invoke-\(UUID().uuidString)"

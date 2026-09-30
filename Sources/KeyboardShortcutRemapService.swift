@@ -30,7 +30,6 @@ protocol KeyboardShortcutRemapControlling: AnyObject {
 
 /// 把 Tocode 动作交给既有命令执行器或菜单方法；桌面切换不经过这里。
 final class KeyboardMappingActionDispatcher {
-    var syncEnabled: () -> Bool = { false }
     var execute: (TocodeCommand) -> TocodeCommandResult = { _ in
         .failure(.operationFailed("命令执行器不可用"))
     }
@@ -41,10 +40,6 @@ final class KeyboardMappingActionDispatcher {
     var activateBlackout: () -> Void = {}
 
     func perform(_ action: KeyboardMappingAction) {
-        if action.mutatesManualRoot && syncEnabled() {
-            notify(action.title, "codex跟随开启时不能改手动根目录")
-            return
-        }
         if action == .blackout {
             activateBlackout()
             return

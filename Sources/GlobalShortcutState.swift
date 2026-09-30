@@ -32,6 +32,10 @@ struct FrontmostAppInfo: Equatable {
         bundleIdentifier == "com.apple.finder"
     }
 
+    var isCodex: Bool {
+        bundleIdentifier == "com.openai.codex"
+    }
+
     var displayName: String {
         if let localizedName, !localizedName.isEmpty {
             return localizedName

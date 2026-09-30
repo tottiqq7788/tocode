@@ -90,9 +90,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         self.commandExecutor = commandExecutor
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         super.init()
-        actionDispatcher.syncEnabled = { [weak self] in
-            self?.codexSync.syncEnabled ?? false
-        }
         actionDispatcher.execute = { [weak self] command in
             guard let self else {
                 return .failure(.operationFailed("命令执行器不可用"))
@@ -140,19 +137,30 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
     }
 
-    /// 左键根目录解析：访达跟随 > codex跟随 > 手动根。
+    /// 左键根目录解析：默认固定目录；访达/Codex 前台且对应跟随开启时临时接管。
     private func resolveDirectoryRoot() -> String {
+        let frontmost = DirectoryRootResolver.frontmost(
+            fromBundleIdentifier: NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        )
         let finderDirectory: String?
-        if case .success(let path) = finderSelection.resolveInitializationDirectory() {
+        if frontmost == .finder,
+           case .success(let path) = finderSelection.resolveInitializationDirectory() {
             finderDirectory = path
         } else {
             finderDirectory = nil
         }
+        let codexRoot: String?
+        if frontmost == .codex {
+            codexRoot = codex.resolveProject()?.rootPath
+        } else {
+            codexRoot = nil
+        }
         return DirectoryRootResolver.resolve(
+            frontmost: frontmost,
             finderFollowEnabled: finderFollow.followEnabled,
             finderDirectory: finderDirectory,
             codexFollowEnabled: codexSync.syncEnabled,
-            codexRoot: codex.resolveProject()?.rootPath,
+            codexRoot: codexRoot,
             manualRoot: store.resolveRoot(isDirectory: { fs.isExistingDirectory($0) })
         )
     }
@@ -226,11 +234,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         resetRoot.target = self
         resetRoot.image = NSImage(systemSymbolName: "arrow.counterclockwise", accessibilityDescription: nil)
 
-        let syncLocksManual = codexSync.syncEnabled
-        readClip.isEnabled = !syncLocksManual
-        changeDir.isEnabled = !syncLocksManual
-        resetRoot.isEnabled = !syncLocksManual
-
         submenu.addItem(.separator())
 
         addShortcutToggle(
@@ -242,7 +245,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         addShortcutToggle(
             to: submenu,
             title: "codex跟随",
-            enabled: syncLocksManual,
+            enabled: codexSync.syncEnabled,
             action: #selector(toggleCodexProjectSync(_:))
         )
 
