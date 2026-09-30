@@ -118,7 +118,7 @@ final class ModelRelayProxyOperation: NSObject, URLSessionDataDelegate, URLSessi
         send: @escaping (Data) -> Void,
         completion: @escaping () -> Void
     ) {
-        self.candidates = candidates
+        self.candidates = Array(candidates.prefix(1))
         self.endpoint = endpoint
         self.body = body
         self.inboundHeaders = inboundHeaders

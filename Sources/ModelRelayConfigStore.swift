@@ -48,11 +48,32 @@ final class FileModelRelayConfigStore: ModelRelayConfigStoring {
             attributes: [.posixPermissions: NSNumber(value: 0o700)]
         )
         let data = try Self.encoder.encode(configuration)
-        try data.write(to: fileURL, options: .atomic)
-        try fileManager.setAttributes(
-            [.posixPermissions: NSNumber(value: 0o600)],
-            ofItemAtPath: fileURL.path
+        let temporary = directory.appendingPathComponent(
+            ".\(fileURL.lastPathComponent).tocode-\(UUID().uuidString)",
+            isDirectory: false
         )
+        guard fileManager.createFile(
+            atPath: temporary.path,
+            contents: data,
+            attributes: [.posixPermissions: NSNumber(value: 0o600)]
+        ) else {
+            throw ModelRelayError.configurationCorrupt
+        }
+        do {
+            if fileManager.fileExists(atPath: fileURL.path) {
+                _ = try fileManager.replaceItemAt(
+                    fileURL,
+                    withItemAt: temporary,
+                    backupItemName: nil,
+                    options: [.usingNewMetadataOnly]
+                )
+            } else {
+                try fileManager.moveItem(at: temporary, to: fileURL)
+            }
+        } catch {
+            try? fileManager.removeItem(at: temporary)
+            throw error
+        }
     }
 
     private static let encoder: JSONEncoder = {

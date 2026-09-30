@@ -4,6 +4,9 @@ import Security
 final class MemoryModelRelayConfigStore: ModelRelayConfigStoring {
     var configuration: ModelRelayConfiguration
     var saveError: Error?
+    var failOnSaveNumber: Int?
+    var saveObserver: ((ModelRelayConfiguration) -> Void)?
+    private(set) var saveCount = 0
 
     init(_ configuration: ModelRelayConfiguration = ModelRelayConfiguration()) {
         self.configuration = configuration
@@ -14,6 +17,11 @@ final class MemoryModelRelayConfigStore: ModelRelayConfigStoring {
     }
 
     func save(_ configuration: ModelRelayConfiguration) throws {
+        saveCount += 1
+        saveObserver?(configuration)
+        if saveCount == failOnSaveNumber {
+            throw ModelRelayError.configurationCorrupt
+        }
         if let saveError { throw saveError }
         self.configuration = configuration
     }
@@ -35,6 +43,10 @@ final class CorruptModelRelayConfigStore: ModelRelayConfigStoring {
 final class MemoryModelRelayKeyStore: ModelRelayUpstreamKeyStoring {
     private let lock = NSLock()
     private var values: [UUID: String]
+    var saveError: Error?
+    var deleteError: Error?
+    var saveErrorIDs: Set<UUID> = []
+    var deleteErrorIDs: Set<UUID> = []
 
     init(_ values: [UUID: String] = [:]) {
         self.values = values
@@ -48,14 +60,36 @@ final class MemoryModelRelayKeyStore: ModelRelayUpstreamKeyStoring {
 
     func save(_ secret: String, id: UUID) throws {
         lock.lock()
+        if let saveError {
+            lock.unlock()
+            throw saveError
+        }
+        if saveErrorIDs.contains(id) {
+            lock.unlock()
+            throw ModelRelayError.keychain(errSecAuthFailed)
+        }
         values[id] = secret
         lock.unlock()
     }
 
     func delete(id: UUID) throws {
         lock.lock()
+        if let deleteError {
+            lock.unlock()
+            throw deleteError
+        }
+        if deleteErrorIDs.contains(id) {
+            lock.unlock()
+            throw ModelRelayError.keychain(errSecAuthFailed)
+        }
         values.removeValue(forKey: id)
         lock.unlock()
+    }
+
+    var snapshot: [UUID: String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return values
     }
 }
 
@@ -221,6 +255,13 @@ func modelRelayBlockingSessionConfiguration() -> URLSessionConfiguration {
     let configuration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [ModelRelayBlockingURLProtocol.self]
     return configuration
+}
+
+func waitForModelRelaySignal(
+    _ signal: DispatchSemaphore,
+    timeout: TimeInterval = 2
+) -> Bool {
+    signal.wait(timeout: .now() + timeout) == .success
 }
 
 func modelRelayURLRequestBody(_ request: URLRequest) -> Data {

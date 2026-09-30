@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import Security
 
 @MainActor
 func testModelRelayPromptFormLayout() {
@@ -28,16 +29,41 @@ func testModelRelayPromptFormLayout() {
         "模型厂商预设均为已规范化的安全 URL"
     )
     expect(
-        ModelRelayPrompts.providerChoices(existingBaseURL: presets[1].baseURL) == presets,
-        "编辑预设厂商时仍选中既有预设"
+        ModelRelayPrompts.initialProviderDraft(existing: ModelRelayProvider(
+            name: "预设",
+            baseURL: presets[1].baseURL
+        )).presetIndex == 1,
+        "编辑厂家时识别既有预设"
     )
     let legacyURL = "http://127.0.0.1:11434/v1"
-    let legacyChoices = ModelRelayPrompts.providerChoices(existingBaseURL: legacyURL)
+    let legacyDraft = ModelRelayPrompts.initialProviderDraft(existing: ModelRelayProvider(
+        name: "旧自定义",
+        baseURL: legacyURL
+    ))
     expect(
-        legacyChoices.count == presets.count + 1
-            && legacyChoices.last?.baseURL == legacyURL,
-        "旧自定义厂商编辑时保留原地址"
+        legacyDraft.presetIndex == nil
+            && legacyDraft.customBaseURL == legacyURL,
+        "旧自定义厂家编辑时保留原地址"
     )
+    var newDraft = ModelRelayPrompts.initialProviderDraft()
+    newDraft.name = "DeepSeek A"
+    newDraft.presetIndex = 1
+    newDraft.secret = "candidate-secret"
+    expect(!newDraft.canSave(using: nil), "新增厂家测试前不可保存")
+    let passedTest = ModelRelayProviderConnectionTest(
+        providerID: nil,
+        baseURL: presets[1].baseURL,
+        secret: "candidate-secret",
+        replacesKey: true,
+        modelIDs: ["deepseek-model"]
+    )
+    expect(newDraft.canSave(using: passedTest), "当前地址和 Key 测试成功后可保存")
+    newDraft.secret = "changed-secret"
+    expect(!newDraft.canSave(using: passedTest), "Key 改动立即使连接测试失效")
+    newDraft.secret = "candidate-secret"
+    newDraft.presetIndex = nil
+    newDraft.customBaseURL = "https://custom.example/v1"
+    expect(!newDraft.canSave(using: passedTest), "地址改动立即使连接测试失效")
 
     let name = NSTextField()
     let provider = NSPopUpButton()
@@ -54,6 +80,33 @@ func testModelRelayPromptFormLayout() {
     expect(name.frame.width >= 300 && name.frame.height >= 20, "模型弹窗名称框未被压缩")
     expect(name.isEditable && name.isEnabled, "模型弹窗输入框可编辑")
     expect(AlertFocus.firstEditableTextField(in: accessory) === name, "模型弹窗默认聚焦名称输入框")
+
+    let entity = ModelRelayProvider(name: "厂家 A", baseURL: presets[0].baseURL)
+    let entityItem = ModelRelayPrompts.providerMenuItem(
+        entity,
+        busy: false,
+        target: nil,
+        action: NSSelectorFromString("manageProvider:")
+    )
+    expect(entityItem.action != nil && entityItem.submenu == nil, "厂家是普通可点击项而不是文件夹")
+    expect(entityItem.representedObject as? String == entity.id.uuidString, "厂家菜单项绑定实体 ID")
+    let busyItem = ModelRelayPrompts.providerMenuItem(
+        entity,
+        busy: true,
+        target: nil,
+        action: NSSelectorFromString("manageProvider:")
+    )
+    expect(!busyItem.isEnabled, "厂家测试或刷新期间菜单项禁用")
+
+    let local = try! ModelRelayLocalKeyVault(iterations: 1)
+        .create(name: "本地客户端", viewingPassword: "password-123")
+    let localItem = ModelRelayPrompts.localKeyMenuItem(
+        local.record,
+        target: nil,
+        action: NSSelectorFromString("accessLocalKey:")
+    )
+    expect(localItem.action != nil && localItem.submenu == nil, "本地 Key 命名项仍是原点击操作")
+    expect(localItem.representedObject as? String == local.record.id.uuidString, "本地 Key 菜单项绑定原记录")
 }
 
 func testModelRelayValidationConfigAndVault() {
@@ -89,6 +142,21 @@ func testModelRelayValidationConfigAndVault() {
     let mode = (try? fm.attributesOfItem(atPath: store.fileURL.path)[.posixPermissions] as? NSNumber)?
         .intValue
     expect(mode == 0o600, "模型中转配置权限为 0600")
+    try! fm.setAttributes(
+        [.posixPermissions: NSNumber(value: 0o644)],
+        ofItemAtPath: store.fileURL.path
+    )
+    try! store.save(configuration)
+    let replacedMode = (try? fm.attributesOfItem(atPath: store.fileURL.path)[.posixPermissions] as? NSNumber)?
+        .intValue
+    expect(replacedMode == 0o600, "覆盖保存先准备 0600 临时文件再原子替换")
+    try! Data(
+        #"{"version":1,"port":27800,"providers":[],"localKeys":[]}"#.utf8
+    ).write(to: store.fileURL)
+    expect(
+        (try? store.load().pendingUpstreamKeyDeletions) == [],
+        "旧配置缺少清理日志字段时向后兼容为空"
+    )
     try! Data("{broken".utf8).write(to: store.fileURL)
     do {
         _ = try store.load()
@@ -161,21 +229,17 @@ func testModelRelayRouterAndControlPlane() {
     let vault = ModelRelayLocalKeyVault(iterations: 1)
     let local = try! vault.create(name: "client", viewingPassword: "password-123")
     let firstKey = ModelRelayUpstreamKeyReference(name: "first")
-    let secondKey = ModelRelayUpstreamKeyReference(name: "second")
     let provider = ModelRelayProvider(
         name: "provider",
         baseURL: "https://example.com/v1",
-        keys: [firstKey, secondKey],
+        keys: [firstKey],
         models: [ModelRelayModelRoute(upstreamModelID: "upstream-a", alias: "local-a")]
     )
     let configuration = ModelRelayConfiguration(
         providers: [provider],
         localKeys: [local.record]
     )
-    let keyStore = MemoryModelRelayKeyStore([
-        firstKey.id: "upstream-key-1",
-        secondKey.id: "upstream-key-2"
-    ])
+    let keyStore = MemoryModelRelayKeyStore([firstKey.id: "upstream-key-1"])
     let clock = MutableModelRelayClock()
     let router = ModelRelayRouter(
         configuration: configuration,
@@ -187,26 +251,29 @@ func testModelRelayRouterAndControlPlane() {
     expect(!router.authenticate("wrong"), "路由器拒绝错误本地 Key")
     let first = try! router.resolve(alias: "local-a")
     let second = try! router.resolve(alias: "local-a")
-    expect(first.candidates.first?.keyID == firstKey.id, "健康 Key 轮询第一次选择首 Key")
-    expect(second.candidates.first?.keyID == secondKey.id, "健康 Key 轮询第二次选择次 Key")
+    expect(first.candidates.map(\.keyID) == [firstKey.id], "厂家只解析唯一上游 Key")
+    expect(second.candidates.map(\.keyID) == [firstKey.id], "重复请求不做 Key 轮询")
 
     router.recordFailure(keyID: firstKey.id, statusCode: 401)
-    let afterAuthenticationFailure = try! router.resolve(alias: "local-a")
-    expect(
-        afterAuthenticationFailure.candidates.allSatisfy { $0.keyID != firstKey.id },
-        "401 后 Key 保持不可用直至手动重置"
-    )
+    do {
+        _ = try router.resolve(alias: "local-a")
+        expect(false, "401 后唯一 Key 保持不可用直至手动重置")
+    } catch {
+        expect(error as? ModelRelayError == .noHealthyUpstream, "唯一 Key 鉴权失败后明确失败")
+    }
     router.resetHealth(keyIDs: [firstKey.id])
-    expect(try! router.resolve(alias: "local-a").candidates.contains { $0.keyID == firstKey.id }, "手动刷新重置 401 健康状态")
+    expect(try! router.resolve(alias: "local-a").candidates.first?.keyID == firstKey.id, "手动刷新重置 401 健康状态")
 
-    router.recordFailure(keyID: secondKey.id, statusCode: 429)
-    expect(
-        !(try! router.resolve(alias: "local-a").candidates.contains { $0.keyID == secondKey.id }),
-        "429 Key 在冷却期内不可用"
-    )
+    router.recordFailure(keyID: firstKey.id, statusCode: 429)
+    do {
+        _ = try router.resolve(alias: "local-a")
+        expect(false, "429 后唯一 Key 在冷却期内不可用")
+    } catch {
+        expect(error as? ModelRelayError == .noHealthyUpstream, "429 冷却期明确失败")
+    }
     clock.now = clock.now.addingTimeInterval(61)
     expect(
-        try! router.resolve(alias: "local-a").candidates.contains { $0.keyID == secondKey.id },
+        try! router.resolve(alias: "local-a").candidates.first?.keyID == firstKey.id,
         "429 Key 冷却后自动恢复"
     )
 
@@ -275,12 +342,6 @@ func testModelRelayRouterAndControlPlane() {
         upstreamClient: ModelRelayUpstreamClient(sessionConfiguration: modelRelayTestSessionConfiguration())
     )
     do {
-        _ = try service.addProvider(name: "ONE", baseURL: "https://two.example/v1")
-        expect(false, "厂商名称应忽略大小写保持唯一")
-    } catch {
-        expect(error as? ModelRelayError == .duplicateProviderName, "重复厂商名返回明确错误")
-    }
-    do {
         try service.updateAlias(
             routeID: initial.providers[0].models[1].id,
             alias: "SHARED"
@@ -299,19 +360,32 @@ func testModelRelayRouterAndControlPlane() {
 }
 
 func testModelRelayValidatedKeyControlPlane() async {
+    func testConnection(
+        _ service: ModelRelayService,
+        providerID: UUID? = nil,
+        baseURL: String,
+        secret: String?
+    ) async -> Result<ModelRelayProviderConnectionTest, Error> {
+        await withCheckedContinuation { continuation in
+            service.testProviderConnection(
+                providerID: providerID,
+                baseURL: baseURL,
+                candidateSecret: secret
+            ) {
+                continuation.resume(returning: $0)
+            }
+        }
+    }
+
+    let firstKey = ModelRelayUpstreamKeyReference(name: "默认")
     let firstProvider = ModelRelayProvider(
         name: "first",
         baseURL: "https://first.example/v1",
+        keys: [firstKey],
         models: [ModelRelayModelRoute(upstreamModelID: "shared", alias: "shared")]
     )
-    let secondProvider = ModelRelayProvider(
-        name: "second",
-        baseURL: "https://second.example/v1"
-    )
-    let configStore = MemoryModelRelayConfigStore(
-        ModelRelayConfiguration(providers: [firstProvider, secondProvider])
-    )
-    let keyStore = MemoryModelRelayKeyStore()
+    let configStore = MemoryModelRelayConfigStore(ModelRelayConfiguration(providers: [firstProvider]))
+    let keyStore = MemoryModelRelayKeyStore([firstKey.id: "first-secret"])
     let client = ModelRelayUpstreamClient(sessionConfiguration: modelRelayTestSessionConfiguration())
     let service = ModelRelayService(
         configStore: configStore,
@@ -319,142 +393,413 @@ func testModelRelayValidatedKeyControlPlane() async {
         localKeyVault: ModelRelayLocalKeyVault(iterations: 1),
         upstreamClient: client
     )
+    configStore.saveObserver = { candidate in
+        let storedIDs = Set(keyStore.snapshot.keys)
+        expect(
+            candidate.providers.flatMap(\.keys).allSatisfy { storedIDs.contains($0.id) },
+            "每次配置提交时所有可路由 Key 引用均已有对应 Keychain 项"
+        )
+    }
     ModelRelayURLProtocol.reset { request in
         expect(
             request.value(forHTTPHeaderField: "Authorization") == "Bearer valid-secret",
-            "新增上游 Key 在保存前使用输入 secret 校验目录"
+            "新增厂家保存前使用待保存 Key 测试目录"
         )
         return ModelRelayStubResponse(
             status: 200,
             chunks: [Data("{\"data\":[{\"id\":\"shared\"}]}".utf8)]
         )
     }
-    let addition: Result<ModelRelayUpstreamKeyReference, Error> = await withCheckedContinuation { continuation in
+    expect(service.snapshot().providers.count == 1 && keyStore.snapshot.count == 1, "测试前不写配置或钥匙串")
+    let tested = await testConnection(
+        service,
+        baseURL: "https://second.example/v1",
+        secret: "valid-secret"
+    )
+    guard case .success(let connection) = tested else {
+        expect(false, "有效厂家连接应测试成功")
+        return
+    }
+    expect(service.snapshot().providers.count == 1 && keyStore.snapshot.count == 1, "测试成功仍不提前持久化")
+    let secondProvider: ModelRelayProvider
+    do {
+        secondProvider = try service.createProvider(name: "second", using: connection)
+        expect(secondProvider.keys.count == 1, "厂家实体只保存一个上游 Key")
+        expect(secondProvider.models.first?.alias == "second/shared", "冲突模型使用 厂家/model-id 别名")
+        expect(
+            secondProvider.upstreamKey.flatMap { try? keyStore.load(id: $0.id) } == "valid-secret",
+            "保存后 secret 只进入 Keychain 抽象"
+        )
+    } catch {
+        expect(false, "测试成功的厂家应原子保存：\(error)")
+        return
+    }
+
+    do {
+        _ = try service.createProvider(name: "SECOND", using: connection)
+        expect(false, "厂家名称应忽略大小写保持唯一")
+    } catch {
+        expect(error as? ModelRelayError == .duplicateProviderName, "重复厂家名返回明确错误")
+    }
+    expect(service.snapshot().providers.count == 2, "重复名称失败不留下空厂家")
+    expect(keyStore.snapshot.count == 2, "重复名称失败回滚临时 Keychain 项")
+
+    do {
+        let duplicatePreset = try service.createProvider(name: "second-b", using: connection)
+        expect(duplicatePreset.baseURL == secondProvider.baseURL, "同一厂商预设可用不同名称重复创建")
+        expect(duplicatePreset.keys.count == 1, "重复预设仍保持一厂家一 Key")
+    } catch {
+        expect(false, "同一预设不同名称应允许保存：\(error)")
+    }
+
+    let extraKeyResult: Result<ModelRelayUpstreamKeyReference, Error> = await withCheckedContinuation { continuation in
         service.addUpstreamKey(
             providerID: secondProvider.id,
-            name: "primary",
-            secret: "valid-secret"
+            name: "extra",
+            secret: "extra-secret"
         ) {
             continuation.resume(returning: $0)
         }
     }
-    switch addition {
-    case .failure(let error):
-        expect(false, "有效上游 Key 应新增成功：\(error)")
-    case .success(let reference):
-        let savedProvider = service.snapshot().providers.first { $0.id == secondProvider.id }
-        expect(savedProvider?.keys == [reference], "校验成功后才保存上游 Key 元数据")
-        expect(savedProvider?.models.first?.alias == "second/shared", "冲突模型默认使用 厂商/model-id 别名")
-        expect((try? keyStore.load(id: reference.id)) == "valid-secret", "校验成功后 secret 写入 Keychain 抽象")
-
-        ModelRelayURLProtocol.reset { _ in
-            ModelRelayStubResponse(status: 401, chunks: [Data("{\"error\":\"unauthorized\"}".utf8)])
-        }
-        let replacement: Result<Void, Error> = await withCheckedContinuation { continuation in
-            service.replaceUpstreamKey(
-                providerID: secondProvider.id,
-                keyID: reference.id,
-                name: "primary",
-                secret: "invalid-secret"
-            ) {
-                continuation.resume(returning: $0)
-            }
-        }
-        if case .success = replacement {
-            expect(false, "校验失败的替换 Key 不应保存")
-        } else {
-            expect(true, "校验失败的替换 Key 被拒绝")
-        }
-        expect(
-            (try? keyStore.load(id: reference.id)) == "valid-secret",
-            "替换校验失败时保留原上游 secret"
-        )
+    if case .failure(let error) = extraKeyResult {
+        expect(error as? ModelRelayError == .providerAlreadyHasKey, "已配置厂家拒绝第二个 Key")
+    } else {
+        expect(false, "厂家不得新增第二个 Key")
     }
 
-    let healthyReference = ModelRelayUpstreamKeyReference(name: "healthy")
-    let rejectedReference = ModelRelayUpstreamKeyReference(name: "rejected")
-    let refreshProvider = ModelRelayProvider(
-        name: "refresh-all",
-        baseURL: "https://refresh.example/v1",
-        keys: [healthyReference, rejectedReference]
+    let originalReference = secondProvider.upstreamKey!
+    var currentReference = originalReference
+    ModelRelayURLProtocol.reset { _ in
+        ModelRelayStubResponse(status: 401, chunks: [Data("{\"error\":\"unauthorized\"}".utf8)])
+    }
+    let rejectedReplacement = await testConnection(
+        service,
+        providerID: secondProvider.id,
+        baseURL: secondProvider.baseURL,
+        secret: "invalid-secret"
     )
-    let refreshKeys = MemoryModelRelayKeyStore([
-        healthyReference.id: "healthy-secret",
-        rejectedReference.id: "rejected-secret"
-    ])
-    let refreshService = ModelRelayService(
-        configStore: MemoryModelRelayConfigStore(
-            ModelRelayConfiguration(providers: [refreshProvider])
-        ),
-        upstreamKeyStore: refreshKeys,
-        localKeyVault: ModelRelayLocalKeyVault(iterations: 1),
-        upstreamClient: client
-    )
+    if case .success = rejectedReplacement {
+        expect(false, "连接失败的替换 Key 不得产生测试凭证")
+    } else {
+        expect(true, "连接失败的替换 Key 被拒绝")
+    }
+    expect((try? keyStore.load(id: originalReference.id)) == "valid-secret", "测试失败保留原上游 Key")
+
     ModelRelayURLProtocol.reset { request in
-        if request.value(forHTTPHeaderField: "Authorization") == "Bearer rejected-secret" {
-            return ModelRelayStubResponse(status: 401)
-        }
+        expect(
+            request.value(forHTTPHeaderField: "Authorization") == "Bearer replacement-secret",
+            "编辑厂家测试使用候选新 Key"
+        )
         return ModelRelayStubResponse(
             status: 200,
-            chunks: [Data("{\"data\":[{\"id\":\"refresh-model\"}]}".utf8)]
+            chunks: [Data("{\"data\":[{\"id\":\"replacement-model\"}]}".utf8)]
         )
     }
-    let refreshResult: Result<[ModelRelayModelRoute], Error> = await withCheckedContinuation { continuation in
-        refreshService.fetchModels(providerID: refreshProvider.id) {
-            continuation.resume(returning: $0)
+    let replacementTest = await testConnection(
+        service,
+        providerID: secondProvider.id,
+        baseURL: "https://custom.example/v1",
+        secret: "replacement-secret"
+    )
+    if case .success(let replacement) = replacementTest {
+        do {
+            try service.updateProvider(id: secondProvider.id, name: "second-custom", using: replacement)
+            let updated = service.snapshot().providers.first { $0.id == secondProvider.id }
+            expect(updated?.baseURL == "https://custom.example/v1", "测试后的自定义地址可保存")
+            expect(updated?.keys.count == 1, "替换后仍只有一个上游 Key")
+            expect(updated?.models.first?.upstreamModelID == "replacement-model", "保存测试得到的模型快照")
+            if let updatedReference = updated?.upstreamKey {
+                expect(updatedReference.id != originalReference.id, "连接变更使用新的 Keychain UUID")
+                expect((try? keyStore.load(id: originalReference.id)) == nil, "连接切换删除旧 UUID")
+                expect((try? keyStore.load(id: updatedReference.id)) == "replacement-secret", "新 UUID 保存候选 Key")
+                currentReference = updatedReference
+            } else {
+                expect(false, "替换后厂家仍应持有唯一 Key")
+            }
+        } catch {
+            expect(false, "测试成功的厂家编辑应保存：\(error)")
         }
-    }
-    if case .failure(let error) = refreshResult {
-        expect(false, "至少一个健康 Key 时刷新应成功：\(error)")
-    }
-    expect(ModelRelayURLProtocol.requests.count == 2, "一次刷新会校验厂商下全部上游 Key")
-    do {
-        let route = try refreshService.router.resolve(alias: "refresh-model")
-        expect(
-            route.candidates.map(\.keyID) == [healthyReference.id],
-            "刷新时 401 Key 被永久隔离且不进入健康轮询"
-        )
-    } catch {
-        expect(false, "刷新后的健康模型应可路由：\(error)")
+    } else {
+        expect(false, "候选新地址与 Key 应测试成功")
     }
 
-    refreshService.router.recordFailure(keyID: healthyReference.id, statusCode: 401)
+    ModelRelayURLProtocol.reset { request in
+        expect(
+            request.value(forHTTPHeaderField: "Authorization") == "Bearer replacement-secret",
+            "只改地址时使用当前已存 Key 测试"
+        )
+        return ModelRelayStubResponse(
+            status: 200,
+            chunks: [Data("{\"data\":[{\"id\":\"url-only-model\"}]}".utf8)]
+        )
+    }
+    let urlOnlyTest = await testConnection(
+        service,
+        providerID: secondProvider.id,
+        baseURL: "https://url-only.example/v1",
+        secret: nil
+    )
+    if case .success(let connection) = urlOnlyTest {
+        let beforeURLChange = currentReference
+        do {
+            try service.updateProvider(id: secondProvider.id, name: "second-custom", using: connection)
+            let updated = service.snapshot().providers.first { $0.id == secondProvider.id }
+            if let updatedReference = updated?.upstreamKey {
+                expect(updatedReference.id != beforeURLChange.id, "只改 URL 也轮换 Key UUID")
+                expect((try? keyStore.load(id: beforeURLChange.id)) == nil, "只改 URL 后删除旧连接 UUID")
+                expect((try? keyStore.load(id: updatedReference.id)) == "replacement-secret", "只改 URL 时安全迁移原 Key")
+                currentReference = updatedReference
+            } else {
+                expect(false, "只改 URL 后仍应持有唯一 Key")
+            }
+        } catch {
+            expect(false, "通过测试的 URL 单独修改应保存：\(error)")
+        }
+    } else {
+        expect(false, "只改 URL 时当前 Key 应可通过连接测试")
+    }
+
+    do {
+        try service.updateProvider(id: secondProvider.id, name: "renamed-only", using: nil)
+        expect(
+            service.snapshot().providers.first { $0.id == secondProvider.id }?.name == "renamed-only",
+            "只改名称无需重新测试连接"
+        )
+    } catch {
+        expect(false, "只改名称应成功：\(error)")
+    }
+
     ModelRelayURLProtocol.reset { _ in
         ModelRelayStubResponse(
             status: 200,
-            chunks: [Data("{\"data\":[{\"id\":\"refresh-model\"}]}".utf8)]
+            chunks: [Data("{\"data\":[{\"id\":\"rollback-model\"}]}".utf8)]
         )
     }
-    let automaticResult: Result<[ModelRelayModelRoute], Error> = await withCheckedContinuation { continuation in
-        refreshService.fetchModels(
-            providerID: refreshProvider.id,
-            resetAuthenticationFailures: false
-        ) {
-            continuation.resume(returning: $0)
+    let replacementRollbackTest = await testConnection(
+        service,
+        providerID: secondProvider.id,
+        baseURL: "https://rollback.example/v1",
+        secret: "rollback-candidate"
+    )
+    configStore.saveError = ModelRelayError.configurationCorrupt
+    if case .success(let test) = replacementRollbackTest {
+        do {
+            try service.updateProvider(id: secondProvider.id, name: "should-not-save", using: test)
+            expect(false, "配置失败时替换 Key 应失败")
+        } catch {
+            expect(true, "替换 Key 配置失败被传播")
         }
     }
-    if case .success = automaticResult {
-        expect(false, "自动刷新不得恢复 401/403 Key")
-    } else {
-        expect(true, "自动刷新保留鉴权失败状态")
-    }
-    expect(ModelRelayURLProtocol.requests.isEmpty, "自动刷新跳过全部鉴权失败 Key")
-
-    let manualResult: Result<[ModelRelayModelRoute], Error> = await withCheckedContinuation { continuation in
-        refreshService.fetchModels(providerID: refreshProvider.id) {
-            continuation.resume(returning: $0)
-        }
-    }
-    if case .failure(let error) = manualResult {
-        expect(false, "手动刷新应重新校验鉴权失败 Key：\(error)")
-    }
-    expect(ModelRelayURLProtocol.requests.count == 2, "手动刷新重新校验厂商全部 Key")
+    expect(
+        (try? keyStore.load(id: currentReference.id)) == "replacement-secret",
+        "替换配置失败时恢复原 Keychain secret"
+    )
+    expect(!keyStore.snapshot.values.contains("rollback-candidate"), "替换配置失败不遗留候选 Keychain 项")
+    expect(
+        service.snapshot().providers.first { $0.id == secondProvider.id }?.name == "renamed-only",
+        "替换配置失败时保留原厂家元数据"
+    )
     do {
-        let route = try refreshService.router.resolve(alias: "refresh-model")
-        expect(route.candidates.count == 2, "手动刷新成功后恢复两个 Key 的健康轮询")
+        try service.deleteProvider(id: secondProvider.id)
+        expect(false, "配置失败时删除厂家应失败")
     } catch {
-        expect(false, "手动刷新恢复后模型应可路由：\(error)")
+        expect(true, "删除厂家配置失败被传播")
     }
+    expect(
+        service.snapshot().providers.contains { $0.id == secondProvider.id }
+            && (try? keyStore.load(id: currentReference.id)) == "replacement-secret",
+        "删除配置失败时恢复厂家及 Keychain"
+    )
+    configStore.saveError = nil
+    do {
+        try service.deleteProvider(id: secondProvider.id)
+        expect(!service.snapshot().providers.contains { $0.id == secondProvider.id }, "删除厂家移除元数据")
+        expect((try? keyStore.load(id: currentReference.id)) == nil, "删除厂家移除唯一 Keychain secret")
+    } catch {
+        expect(false, "恢复后厂家应可删除：\(error)")
+    }
+
+    let rollbackStore = MemoryModelRelayConfigStore()
+    let rollbackKeys = MemoryModelRelayKeyStore()
+    let rollbackService = ModelRelayService(
+        configStore: rollbackStore,
+        upstreamKeyStore: rollbackKeys,
+        localKeyVault: ModelRelayLocalKeyVault(iterations: 1),
+        upstreamClient: client
+    )
+    ModelRelayURLProtocol.reset { _ in
+        ModelRelayStubResponse(
+            status: 200,
+            chunks: [Data("{\"data\":[{\"id\":\"atomic-model\"}]}".utf8)]
+        )
+    }
+    let rollbackTest = await testConnection(
+        rollbackService,
+        baseURL: "https://atomic.example/v1",
+        secret: "atomic-secret"
+    )
+    rollbackStore.saveError = ModelRelayError.configurationCorrupt
+    if case .success(let connection) = rollbackTest {
+        do {
+            _ = try rollbackService.createProvider(name: "atomic", using: connection)
+            expect(false, "配置保存失败时厂家创建应失败")
+        } catch {
+            expect(true, "配置保存失败被原样传播")
+        }
+    }
+    expect(rollbackService.snapshot().providers.isEmpty, "配置失败不留下厂家元数据")
+    expect(rollbackKeys.snapshot.isEmpty, "配置失败回滚 Keychain 项")
+
+    let cleanupStore = MemoryModelRelayConfigStore()
+    let cleanupKeys = MemoryModelRelayKeyStore()
+    let cleanupService = ModelRelayService(
+        configStore: cleanupStore,
+        upstreamKeyStore: cleanupKeys,
+        localKeyVault: ModelRelayLocalKeyVault(iterations: 1),
+        upstreamClient: client
+    )
+    cleanupStore.failOnSaveNumber = 2
+    cleanupKeys.deleteError = ModelRelayError.keychain(errSecAuthFailed)
+    if case .success(let connection) = rollbackTest {
+        do {
+            _ = try cleanupService.createProvider(name: "cleanup-failure", using: connection)
+            expect(false, "配置与回滚都失败时不得报告成功")
+        } catch let error as ModelRelayError {
+            if case .persistenceRollback = error {
+                expect(true, "Keychain 清理失败返回明确持久化回滚错误")
+            } else {
+                expect(false, "Keychain 清理失败应返回 persistenceRollback")
+            }
+        } catch {
+            expect(false, "Keychain 清理失败应返回模型中转错误")
+        }
+    }
+    expect(cleanupStore.configuration.pendingUpstreamKeyDeletions.count == 1, "清理失败保留持久化删除日志")
+    expect(cleanupKeys.snapshot.values.contains("atomic-secret"), "清理失败的候选 Key 仍由删除日志跟踪")
+    cleanupKeys.deleteError = nil
+    _ = ModelRelayService(
+        configStore: cleanupStore,
+        upstreamKeyStore: cleanupKeys,
+        localKeyVault: ModelRelayLocalKeyVault(iterations: 1),
+        upstreamClient: client
+    )
+    expect(cleanupStore.configuration.pendingUpstreamKeyDeletions.isEmpty, "重启恢复会清空候选 Key 删除日志")
+    expect(cleanupKeys.snapshot.isEmpty, "重启恢复会删除已记录的候选 Key")
+
+    let deferredReference = ModelRelayUpstreamKeyReference(name: "默认")
+    let deferredProvider = ModelRelayProvider(
+        name: "deferred",
+        baseURL: "https://deferred.example/v1",
+        keys: [deferredReference],
+        models: [ModelRelayModelRoute(upstreamModelID: "before", alias: "before")]
+    )
+    let deferredStore = MemoryModelRelayConfigStore(
+        ModelRelayConfiguration(providers: [deferredProvider])
+    )
+    let deferredKeys = MemoryModelRelayKeyStore([deferredReference.id: "deferred-secret"])
+    let deferredService = ModelRelayService(
+        configStore: deferredStore,
+        upstreamKeyStore: deferredKeys,
+        localKeyVault: ModelRelayLocalKeyVault(iterations: 1),
+        upstreamClient: client
+    )
+    deferredKeys.deleteErrorIDs = [deferredReference.id]
+    do {
+        try deferredService.updateProvider(
+            id: deferredProvider.id,
+            name: deferredProvider.name,
+            using: ModelRelayProviderConnectionTest(
+                providerID: deferredProvider.id,
+                baseURL: "https://deferred-new.example/v1",
+                secret: "deferred-new-secret",
+                replacesKey: true,
+                modelIDs: ["after"]
+            )
+        )
+        expect(true, "旧 Key 暂时无法删除时新连接仍保持一致可用")
+    } catch {
+        expect(false, "有持久化删除日志时连接切换不应失败：\(error)")
+    }
+    let deferredUpdated = deferredService.snapshot().providers.first { $0.id == deferredProvider.id }
+    expect(deferredUpdated?.baseURL == "https://deferred-new.example/v1", "延迟清理不回滚已提交的新连接")
+    expect(
+        deferredStore.configuration.pendingUpstreamKeyDeletions == [deferredReference.id],
+        "旧 Key 删除失败进入持久化清理日志"
+    )
+    deferredKeys.deleteErrorIDs = []
+    _ = ModelRelayService(
+        configStore: deferredStore,
+        upstreamKeyStore: deferredKeys,
+        localKeyVault: ModelRelayLocalKeyVault(iterations: 1),
+        upstreamClient: client
+    )
+    expect(deferredStore.configuration.pendingUpstreamKeyDeletions.isEmpty, "重启重试后移除旧 Key 清理日志")
+    expect(deferredKeys.snapshot[deferredReference.id] == nil, "重启重试删除旧连接 Key")
+    expect(
+        deferredUpdated?.upstreamKey.flatMap { deferredKeys.snapshot[$0.id] } == "deferred-new-secret",
+        "重启清理不影响当前连接 Key"
+    )
+
+    let deniedConfig = MemoryModelRelayConfigStore()
+    let deniedService = ModelRelayService(
+        configStore: deniedConfig,
+        upstreamKeyStore: DeniedModelRelayKeyStore(),
+        localKeyVault: ModelRelayLocalKeyVault(iterations: 1),
+        upstreamClient: client
+    )
+    let deniedTest = await testConnection(
+        deniedService,
+        baseURL: "https://denied.example/v1",
+        secret: "denied-secret"
+    )
+    if case .success(let connection) = deniedTest {
+        do {
+            _ = try deniedService.createProvider(name: "denied", using: connection)
+            expect(false, "Keychain 拒绝时厂家不得保存")
+        } catch {
+            if let relayError = error as? ModelRelayError, case .keychain = relayError {
+                expect(true, "Keychain 拒绝原样传播")
+            } else {
+                expect(false, "Keychain 拒绝应返回钥匙串错误")
+            }
+        }
+    }
+    expect(deniedConfig.configuration.providers.isEmpty, "Keychain 拒绝时不写厂家配置")
+
+    let legacyA = ModelRelayUpstreamKeyReference(name: "A")
+    let legacyB = ModelRelayUpstreamKeyReference(name: "B")
+    let legacyProvider = ModelRelayProvider(
+        name: "legacy",
+        baseURL: "https://legacy.example/v1",
+        keys: [legacyA, legacyB],
+        models: [ModelRelayModelRoute(upstreamModelID: "legacy-model", alias: "legacy-model")]
+    )
+    let legacyStore = MemoryModelRelayConfigStore(
+        ModelRelayConfiguration(providers: [legacyProvider])
+    )
+    let legacyService = ModelRelayService(
+        configStore: legacyStore,
+        upstreamKeyStore: MemoryModelRelayKeyStore([
+            legacyA.id: "legacy-a",
+            legacyB.id: "legacy-b"
+        ]),
+        localKeyVault: ModelRelayLocalKeyVault(iterations: 1),
+        upstreamClient: client
+    )
+    let migrated = legacyService.snapshot().providers
+    expect(migrated.count == 2, "历史多 Key 厂家无损拆成多个实体")
+    expect(migrated.allSatisfy { $0.keys.count == 1 }, "迁移后每个厂家只有一个 Key")
+    expect(
+        Set(migrated.compactMap { $0.upstreamKey?.id }) == Set([legacyA.id, legacyB.id]),
+        "迁移保留全部 Keychain UUID"
+    )
+    expect(Set(migrated.map { $0.name.lowercased() }).count == 2, "迁移生成唯一厂家名称")
+    expect(migrated.allSatisfy { $0.models.map(\.upstreamModelID) == ["legacy-model"] }, "迁移后每个厂家立即保留模型目录")
+    expect(
+        Set(migrated.flatMap(\.models).map { $0.alias.lowercased() }).count == 2,
+        "迁移为拆分厂家生成全局唯一模型别名"
+    )
+    expect(legacyStore.configuration.providers == migrated, "迁移结果原子写回配置")
 
     let corruptStore = CorruptModelRelayConfigStore()
     let unavailableService = ModelRelayService(
@@ -485,6 +830,76 @@ func testModelRelayValidatedKeyControlPlane() async {
         expect(true, "配置损坏时拒绝改端口")
     }
     expect(corruptStore.saveCount == 0, "配置损坏时不写回默认配置")
+}
+
+func testModelRelayStaleRefreshCannotOverwriteNewConnection() async {
+    let oldReference = ModelRelayUpstreamKeyReference(name: "默认")
+    let provider = ModelRelayProvider(
+        name: "stale-refresh",
+        baseURL: "https://old-refresh.example/v1",
+        keys: [oldReference],
+        models: [ModelRelayModelRoute(upstreamModelID: "old-model", alias: "old-model")]
+    )
+    let keyStore = MemoryModelRelayKeyStore([oldReference.id: "old-secret"])
+    let service = ModelRelayService(
+        configStore: MemoryModelRelayConfigStore(
+            ModelRelayConfiguration(providers: [provider])
+        ),
+        upstreamKeyStore: keyStore,
+        localKeyVault: ModelRelayLocalKeyVault(iterations: 1),
+        upstreamClient: ModelRelayUpstreamClient(
+            sessionConfiguration: modelRelayTestSessionConfiguration()
+        )
+    )
+    let started = DispatchSemaphore(value: 0)
+    let release = DispatchSemaphore(value: 0)
+    ModelRelayURLProtocol.reset { _ in
+        started.signal()
+        _ = release.wait(timeout: .now() + 2)
+        return ModelRelayStubResponse(
+            status: 200,
+            chunks: [Data("{\"data\":[{\"id\":\"stale-model\"}]}".utf8)]
+        )
+    }
+    let refresh = Task {
+        await withCheckedContinuation { continuation in
+            service.fetchModels(providerID: provider.id) {
+                continuation.resume(returning: $0)
+            }
+        }
+    }
+    expect(waitForModelRelaySignal(started), "旧连接模型刷新已发出")
+
+    do {
+        try service.updateProvider(
+            id: provider.id,
+            name: provider.name,
+            using: ModelRelayProviderConnectionTest(
+                providerID: provider.id,
+                baseURL: "https://new-refresh.example/v1",
+                secret: "new-secret",
+                replacesKey: true,
+                modelIDs: ["fresh-model"]
+            )
+        )
+    } catch {
+        release.signal()
+        expect(false, "新连接应在旧刷新返回前保存：\(error)")
+        _ = await refresh.value
+        return
+    }
+    release.signal()
+    let refreshResult = await refresh.value
+    if case .failure(let error) = refreshResult {
+        expect(error as? ModelRelayError == .providerNotFound, "过期刷新被连接版本校验拒绝")
+    } else {
+        expect(false, "过期刷新不得覆盖新连接模型")
+    }
+    let updated = service.snapshot().providers.first { $0.id == provider.id }
+    expect(updated?.baseURL == "https://new-refresh.example/v1", "过期刷新后仍保留新连接地址")
+    expect(updated?.models.map(\.upstreamModelID) == ["fresh-model"], "过期刷新不能覆盖新模型目录")
+    expect(updated?.upstreamKey?.id != oldReference.id, "连接版本通过新 Key UUID 隔离")
+    expect(keyStore.snapshot[oldReference.id] == nil, "新连接提交后旧 Key 已删除")
 }
 
 func testModelRelayUpstreamProxy() async {
@@ -554,11 +969,11 @@ func testModelRelayUpstreamProxy() async {
             router: router
         )
         let text = String(data: output, encoding: .utf8) ?? ""
-        expect(text.contains("HTTP/1.1 200"), "响应前 5xx 故障转移到下一 Key")
-        expect(text.contains("{\"ok\":true}"), "普通 JSON 响应透传")
-        expect(ModelRelayURLProtocol.requests.count == 2, "响应前故障恰好尝试两个 Key")
+        expect(text.contains("HTTP/1.1 502"), "唯一上游 5xx 时明确返回 502")
+        expect(!text.contains("{\"ok\":true}"), "唯一上游失败时不伪装成功")
+        expect(ModelRelayURLProtocol.requests.count == 1, "代理不会尝试第二个 Key")
     } catch {
-        expect(false, "普通代理与故障转移应成功：\(error)")
+        expect(false, "唯一上游 5xx 应生成明确失败响应：\(error)")
     }
 
     for status in [401, 403, 429] {
@@ -592,12 +1007,12 @@ func testModelRelayUpstreamProxy() async {
                 router: router
             )
             expect(
-                String(data: output, encoding: .utf8)?.contains("HTTP/1.1 200") == true
-                    && ModelRelayURLProtocol.requests.count == 2,
-                "响应前 HTTP \(status) 会故障转移"
+                String(data: output, encoding: .utf8)?.contains("HTTP/1.1 502") == true
+                    && ModelRelayURLProtocol.requests.count == 1,
+                "唯一上游 HTTP \(status) 明确失败且不切 Key"
             )
         } catch {
-            expect(false, "HTTP \(status) 故障转移应成功：\(error)")
+            expect(false, "HTTP \(status) 应生成明确失败响应：\(error)")
         }
     }
 
@@ -631,12 +1046,12 @@ func testModelRelayUpstreamProxy() async {
             router: router
         )
         expect(
-            String(data: output, encoding: .utf8)?.contains("HTTP/1.1 200") == true
-                && ModelRelayURLProtocol.requests.count == 2,
-            "响应前连接失败会故障转移"
+            String(data: output, encoding: .utf8)?.contains("HTTP/1.1 502") == true
+                && ModelRelayURLProtocol.requests.count == 1,
+            "唯一上游连接失败明确返回 502 且不切 Key"
         )
     } catch {
-        expect(false, "连接失败故障转移应成功：\(error)")
+        expect(false, "连接失败应生成明确失败响应：\(error)")
     }
 
     ModelRelayURLProtocol.reset { _ in

@@ -8,17 +8,40 @@ struct ModelRelayConfiguration: Codable, Equatable {
     var port: UInt16
     var providers: [ModelRelayProvider]
     var localKeys: [ModelRelayLocalKeyRecord]
+    var pendingUpstreamKeyDeletions: [UUID]
 
     init(
         version: Int = Self.currentVersion,
         port: UInt16 = Self.defaultPort,
         providers: [ModelRelayProvider] = [],
-        localKeys: [ModelRelayLocalKeyRecord] = []
+        localKeys: [ModelRelayLocalKeyRecord] = [],
+        pendingUpstreamKeyDeletions: [UUID] = []
     ) {
         self.version = version
         self.port = port
         self.providers = providers
         self.localKeys = localKeys
+        self.pendingUpstreamKeyDeletions = pendingUpstreamKeyDeletions
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case version
+        case port
+        case providers
+        case localKeys
+        case pendingUpstreamKeyDeletions
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        version = try values.decode(Int.self, forKey: .version)
+        port = try values.decode(UInt16.self, forKey: .port)
+        providers = try values.decode([ModelRelayProvider].self, forKey: .providers)
+        localKeys = try values.decode([ModelRelayLocalKeyRecord].self, forKey: .localKeys)
+        pendingUpstreamKeyDeletions = try values.decodeIfPresent(
+            [UUID].self,
+            forKey: .pendingUpstreamKeyDeletions
+        ) ?? []
     }
 }
 
@@ -41,6 +64,10 @@ struct ModelRelayProvider: Codable, Equatable, Identifiable {
         self.baseURL = baseURL
         self.keys = keys
         self.models = models
+    }
+
+    var upstreamKey: ModelRelayUpstreamKeyReference? {
+        keys.first
     }
 }
 
@@ -110,6 +137,14 @@ struct ModelRelayConnectionInfo: Equatable {
     }
 }
 
+struct ModelRelayProviderConnectionTest {
+    let providerID: UUID?
+    let baseURL: String
+    let secret: String
+    let replacesKey: Bool
+    let modelIDs: [String]
+}
+
 enum ModelRelayRunState: Equatable {
     case stopped
     case starting
@@ -135,6 +170,9 @@ enum ModelRelayError: Error, Equatable, LocalizedError {
     case duplicateProviderName
     case duplicateKeyName
     case duplicateAlias
+    case providerAlreadyHasKey
+    case providerConnectionNotTested
+    case persistenceRollback(String)
     case invalidPort
     case invalidBaseURL
     case insecureRemoteBaseURL
@@ -163,6 +201,12 @@ enum ModelRelayError: Error, Equatable, LocalizedError {
             return "Key 名称已存在。"
         case .duplicateAlias:
             return "模型别名已存在。"
+        case .providerAlreadyHasKey:
+            return "每个厂家只能配置一个上游 Key。"
+        case .providerConnectionNotTested:
+            return "请先使用当前地址和 Key 测试连接。"
+        case .persistenceRollback(let message):
+            return "持久化回滚失败：\(message)"
         case .invalidPort:
             return "端口必须是 1024…65535。"
         case .invalidBaseURL:

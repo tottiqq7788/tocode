@@ -6244,6 +6244,7 @@ struct TestRunnerMain {
         testModelRelayHTTPParser()
         testModelRelayRouterAndControlPlane()
         await testModelRelayValidatedKeyControlPlane()
+        await testModelRelayStaleRefreshCannotOverwriteNewConnection()
         await testModelRelayUpstreamProxy()
         await testModelRelayHTTPServerRuntime()
         await testModelRelayPortRollback()

@@ -2,19 +2,81 @@ import AppKit
 
 @MainActor
 enum ModelRelayPrompts {
-    struct ProviderPreset: Equatable {
+    struct ProviderPreset: Equatable, Sendable {
         let title: String
         let baseURL: String
     }
 
-    struct ProviderInput {
-        let name: String
-        let baseURL: String
+    struct ProviderDraft: Equatable {
+        let providerID: UUID?
+        let originalBaseURL: String?
+        let hasStoredKey: Bool
+        var name: String
+        var presetIndex: Int?
+        var customBaseURL: String
+        var secret: String
+
+        func resolvedBaseURL() throws -> String {
+            let raw: String
+            if let presetIndex,
+               ModelRelayPrompts.providerPresets.indices.contains(presetIndex) {
+                raw = ModelRelayPrompts.providerPresets[presetIndex].baseURL
+            } else {
+                raw = customBaseURL
+            }
+            return try ModelRelayValidation.normalizedBaseURL(raw)
+        }
+
+        func requiresConnectionTest() -> Bool {
+            guard let resolved = try? resolvedBaseURL() else { return true }
+            return providerID == nil
+                || !hasStoredKey
+                || !secret.isEmpty
+                || resolved != originalBaseURL
+        }
+
+        func isReadyToTest() -> Bool {
+            guard (try? resolvedBaseURL()) != nil else { return false }
+            if providerID == nil || !hasStoredKey {
+                return Self.isValidSecret(secret)
+            }
+            return secret.isEmpty || Self.isValidSecret(secret)
+        }
+
+        func canSave(using test: ModelRelayProviderConnectionTest?) -> Bool {
+            guard (try? ModelRelayValidation.normalizedName(name)) != nil else {
+                return false
+            }
+            guard requiresConnectionTest() else { return true }
+            guard let test,
+                  test.providerID == providerID,
+                  test.baseURL == (try? resolvedBaseURL()) else {
+                return false
+            }
+            if secret.isEmpty {
+                return !test.replacesKey && providerID != nil && hasStoredKey
+            }
+            return test.replacesKey && test.secret == secret
+        }
+
+        private static func isValidSecret(_ value: String) -> Bool {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return !trimmed.isEmpty && trimmed == value
+        }
     }
 
-    struct UpstreamKeyInput {
-        let name: String
-        let secret: String
+    enum ProviderFormAction {
+        case test(ProviderDraft)
+        case save(ProviderDraft)
+        case cancel
+    }
+
+    enum ProviderManagementAction {
+        case edit
+        case refresh
+        case models
+        case delete
+        case cancel
     }
 
     struct LocalKeyInput {
@@ -27,7 +89,7 @@ enum ModelRelayPrompts {
         case delete
     }
 
-    static let providerPresets: [ProviderPreset] = [
+    nonisolated static let providerPresets: [ProviderPreset] = [
         ProviderPreset(title: "OpenAI", baseURL: "https://api.openai.com/v1"),
         ProviderPreset(title: "DeepSeek（深度求索）", baseURL: "https://api.deepseek.com/v1"),
         ProviderPreset(title: "Kimi（月之暗面）", baseURL: "https://api.moonshot.cn/v1"),
@@ -43,76 +105,160 @@ enum ModelRelayPrompts {
         ProviderPreset(title: "Mistral AI", baseURL: "https://api.mistral.ai/v1")
     ]
 
-    static func provider(existing: ModelRelayProvider? = nil) -> ProviderInput? {
-        let name = NSTextField(string: existing?.name ?? "")
-        name.placeholderString = "唯一厂商名称"
-        let choices = providerChoices(existingBaseURL: existing?.baseURL)
+    static func initialProviderDraft(existing: ModelRelayProvider? = nil) -> ProviderDraft {
+        let presetIndex = existing.flatMap { provider in
+            providerPresets.firstIndex { $0.baseURL == provider.baseURL }
+        }
+        return ProviderDraft(
+            providerID: existing?.id,
+            originalBaseURL: existing?.baseURL,
+            hasStoredKey: existing?.upstreamKey != nil,
+            name: existing?.name ?? "",
+            presetIndex: existing == nil ? 0 : presetIndex,
+            customBaseURL: existing?.baseURL ?? "https://",
+            secret: ""
+        )
+    }
+
+    static func providerForm(
+        existing: ModelRelayProvider?,
+        draft initialDraft: ProviderDraft? = nil,
+        tested: ModelRelayProviderConnectionTest? = nil,
+        status: String? = nil
+    ) -> ProviderFormAction {
+        let draft = initialDraft ?? initialProviderDraft(existing: existing)
+        let name = NSTextField(string: draft.name)
+        name.placeholderString = "唯一厂家名称"
         let provider = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 330, height: 26))
-        provider.addItems(withTitles: choices.map(\.title))
-        if let existing,
-           let selected = choices.firstIndex(where: { $0.baseURL == existing.baseURL }) {
-            provider.selectItem(at: selected)
-        }
-        let alert = formAlert(
-            title: existing == nil ? "新增模型厂商" : "编辑模型厂商",
-            information: "选择 OpenAI-compatible 上游并填写唯一名称，Base URL 会自动配置。",
-            controls: [("厂商", provider), ("名称", name)],
-            primary: existing == nil ? "新增" : "保存"
+        provider.addItems(withTitles: providerPresets.map(\.title) + ["自定义…"])
+        provider.selectItem(at: draft.presetIndex ?? providerPresets.count)
+        let url = NSTextField(string: draft.customBaseURL)
+        url.placeholderString = "https://api.example.com/v1"
+        let secret = ModelRelaySecureTextField(
+            frame: NSRect(x: 0, y: 0, width: 330, height: 24)
         )
-        while alert.runModalFocusingFirstTextField() == .alertFirstButtonReturn {
-            do {
-                let normalizedName = try ModelRelayValidation.normalizedName(name.stringValue)
-                guard choices.indices.contains(provider.indexOfSelectedItem) else {
-                    throw ModelRelayError.invalidBaseURL
-                }
-                let normalizedURL = try ModelRelayValidation.normalizedBaseURL(
-                    choices[provider.indexOfSelectedItem].baseURL
-                )
-                return ProviderInput(name: normalizedName, baseURL: normalizedURL)
-            } catch {
-                alert.informativeText = error.localizedDescription
-                alert.window.makeFirstResponder(name)
-            }
+        secret.stringValue = draft.secret
+        secret.placeholderString = existing == nil ? "上游 API Key" : "留空则保留现有 Key"
+        let alert = NSAlert()
+        alert.messageText = existing == nil ? "新增厂家" : "编辑厂家"
+        alert.informativeText = status ?? "选择预设或自定义地址，连接测试通过后才能保存。"
+        alert.addButton(withTitle: "保存")
+        alert.addButton(withTitle: "测试连接")
+        alert.addButton(withTitle: "取消")
+        alert.accessoryView = formAccessory(controls: [
+            ("名称", name),
+            ("厂商", provider),
+            ("自定义 URL", url),
+            ("API Key", secret)
+        ])
+        guard let accessory = alert.accessoryView as? NSStackView,
+              accessory.arrangedSubviews.count == 4 else {
+            return .cancel
         }
-        return nil
+        let bridge = ModelRelayProviderFormBridge(
+            alert: alert,
+            accessory: accessory,
+            name: name,
+            provider: provider,
+            customURL: url,
+            secret: secret,
+            initial: draft,
+            tested: tested,
+            presetCount: providerPresets.count
+        )
+        bridge.refresh()
+        let response = withExtendedLifetime(bridge) {
+            alert.runModalFocusingFirstTextField()
+        }
+        let result = bridge.makeDraft()
+        bridge.detach()
+        secret.stringValue = ""
+        switch response {
+        case .alertFirstButtonReturn:
+            return result.canSave(using: tested) ? .save(result) : .cancel
+        case .alertSecondButtonReturn:
+            return result.isReadyToTest() ? .test(result) : .cancel
+        default:
+            return .cancel
+        }
     }
 
-    static func providerChoices(existingBaseURL: String?) -> [ProviderPreset] {
-        guard let existingBaseURL,
-              !providerPresets.contains(where: { $0.baseURL == existingBaseURL }) else {
-            return providerPresets
+    static func providerManagementAction(
+        _ provider: ModelRelayProvider
+    ) -> ProviderManagementAction {
+        let source = providerPresets.first(where: { $0.baseURL == provider.baseURL })?.title
+            ?? "自定义"
+        let alert = NSAlert()
+        alert.messageText = provider.name
+        alert.informativeText = """
+        厂商：\(source)
+        Base URL：\(provider.baseURL)
+        Key：\(provider.upstreamKey == nil ? "未配置" : "已配置")
+        模型：\(provider.models.count)
+        """
+        alert.addButton(withTitle: "编辑…")
+        alert.addButton(withTitle: "测试并刷新")
+        alert.addButton(withTitle: "模型别名…")
+        alert.addButton(withTitle: "删除…")
+        alert.addButton(withTitle: "关闭")
+        alert.buttons[1].isEnabled = provider.upstreamKey != nil
+        alert.buttons[2].isEnabled = !provider.models.isEmpty
+        NSApp.activate(ignoringOtherApps: true)
+        let response = alert.runModal()
+        switch response.rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue {
+        case 0: return .edit
+        case 1: return .refresh
+        case 2: return .models
+        case 3: return .delete
+        default: return .cancel
         }
-        return providerPresets + [
-            ProviderPreset(title: "现有自定义地址（保留）", baseURL: existingBaseURL)
-        ]
     }
 
-    static func upstreamKey(existingName: String? = nil) -> UpstreamKeyInput? {
-        let name = NSTextField(string: existingName ?? "")
-        name.placeholderString = "唯一显示名称"
-        let secret = ModelRelaySecureTextField(frame: NSRect(x: 0, y: 0, width: 330, height: 24))
-        secret.placeholderString = existingName == nil ? "上游 API Key" : "输入新的上游 API Key"
-        let alert = formAlert(
-            title: existingName == nil ? "新增上游 Key" : "替换上游 Key",
-            information: "保存前会请求 /v1/models 校验。明文只写入 macOS 钥匙串，之后不提供查看。",
-            fields: [("名称", name), ("API Key", secret)],
-            primary: existingName == nil ? "校验并新增" : "校验并替换"
-        )
-        defer { secret.stringValue = "" }
-        while alert.runModalFocusingFirstTextField() == .alertFirstButtonReturn {
-            do {
-                let normalizedName = try ModelRelayValidation.normalizedName(name.stringValue)
-                guard !secret.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                      secret.stringValue == secret.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) else {
-                    throw ModelRelayError.keyNotFound
-                }
-                return UpstreamKeyInput(name: normalizedName, secret: secret.stringValue)
-            } catch {
-                alert.informativeText = error.localizedDescription
-                alert.window.makeFirstResponder(name)
-            }
+    static func modelRoute(in provider: ModelRelayProvider) -> ModelRelayModelRoute? {
+        guard !provider.models.isEmpty else { return nil }
+        let routes = provider.models.sorted {
+            $0.alias.localizedCaseInsensitiveCompare($1.alias) == .orderedAscending
         }
-        return nil
+        let selector = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 360, height: 26))
+        selector.addItems(withTitles: routes.map(\.alias))
+        let alert = NSAlert()
+        alert.messageText = "模型别名"
+        alert.informativeText = "选择模型后修改它的本地唯一别名。"
+        alert.addButton(withTitle: "修改…")
+        alert.addButton(withTitle: "取消")
+        alert.accessoryView = selector
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn,
+              routes.indices.contains(selector.indexOfSelectedItem) else {
+            return nil
+        }
+        return routes[selector.indexOfSelectedItem]
+    }
+
+    static func providerMenuItem(
+        _ provider: ModelRelayProvider,
+        busy: Bool,
+        target: AnyObject?,
+        action: Selector
+    ) -> NSMenuItem {
+        let item = NSMenuItem(title: provider.name, action: action, keyEquivalent: "")
+        item.target = target
+        item.representedObject = provider.id.uuidString
+        item.image = NSImage(systemSymbolName: "server.rack", accessibilityDescription: nil)
+        item.isEnabled = !busy
+        return item
+    }
+
+    static func localKeyMenuItem(
+        _ key: ModelRelayLocalKeyRecord,
+        target: AnyObject?,
+        action: Selector
+    ) -> NSMenuItem {
+        let item = NSMenuItem(title: key.name, action: action, keyEquivalent: "")
+        item.target = target
+        item.representedObject = key.id.uuidString
+        item.image = NSImage(systemSymbolName: "key.fill", accessibilityDescription: nil)
+        return item
     }
 
     static func localKey() -> LocalKeyInput? {
@@ -333,6 +479,94 @@ enum ModelRelayPrompts {
         form.frame = NSRect(x: 0, y: 0, width: totalWidth, height: totalHeight)
         form.layoutSubtreeIfNeeded()
         return form
+    }
+}
+
+@MainActor
+private final class ModelRelayProviderFormBridge: NSObject, NSTextFieldDelegate {
+    private let alert: NSAlert
+    private let accessory: NSStackView
+    private let name: NSTextField
+    private let provider: NSPopUpButton
+    private let customURL: NSTextField
+    private let secret: NSSecureTextField
+    private let initial: ModelRelayPrompts.ProviderDraft
+    private let tested: ModelRelayProviderConnectionTest?
+    private let presetCount: Int
+
+    init(
+        alert: NSAlert,
+        accessory: NSStackView,
+        name: NSTextField,
+        provider: NSPopUpButton,
+        customURL: NSTextField,
+        secret: NSSecureTextField,
+        initial: ModelRelayPrompts.ProviderDraft,
+        tested: ModelRelayProviderConnectionTest?,
+        presetCount: Int
+    ) {
+        self.alert = alert
+        self.accessory = accessory
+        self.name = name
+        self.provider = provider
+        self.customURL = customURL
+        self.secret = secret
+        self.initial = initial
+        self.tested = tested
+        self.presetCount = presetCount
+        super.init()
+        name.delegate = self
+        customURL.delegate = self
+        secret.delegate = self
+        provider.target = self
+        provider.action = #selector(selectionChanged(_:))
+    }
+
+    func makeDraft() -> ModelRelayPrompts.ProviderDraft {
+        ModelRelayPrompts.ProviderDraft(
+            providerID: initial.providerID,
+            originalBaseURL: initial.originalBaseURL,
+            hasStoredKey: initial.hasStoredKey,
+            name: name.stringValue,
+            presetIndex: provider.indexOfSelectedItem < presetCount
+                ? provider.indexOfSelectedItem
+                : nil,
+            customBaseURL: customURL.stringValue,
+            secret: secret.stringValue
+        )
+    }
+
+    func refresh() {
+        let isCustom = provider.indexOfSelectedItem == presetCount
+        customURL.isEnabled = isCustom
+        accessory.arrangedSubviews[2].isHidden = !isCustom
+        var frame = accessory.frame
+        frame.size.height = isCustom ? 136 : 100
+        accessory.frame = frame
+        let draft = makeDraft()
+        let validName = (try? ModelRelayValidation.normalizedName(draft.name)) != nil
+        alert.buttons[0].isEnabled = draft.canSave(using: tested)
+        alert.buttons[1].isEnabled = validName && draft.isReadyToTest()
+        alert.buttons[1].title = draft.canSave(using: tested) && draft.requiresConnectionTest()
+            ? "重新测试"
+            : "测试连接"
+        alert.layout()
+    }
+
+    func detach() {
+        name.delegate = nil
+        customURL.delegate = nil
+        secret.delegate = nil
+        provider.target = nil
+        provider.action = nil
+    }
+
+    func controlTextDidChange(_ obj: Notification) {
+        refresh()
+    }
+
+    @objc private func selectionChanged(_ sender: NSPopUpButton) {
+        refresh()
     }
 }
 

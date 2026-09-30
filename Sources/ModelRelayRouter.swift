@@ -29,7 +29,6 @@ final class ModelRelayRouter: @unchecked Sendable {
     private let now: () -> Date
     private var configuration: ModelRelayConfiguration
     private var health: [UUID: KeyHealth] = [:]
-    private var cursors: [UUID: Int] = [:]
 
     init(
         configuration: ModelRelayConfiguration,
@@ -48,9 +47,6 @@ final class ModelRelayRouter: @unchecked Sendable {
         self.configuration = configuration
         let validKeyIDs = Set(configuration.providers.flatMap(\.keys).map(\.id))
         health = health.filter { validKeyIDs.contains($0.key) }
-        cursors = cursors.filter { providerID, _ in
-            configuration.providers.contains(where: { $0.id == providerID })
-        }
         lock.unlock()
     }
 
@@ -68,15 +64,15 @@ final class ModelRelayRouter: @unchecked Sendable {
         let healthSnapshot = health
         lock.unlock()
         let aliases = providers.flatMap { provider -> [String] in
-            let hasAvailableKey = provider.keys.contains { reference in
-                guard healthSnapshot[reference.id, default: KeyHealth()].isAvailable(at: date) else {
-                    return false
-                }
-                do {
-                    return try keyStore.load(id: reference.id) != nil
-                } catch {
-                    return false
-                }
+            guard let reference = provider.upstreamKey,
+                  healthSnapshot[reference.id, default: KeyHealth()].isAvailable(at: date) else {
+                return []
+            }
+            let hasAvailableKey: Bool
+            do {
+                hasAvailableKey = try keyStore.load(id: reference.id) != nil
+            } catch {
+                hasAvailableKey = false
             }
             return hasAvailableKey ? provider.models.map(\.alias) : []
         }
@@ -91,37 +87,28 @@ final class ModelRelayRouter: @unchecked Sendable {
             lock.unlock()
             throw ModelRelayError.modelNotFound
         }
-        let date = now()
-        let available = provider.keys.filter {
-            health[$0.id, default: KeyHealth()].isAvailable(at: date)
-        }
-        let start = available.isEmpty ? 0 : (cursors[provider.id, default: 0] % available.count)
-        if !available.isEmpty {
-            cursors[provider.id] = (start + 1) % available.count
-        }
-        let ordered = available.isEmpty
-            ? []
-            : Array(available[start...]) + Array(available[..<start])
+        let reference = provider.upstreamKey
+        let isAvailable = reference.map {
+            health[$0.id, default: KeyHealth()].isAvailable(at: now())
+        } ?? false
         lock.unlock()
 
-        var candidates: [ModelRelayUpstreamCandidate] = []
-        for reference in ordered {
-            guard let secret = try keyStore.load(id: reference.id) else {
-                recordFailure(keyID: reference.id, statusCode: nil)
-                continue
-            }
-            candidates.append(ModelRelayUpstreamCandidate(
+        guard let reference, isAvailable else {
+            throw ModelRelayError.noHealthyUpstream
+        }
+        guard let secret = try keyStore.load(id: reference.id) else {
+            recordFailure(keyID: reference.id, statusCode: nil)
+            throw ModelRelayError.noHealthyUpstream
+        }
+        return ModelRelayResolvedRoute(alias: alias, candidates: [
+            ModelRelayUpstreamCandidate(
                 providerID: provider.id,
                 keyID: reference.id,
                 baseURL: provider.baseURL,
                 upstreamModelID: model.upstreamModelID,
                 secret: secret
-            ))
-        }
-        guard !candidates.isEmpty else {
-            throw ModelRelayError.noHealthyUpstream
-        }
-        return ModelRelayResolvedRoute(alias: alias, candidates: candidates)
+            )
+        ])
     }
 
     func recordSuccess(keyID: UUID) {
