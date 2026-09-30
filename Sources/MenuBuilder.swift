@@ -15,7 +15,7 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
 
     private var entryItems: [EntryItem] = []
     private var bottomItems: [BottomItem] = []
-    /// 仅根菜单：在「历史」与「新增」之间插入「根目录」配置夹。
+    /// 仅根菜单：在「历史」与「新增」之间插入「配置」夹。
     var makeRootConfigItem: (() -> NSMenuItem)?
 
     private var multiCopyPaths: [String] = []

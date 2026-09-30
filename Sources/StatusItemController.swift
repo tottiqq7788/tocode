@@ -165,7 +165,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         )
     }
 
-    /// 左键：弹出目录树（始终从当前根第一层）；根菜单含「历史」「根目录」与「新增」。
+    /// 左键：弹出目录树（始终从当前根第一层）；根菜单含「历史」「配置」与「新增」。
     /// Shift 连续多选尽量保持同一菜单；若系统仍关闭则立刻再弹同一菜单。
     private func showDirectoryMenu() {
         let menu = NSMenu()
@@ -195,8 +195,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     private func makeRootConfigMenuItem() -> NSMenuItem {
-        let item = NSMenuItem(title: "根目录", action: nil, keyEquivalent: "")
-        item.image = NSImage(systemSymbolName: "folder.badge.gearshape", accessibilityDescription: "根目录")
+        let item = NSMenuItem(title: "配置", action: nil, keyEquivalent: "")
+        item.image = NSImage(systemSymbolName: "folder.badge.gearshape", accessibilityDescription: "配置")
         let submenu = NSMenu()
         submenu.autoenablesItems = false
 
@@ -466,7 +466,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
 
         // 微信
-        let weChatItem = menu.addItem(withTitle: "微信关联", action: nil, keyEquivalent: "")
+        let weChatItem = menu.addItem(withTitle: "微信", action: nil, keyEquivalent: "")
         weChatItem.image = NSImage(systemSymbolName: "link", accessibilityDescription: nil)
         let weChatMenu = NSMenu()
         weChatMenu.autoenablesItems = false

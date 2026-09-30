@@ -324,9 +324,9 @@ enum KeyboardMappingActionGroup: String, CaseIterable, Equatable {
         case .finder:
             return "访达"
         case .directory:
-            return "根目录"
+            return "配置"
         case .wechat:
-            return "微信关联"
+            return "微信"
         case .input:
             return "输入"
         case .tools:
