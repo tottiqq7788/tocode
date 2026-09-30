@@ -7,6 +7,8 @@ swiftc Tests/TestRunner.swift \
   Tests/WeChatTestSupport.swift \
   Tests/TocodeCommandTestSupport.swift \
   Tests/AnkerCredentialTests.swift \
+  Tests/ModelRelayTestSupport.swift \
+  Tests/ModelRelayTests.swift \
   Sources/FileSystemService.swift \
   Sources/ClipboardService.swift \
   Sources/RootPathStore.swift \
@@ -66,6 +68,15 @@ swiftc Tests/TestRunner.swift \
   Sources/TocodeSocketTransport.swift \
   Sources/TocodeIPCServer.swift \
   Sources/TocodeCLIRunner.swift \
+  Sources/ModelRelayModels.swift \
+  Sources/ModelRelayConfigStore.swift \
+  Sources/ModelRelayKeychainStore.swift \
+  Sources/ModelRelayLocalKeyVault.swift \
+  Sources/ModelRelayHTTPParser.swift \
+  Sources/ModelRelayRouter.swift \
+  Sources/ModelRelayUpstreamClient.swift \
+  Sources/ModelRelayHTTPServer.swift \
+  Sources/ModelRelayService.swift \
   -o build/tests \
   -framework AppKit \
   -framework ApplicationServices \

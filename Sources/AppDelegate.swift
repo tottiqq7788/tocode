@@ -21,6 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var controller: StatusItemController?
     private var commandExecutor: TocodeCommandExecutor?
     private var ipcServer: TocodeIPCServer?
+    private var modelRelay: ModelRelayService?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         TocodePreferences.migrateIfNeeded()
@@ -65,6 +66,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSLog("Tocode IPC server 启动失败: %@", error.localizedDescription)
         }
 
+        let modelRelay = ModelRelayService()
+        self.modelRelay = modelRelay
+        do {
+            try modelRelay.start()
+        } catch {
+            NSLog("Tocode 本地模型中转启动失败: %@", error.localizedDescription)
+        }
+
         // 启动后把 CLI 安装/刷新到用户 PATH（~/.local/bin/tocode）。
         installCLI()
 
@@ -82,6 +91,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             macTimers: macTimers,
             weChat: weChat,
             screenBlackout: blackout,
+            modelRelay: modelRelay,
             commandExecutor: executor
         )
         self.controller = controller
@@ -137,6 +147,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         ipcServer?.stop()
         ipcServer = nil
+        modelRelay?.stop()
+        modelRelay = nil
         shortcuts?.shutdown()
         trackpadShortcuts?.shutdown()
         keyboardRemaps?.shutdown()

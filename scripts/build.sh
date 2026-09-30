@@ -29,6 +29,9 @@ for file in Sources/*.swift; do
     TocodeApp.swift|AppDelegate.swift|StatusItemController.swift|MenuBuilder.swift)
       APP_SOURCES+=("$file")
       ;;
+    ModelRelay*.swift)
+      APP_SOURCES+=("$file")
+      ;;
     TocodeCLIRunner.swift)
       CLI_SOURCES+=("$file")
       ;;

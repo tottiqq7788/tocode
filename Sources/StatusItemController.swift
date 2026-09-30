@@ -30,6 +30,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private let extendedSettings: ExtendedSettingsStore
     private let screenBlackout: ScreenBlackoutService
     private let commandExecutor: TocodeCommandExecutor
+    private let modelRelay: ModelRelayService
     private let actionDispatcher = KeyboardMappingActionDispatcher()
     private var activeModelMenu: NSMenu?
     private var activeModelParentItem: NSMenuItem?
@@ -38,9 +39,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private var modelLoadGeneration = UUID()
     private var isSwitchingModel = false
     private var isUpdatingCredentials = false
+    private var relayBusyProviderIDs: Set<UUID> = []
     private var modifierPollingTimer: Timer?
     private var timerMenuRefreshTimer: Timer?
     private weak var liveTimerMenu: NSMenu?
+    private weak var liveModelRelayStatusItem: NSMenuItem?
     private var liveTimerMenuItems: [UUID: NSMenuItem] = [:]
     private weak var liveModelMenuItem: NSMenuItem?
     private static let ankerKeyItemID = "tocode.extended.ankerKey"
@@ -67,6 +70,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         ankerCredentials: AnkerCredentialUpdating = AnkerCredentialService(),
         extendedSettings: ExtendedSettingsStore = ExtendedSettingsStore(),
         screenBlackout: ScreenBlackoutService? = nil,
+        modelRelay: ModelRelayService,
         commandExecutor: TocodeCommandExecutor
     ) {
         self.shortcuts = shortcuts
@@ -86,6 +90,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         self.ankerCredentials = ankerCredentials
         self.extendedSettings = extendedSettings
         self.screenBlackout = screenBlackout ?? ScreenBlackoutService(overlay: ScreenBlackoutOverlay())
+        self.modelRelay = modelRelay
         self.commandExecutor = commandExecutor
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         super.init()
@@ -120,6 +125,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             button.target = self
             button.action = #selector(handleClick(_:))
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        }
+        modelRelay.didChange = { [weak self] in
+            MainActor.assumeIsolated {
+                self?.refreshModelRelayStatus()
+            }
         }
         requestNotificationAuthorization()
     }
@@ -439,6 +449,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         )
         toolsItem.submenu = toolsMenu
 
+        // 独立顶层「模型」：本地 OpenAI-compatible 中转站，始终显示。
+        menu.addItem(makeModelRelayMenuItem())
+
         // AK → AK-模型（AK 门控）
         activeModelMenu = nil
         activeModelParentItem = nil
@@ -591,6 +604,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
         stopTimerMenuRefresh()
         liveModelMenuItem = nil
+        liveModelRelayStatusItem = nil
         liveTimerMenu = nil
         liveTimerMenuItems.removeAll()
     }
@@ -640,6 +654,393 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     @objc private func toggleExtendedSettingAK(_ sender: NSMenuItem) {
         extendedSettings.akEnabled = !extendedSettings.akEnabled
         ShortcutMenuAppearance.apply(to: sender, enabled: extendedSettings.akEnabled)
+    }
+
+    private func makeModelRelayMenuItem() -> NSMenuItem {
+        let root = NSMenuItem(title: "模型", action: nil, keyEquivalent: "")
+        root.image = NSImage(systemSymbolName: "point.3.connected.trianglepath.dotted", accessibilityDescription: nil)
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let snapshot = modelRelay.snapshot()
+
+        let status = menu.addItem(withTitle: modelRelayStatusTitle(), action: nil, keyEquivalent: "")
+        status.isEnabled = false
+        status.toolTip = "http://127.0.0.1:\(snapshot.port)/v1"
+        liveModelRelayStatusItem = status
+
+        let port = menu.addItem(
+            withTitle: "端口：\(snapshot.port)…",
+            action: #selector(changeModelRelayPort),
+            keyEquivalent: ""
+        )
+        port.target = self
+        port.image = NSImage(systemSymbolName: "network", accessibilityDescription: nil)
+
+        if case .failed = modelRelay.runState {
+            let restart = menu.addItem(
+                withTitle: "重新启动",
+                action: #selector(restartModelRelay),
+                keyEquivalent: ""
+            )
+            restart.target = self
+            restart.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: nil)
+        }
+
+        menu.addItem(.separator())
+        let providersItem = menu.addItem(withTitle: "厂商", action: nil, keyEquivalent: "")
+        providersItem.image = NSImage(systemSymbolName: "building.2", accessibilityDescription: nil)
+        let providersMenu = NSMenu()
+        providersMenu.autoenablesItems = false
+        let addProvider = providersMenu.addItem(
+            withTitle: "新增",
+            action: #selector(addModelRelayProvider),
+            keyEquivalent: ""
+        )
+        addProvider.target = self
+        addProvider.image = NSImage(systemSymbolName: "plus", accessibilityDescription: nil)
+        if !snapshot.providers.isEmpty {
+            providersMenu.addItem(.separator())
+        }
+        for provider in snapshot.providers.sorted(by: {
+            $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }) {
+            let providerItem = providersMenu.addItem(withTitle: provider.name, action: nil, keyEquivalent: "")
+            providerItem.image = NSImage(systemSymbolName: "server.rack", accessibilityDescription: nil)
+            providerItem.submenu = makeModelRelayProviderMenu(provider)
+        }
+        providersItem.submenu = providersMenu
+
+        let keysItem = menu.addItem(withTitle: "Key", action: nil, keyEquivalent: "")
+        keysItem.image = NSImage(systemSymbolName: "key", accessibilityDescription: nil)
+        let keysMenu = NSMenu()
+        keysMenu.autoenablesItems = false
+        let addKey = keysMenu.addItem(
+            withTitle: "新增",
+            action: #selector(addModelRelayLocalKey),
+            keyEquivalent: ""
+        )
+        addKey.target = self
+        addKey.image = NSImage(systemSymbolName: "plus", accessibilityDescription: nil)
+        if !snapshot.localKeys.isEmpty {
+            keysMenu.addItem(.separator())
+        }
+        for key in snapshot.localKeys.sorted(by: {
+            $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }) {
+            let item = keysMenu.addItem(
+                withTitle: key.name,
+                action: #selector(accessModelRelayLocalKey(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = key.id.uuidString
+            item.image = NSImage(systemSymbolName: "key.fill", accessibilityDescription: nil)
+        }
+        keysItem.submenu = keysMenu
+        root.submenu = menu
+        return root
+    }
+
+    private func makeModelRelayProviderMenu(_ provider: ModelRelayProvider) -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let busy = relayBusyProviderIDs.contains(provider.id)
+        let edit = menu.addItem(
+            withTitle: "编辑厂商…",
+            action: #selector(editModelRelayProvider(_:)),
+            keyEquivalent: ""
+        )
+        edit.target = self
+        edit.representedObject = provider.id.uuidString
+        edit.isEnabled = !busy
+
+        let addKey = menu.addItem(
+            withTitle: busy ? "处理中…" : "新增 Key",
+            action: #selector(addModelRelayUpstreamKey(_:)),
+            keyEquivalent: ""
+        )
+        addKey.target = self
+        addKey.representedObject = provider.id.uuidString
+        addKey.isEnabled = !busy
+        addKey.image = NSImage(systemSymbolName: "key.badge.plus", accessibilityDescription: nil)
+
+        let refresh = menu.addItem(
+            withTitle: "刷新模型",
+            action: #selector(refreshModelRelayProvider(_:)),
+            keyEquivalent: ""
+        )
+        refresh.target = self
+        refresh.representedObject = provider.id.uuidString
+        refresh.isEnabled = !busy && !provider.keys.isEmpty
+        refresh.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: nil)
+
+        let modelsItem = menu.addItem(withTitle: "模型（\(provider.models.count)）", action: nil, keyEquivalent: "")
+        modelsItem.image = NSImage(systemSymbolName: "cpu", accessibilityDescription: nil)
+        let modelsMenu = NSMenu()
+        modelsMenu.autoenablesItems = false
+        if provider.models.isEmpty {
+            let empty = modelsMenu.addItem(withTitle: "暂无模型", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+        } else {
+            for model in provider.models.sorted(by: {
+                $0.alias.localizedCaseInsensitiveCompare($1.alias) == .orderedAscending
+            }) {
+                let item = modelsMenu.addItem(
+                    withTitle: model.alias,
+                    action: #selector(editModelRelayAlias(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = model.id.uuidString
+                item.toolTip = "上游：\(model.upstreamModelID)"
+                item.isEnabled = !busy
+            }
+        }
+        modelsItem.submenu = modelsMenu
+
+        let upstreamKeysItem = menu.addItem(
+            withTitle: "上游 Key（\(provider.keys.count)）",
+            action: nil,
+            keyEquivalent: ""
+        )
+        upstreamKeysItem.image = NSImage(systemSymbolName: "key.horizontal", accessibilityDescription: nil)
+        let upstreamKeysMenu = NSMenu()
+        upstreamKeysMenu.autoenablesItems = false
+        if provider.keys.isEmpty {
+            let empty = upstreamKeysMenu.addItem(withTitle: "暂无 Key", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+        } else {
+            for key in provider.keys.sorted(by: {
+                $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+            }) {
+                let keyItem = upstreamKeysMenu.addItem(withTitle: key.name, action: nil, keyEquivalent: "")
+                let keyMenu = NSMenu()
+                keyMenu.autoenablesItems = false
+                let replace = keyMenu.addItem(
+                    withTitle: "替换…",
+                    action: #selector(replaceModelRelayUpstreamKey(_:)),
+                    keyEquivalent: ""
+                )
+                replace.target = self
+                replace.representedObject = [provider.id.uuidString, key.id.uuidString]
+                replace.isEnabled = !busy
+                let delete = keyMenu.addItem(
+                    withTitle: "删除…",
+                    action: #selector(deleteModelRelayUpstreamKey(_:)),
+                    keyEquivalent: ""
+                )
+                delete.target = self
+                delete.representedObject = [provider.id.uuidString, key.id.uuidString]
+                delete.isEnabled = !busy
+                keyItem.submenu = keyMenu
+            }
+        }
+        upstreamKeysItem.submenu = upstreamKeysMenu
+
+        menu.addItem(.separator())
+        let delete = menu.addItem(
+            withTitle: "删除厂商…",
+            action: #selector(deleteModelRelayProvider(_:)),
+            keyEquivalent: ""
+        )
+        delete.target = self
+        delete.representedObject = provider.id.uuidString
+        delete.isEnabled = !busy
+        delete.image = NSImage(systemSymbolName: "trash", accessibilityDescription: nil)
+        return menu
+    }
+
+    private func modelRelayStatusTitle() -> String {
+        let state = modelRelay.runState
+        if case .running = state, modelRelay.router.availableAliases().isEmpty {
+            return "\(state.menuText) · 无健康上游"
+        }
+        return state.menuText
+    }
+
+    private func refreshModelRelayStatus() {
+        liveModelRelayStatusItem?.title = modelRelayStatusTitle()
+    }
+
+    @objc private func restartModelRelay() {
+        modelRelay.stop()
+        do {
+            try modelRelay.start()
+        } catch {
+            ModelRelayPrompts.showError(error, title: "中转服务启动失败")
+        }
+    }
+
+    @objc private func changeModelRelayPort() {
+        let snapshot = modelRelay.snapshot()
+        guard let port = ModelRelayPrompts.port(current: snapshot.port) else { return }
+        modelRelay.updatePort(port) { result in
+            if case .failure(let error) = result {
+                ModelRelayPrompts.showError(error, title: "端口未修改，已恢复原监听")
+            }
+        }
+    }
+
+    @objc private func addModelRelayProvider() {
+        guard let input = ModelRelayPrompts.provider() else { return }
+        do {
+            try modelRelay.addProvider(name: input.name, baseURL: input.baseURL)
+        } catch {
+            ModelRelayPrompts.showError(error, title: "厂商未新增")
+        }
+    }
+
+    @objc private func editModelRelayProvider(_ sender: NSMenuItem) {
+        guard let id = representedUUID(sender),
+              let provider = modelRelay.snapshot().providers.first(where: { $0.id == id }),
+              let input = ModelRelayPrompts.provider(existing: provider) else { return }
+        do {
+            try modelRelay.updateProvider(id: id, name: input.name, baseURL: input.baseURL)
+        } catch {
+            ModelRelayPrompts.showError(error, title: "厂商未更新")
+        }
+    }
+
+    @objc private func deleteModelRelayProvider(_ sender: NSMenuItem) {
+        guard let id = representedUUID(sender),
+              let provider = modelRelay.snapshot().providers.first(where: { $0.id == id }),
+              ModelRelayPrompts.confirm(
+                title: "删除厂商“\(provider.name)”？",
+                detail: "该厂商的模型路由和钥匙串中的全部上游 Key 都会删除。"
+              ) else { return }
+        do {
+            try modelRelay.deleteProvider(id: id)
+        } catch {
+            ModelRelayPrompts.showError(error, title: "厂商未删除")
+        }
+    }
+
+    @objc private func addModelRelayUpstreamKey(_ sender: NSMenuItem) {
+        guard let providerID = representedUUID(sender),
+              let input = ModelRelayPrompts.upstreamKey() else { return }
+        relayBusyProviderIDs.insert(providerID)
+        modelRelay.addUpstreamKey(
+            providerID: providerID,
+            name: input.name,
+            secret: input.secret
+        ) { [weak self] result in
+            guard let self else { return }
+            self.relayBusyProviderIDs.remove(providerID)
+            if case .failure(let error) = result {
+                ModelRelayPrompts.showError(error, title: "上游 Key 未新增")
+            }
+        }
+    }
+
+    @objc private func replaceModelRelayUpstreamKey(_ sender: NSMenuItem) {
+        guard let (providerID, keyID) = representedUUIDPair(sender),
+              let provider = modelRelay.snapshot().providers.first(where: { $0.id == providerID }),
+              let key = provider.keys.first(where: { $0.id == keyID }),
+              let input = ModelRelayPrompts.upstreamKey(existingName: key.name) else { return }
+        relayBusyProviderIDs.insert(providerID)
+        modelRelay.replaceUpstreamKey(
+            providerID: providerID,
+            keyID: keyID,
+            name: input.name,
+            secret: input.secret
+        ) { [weak self] result in
+            guard let self else { return }
+            self.relayBusyProviderIDs.remove(providerID)
+            if case .failure(let error) = result {
+                ModelRelayPrompts.showError(error, title: "上游 Key 未替换")
+            }
+        }
+    }
+
+    @objc private func deleteModelRelayUpstreamKey(_ sender: NSMenuItem) {
+        guard let (providerID, keyID) = representedUUIDPair(sender),
+              let provider = modelRelay.snapshot().providers.first(where: { $0.id == providerID }),
+              let key = provider.keys.first(where: { $0.id == keyID }),
+              ModelRelayPrompts.confirm(
+                title: "删除上游 Key“\(key.name)”？",
+                detail: "删除后不会保留明文副本。"
+              ) else { return }
+        do {
+            try modelRelay.deleteUpstreamKey(providerID: providerID, keyID: keyID)
+        } catch {
+            ModelRelayPrompts.showError(error, title: "上游 Key 未删除")
+        }
+    }
+
+    @objc private func refreshModelRelayProvider(_ sender: NSMenuItem) {
+        guard let providerID = representedUUID(sender) else { return }
+        relayBusyProviderIDs.insert(providerID)
+        modelRelay.fetchModels(providerID: providerID) { [weak self] result in
+            guard let self else { return }
+            self.relayBusyProviderIDs.remove(providerID)
+            switch result {
+            case .success(let models):
+                ModelRelayPrompts.showMessage(title: "模型已刷新", detail: "已同步 \(models.count) 个模型。")
+            case .failure(let error):
+                ModelRelayPrompts.showError(error, title: "模型刷新失败")
+            }
+        }
+    }
+
+    @objc private func editModelRelayAlias(_ sender: NSMenuItem) {
+        guard let routeID = representedUUID(sender),
+              let route = modelRelay.snapshot().providers
+                .flatMap(\.models)
+                .first(where: { $0.id == routeID }),
+              let alias = ModelRelayPrompts.alias(
+                current: route.alias,
+                upstreamModelID: route.upstreamModelID
+              ) else { return }
+        do {
+            try modelRelay.updateAlias(routeID: routeID, alias: alias)
+        } catch {
+            ModelRelayPrompts.showError(error, title: "模型别名未更新")
+        }
+    }
+
+    @objc private func addModelRelayLocalKey() {
+        guard let input = ModelRelayPrompts.localKey() else { return }
+        do {
+            _ = try modelRelay.createLocalKey(name: input.name, password: input.password)
+            ModelRelayPrompts.showMessage(
+                title: "本地 Key 已生成",
+                detail: "点击该名称并输入查看密码，即可复制连接信息。"
+            )
+        } catch {
+            ModelRelayPrompts.showError(error, title: "本地 Key 未生成")
+        }
+    }
+
+    @objc private func accessModelRelayLocalKey(_ sender: NSMenuItem) {
+        guard let id = representedUUID(sender),
+              let record = modelRelay.snapshot().localKeys.first(where: { $0.id == id }),
+              let action = ModelRelayPrompts.localKeyAction(name: record.name) else { return }
+        do {
+            switch action {
+            case .copy(let password):
+                clipboard.copy(try modelRelay.connectionBlock(localKeyID: id, password: password))
+                ModelRelayPrompts.showMessage(
+                    title: "连接信息已复制",
+                    detail: "剪贴板包含 Base URL、API Key 和当前可用模型，请妥善保管。"
+                )
+            case .delete:
+                try modelRelay.deleteLocalKey(id: id)
+            }
+        } catch {
+            ModelRelayPrompts.showError(error, title: "查看密码校验失败")
+        }
+    }
+
+    private func representedUUID(_ sender: NSMenuItem) -> UUID? {
+        (sender.representedObject as? String).flatMap(UUID.init(uuidString:))
+    }
+
+    private func representedUUIDPair(_ sender: NSMenuItem) -> (UUID, UUID)? {
+        guard let values = sender.representedObject as? [String],
+              values.count == 2,
+              let first = UUID(uuidString: values[0]),
+              let second = UUID(uuidString: values[1]) else { return nil }
+        return (first, second)
     }
 
     private var ankerKeyItemTitle: String {
