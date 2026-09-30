@@ -411,7 +411,8 @@ func testUserManualPages() {
     expect(joined.contains("限制程序坞弹出"), "说明书覆盖限制程序坞弹出")
     expect(joined.contains("自动隐藏和显示程序坞"), "说明书写明需系统自动隐藏")
     expect(joined.contains("定时器"), "说明书覆盖 mac 定时器")
-    expect(joined.contains("到点只执行一次"), "说明书写明定时器到点一次")
+    expect(joined.contains("一次性"), "说明书覆盖一次性调度")
+    expect(joined.contains("cron"), "说明书覆盖 cron 调度")
     expect(joined.contains("下次启动不会补执行"), "说明书写明冷启动不补执行")
     expect(!joined.contains("上次展开"), "说明书不再描述整菜单跳转恢复")
     expect(!joined.contains("上一级"), "说明书不再描述上一级顶栏")
@@ -3677,11 +3678,15 @@ func makeDockRestrictHarness(
 }
 
 func testMacTimerStoreAndService() {
-    expect(MacTimerRemaining.parseMinutes("25") == 25, "合法分钟解析")
-    expect(MacTimerRemaining.parseMinutes(" 1 ") == 1, "分钟 trim")
-    expect(MacTimerRemaining.parseMinutes("0") == nil, "0 分钟非法")
-    expect(MacTimerRemaining.parseMinutes("10081") == nil, "超过上限非法")
-    expect(MacTimerRemaining.parseMinutes("abc") == nil, "非数字非法")
+    expect(MacTimerDraft().minutesText == "10", "新建草稿默认 10 分钟")
+    expect(MacTimerRemaining.parseOnceDuration(hoursText: "", minutesText: "10") == 10, "默认分钟合法")
+    expect(MacTimerRemaining.parseOnceDuration(hoursText: "1", minutesText: "") == 60, "只填小时")
+    expect(MacTimerRemaining.parseOnceDuration(hoursText: "1", minutesText: "5") == 65, "小时加分钟")
+    expect(MacTimerRemaining.parseOnceDuration(hoursText: "", minutesText: "") == nil, "两格皆空非法")
+    expect(MacTimerRemaining.parseOnceDuration(hoursText: "0", minutesText: "0") == nil, "合计 0 非法")
+    expect(MacTimerRemaining.parseOnceDuration(hoursText: "169", minutesText: "0") == nil, "小时越界非法")
+    expect(MacTimerRemaining.parseOnceDuration(hoursText: "0", minutesText: "60") == nil, "分钟越界非法")
+    expect(MacTimerRemaining.splitDuration(125) == (2, 5), "总分钟拆分")
     expect(MacTimerRemaining.format(seconds: 65) == "01:05", "不足一小时 mm:ss")
     expect(MacTimerRemaining.format(seconds: 3661) == "1:01:01", "满一小时 h:mm:ss")
     expect(
@@ -3692,14 +3697,29 @@ func testMacTimerStoreAndService() {
         ) == "休息 · 剩余 01:00",
         "运行中标题含剩余"
     )
-    expect(
-        MacTimerRemaining.menuTitle(
-            name: "休息",
-            fireAt: nil,
-            now: Date()
-        ) == "休息",
-        "未启动标题只有名称"
-    )
+
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+    // 2020-01-01 00:00:00 UTC 是周三 (cron weekday 3)
+    let cronNow = Date(timeIntervalSince1970: 1_577_836_800)
+    expect(MacCronSchedule.parse("not cron") == nil, "非法 cron 拒绝")
+    expect(MacCronSchedule.parse("* * *") == nil, "段数不足拒绝")
+    let everyFive = MacCronSchedule.parse("*/5 * * * *")
+    expect(everyFive != nil, "步进 cron 可解析")
+    if let next = everyFive?.nextFire(after: cronNow, calendar: calendar) {
+        let parts = calendar.dateComponents([.minute], from: next)
+        expect(parts.minute == 5, "*/5 下次在 :05")
+        expect(next > cronNow, "下次严格晚于 now")
+    } else {
+        expect(false, "*/5 应算出下次")
+    }
+    let daily = MacCronSchedule.parse("30 14 * * *")
+    if let next = daily?.nextFire(after: cronNow, calendar: calendar) {
+        let parts = calendar.dateComponents([.hour, .minute], from: next)
+        expect(parts.hour == 14 && parts.minute == 30, "每天 14:30")
+    } else {
+        expect(false, "每天 14:30 应算出下次")
+    }
 
     let suite = "tocode-mac-timer-\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suite)!
@@ -3710,12 +3730,15 @@ func testMacTimerStoreAndService() {
     let now = Date(timeIntervalSince1970: 1_000_000)
     let draft = MacTimerDraft(
         name: "提醒",
-        durationMinutesText: "2",
+        kind: .once,
+        hoursText: "",
+        minutesText: "2",
         target: .action(.blackout)
     )
-    switch store.saveAndStart(draft, now: now) {
+    switch store.saveAndStart(draft, now: now, calendar: calendar) {
     case .success(let timer):
         expect(timer.name == "提醒", "保存名称")
+        expect(timer.kind == .once, "默认定时类型一次性")
         expect(timer.durationMinutes == 2, "保存分钟")
         expect(timer.fireAt == now.addingTimeInterval(120), "启动写入 fireAt")
         expect(timer.isRunning, "启动后运行中")
@@ -3725,43 +3748,93 @@ func testMacTimerStoreAndService() {
 
     expect(store.allTimers().count == 1, "持久化一条")
     if case .failure(.duplicateName) = store.saveAndStart(
-        MacTimerDraft(name: "提醒", durationMinutesText: "3", target: .action(.quit)),
-        now: now
+        MacTimerDraft(name: "提醒", minutesText: "3", target: .action(.quit)),
+        now: now,
+        calendar: calendar
     ) {
         expect(true, "重名拒绝")
     } else {
         expect(false, "重名拒绝")
     }
     if case .failure(.invalidDuration) = store.saveAndStart(
-        MacTimerDraft(name: "另一", durationMinutesText: "0", target: .action(.quit)),
-        now: now
+        MacTimerDraft(name: "另一", hoursText: "", minutesText: "", target: .action(.quit)),
+        now: now,
+        calendar: calendar
     ) {
-        expect(true, "非法分钟拒绝")
+        expect(true, "空时长拒绝")
     } else {
-        expect(false, "非法分钟拒绝")
+        expect(false, "空时长拒绝")
+    }
+    if case .failure(.invalidCron) = store.saveAndStart(
+        MacTimerDraft(
+            name: "坏cron",
+            kind: .cron,
+            cronExpression: "bad",
+            target: .action(.quit)
+        ),
+        now: now,
+        calendar: calendar
+    ) {
+        expect(true, "非法 cron 拒绝")
+    } else {
+        expect(false, "非法 cron 拒绝")
     }
     if case .failure(.emptyName) = store.saveAndStart(
-        MacTimerDraft(name: "  ", durationMinutesText: "1", target: .action(.quit)),
-        now: now
+        MacTimerDraft(name: "  ", minutesText: "1", target: .action(.quit)),
+        now: now,
+        calendar: calendar
     ) {
         expect(true, "空名称拒绝")
     } else {
         expect(false, "空名称拒绝")
     }
     if case .failure(.missingTarget) = store.saveAndStart(
-        MacTimerDraft(name: "无事项", durationMinutesText: "1", target: nil),
-        now: now
+        MacTimerDraft(name: "无事项", minutesText: "1", target: nil),
+        now: now,
+        calendar: calendar
     ) {
         expect(true, "缺事项拒绝")
     } else {
         expect(false, "缺事项拒绝")
     }
 
+    // 旧 JSON 无 kind 字段视为一次性。
+    struct LegacyPayload: Encodable {
+        let id: UUID
+        let name: String
+        let durationMinutes: Int
+        let target: KeyboardShortcutMappingTarget
+        let fireAt: Date
+    }
+    let legacyData = try! JSONEncoder().encode([
+        LegacyPayload(
+            id: UUID(),
+            name: "旧任务",
+            durationMinutes: 15,
+            target: .action(.blackout),
+            fireAt: now.addingTimeInterval(90)
+        )
+    ])
+    defaults.set(legacyData, forKey: MacTimerStore.defaultsKey)
+    let legacyTimers = store.allTimers()
+    expect(legacyTimers.count == 1, "旧 JSON 可读")
+    expect(legacyTimers.first?.kind == .once, "旧 JSON 视为一次性")
+    expect(legacyTimers.first?.durationMinutes == 15, "旧 JSON 保留分钟")
+
+    // 重置为一次性任务继续服务测试。
+    defaults.removeObject(forKey: MacTimerStore.defaultsKey)
+    _ = store.saveAndStart(draft, now: now, calendar: calendar)
+
     let clock = MockClock()
     clock.current = now
     let scheduler = ManualScheduler()
     var fired: [KeyboardShortcutMappingTarget] = []
-    let service = MacTimerService(store: store, clock: clock, scheduler: scheduler)
+    let service = MacTimerService(
+        store: store,
+        clock: clock,
+        scheduler: scheduler,
+        calendar: calendar
+    )
     service.fireHandler = { fired.append($0) }
     service.applySavedSettings()
     expect(service.timers.count == 1, "服务加载已有任务")
@@ -3771,50 +3844,96 @@ func testMacTimerStoreAndService() {
 
     clock.current = now.addingTimeInterval(120)
     scheduler.runNext()
-    expect(fired == [.action(.blackout)], "到点执行一次")
-    expect(service.timers.count == 1, "到点后仍保留任务")
-    expect(!service.timers[0].isRunning, "到点后未启动")
-    expect(store.allTimers()[0].fireAt == nil, "到点后持久化清 fireAt")
-    expect(scheduler.pending.isEmpty, "无更多运行中任务则不再调度")
+    expect(fired == [.action(.blackout)], "一次性到点执行一次")
+    expect(!service.timers[0].isRunning, "一次性到点后未启动")
+    expect(store.allTimers()[0].fireAt == nil, "一次性到点后清 fireAt")
 
-    // 冷启动：磁盘上已有过期 fireAt，不补执行。
-    var stale = store.allTimers()[0]
-    stale.fireAt = now.addingTimeInterval(-10)
-    store.replaceAll([stale])
-    fired.removeAll()
-    let cold = MacTimerService(store: store, clock: clock, scheduler: ManualScheduler())
-    cold.fireHandler = { fired.append($0) }
-    cold.applySavedSettings()
-    expect(fired.isEmpty, "冷启动过点不补执行")
-    expect(!cold.timers[0].isRunning, "冷启动过点变未启动")
-    expect(store.allTimers()[0].fireAt == nil, "冷启动过点写回未启动")
-
-    // 进程内唤醒：过点补执行一次。
-    clock.current = now
-    let wakeScheduler = ManualScheduler()
-    let wakeService = MacTimerService(store: store, clock: clock, scheduler: wakeScheduler)
-    var wakeFired: [KeyboardShortcutMappingTarget] = []
-    wakeService.fireHandler = { wakeFired.append($0) }
-    switch wakeService.saveAndStart(
+    // cron：到点后续排并保持勾选。
+    clock.current = cronNow
+    store.replaceAll([])
+    switch store.saveAndStart(
         MacTimerDraft(
-            id: store.allTimers()[0].id,
-            name: "提醒",
-            durationMinutesText: "1",
+            name: "每五分钟",
+            kind: .cron,
+            cronExpression: "*/5 * * * *",
             target: .action(.quit)
-        )
+        ),
+        now: cronNow,
+        calendar: calendar
     ) {
     case .success(let timer):
-        expect(timer.isRunning, "再次启动成功")
+        expect(timer.kind == .cron, "保存 cron 类型")
+        expect(timer.isRunning, "cron 启动后运行中")
+        expect(timer.fireAt == cronNow.addingTimeInterval(5 * 60), "cron 下次 :05")
     case .failure:
-        expect(false, "再次启动应成功")
+        expect(false, "合法 cron 应保存成功")
     }
-    clock.current = now.addingTimeInterval(60)
-    wakeService.handleWake()
-    expect(wakeFired == [.action(.quit)], "唤醒时补执行已过点任务")
-    expect(!wakeService.timers[0].isRunning, "唤醒执行后未启动")
 
-    wakeService.delete(id: wakeService.timers[0].id)
-    expect(wakeService.timers.isEmpty, "删除清空列表")
+    let cronScheduler = ManualScheduler()
+    var cronFired: [KeyboardShortcutMappingTarget] = []
+    let cronService = MacTimerService(
+        store: store,
+        clock: clock,
+        scheduler: cronScheduler,
+        calendar: calendar
+    )
+    cronService.fireHandler = { cronFired.append($0) }
+    cronService.applySavedSettings()
+    clock.current = cronNow.addingTimeInterval(5 * 60)
+    cronService.checkDueForTesting()
+    expect(cronFired == [.action(.quit)], "cron 到点执行")
+    expect(cronService.timers[0].isRunning, "cron 到点后仍勾选")
+    expect(
+        cronService.timers[0].fireAt == cronNow.addingTimeInterval(10 * 60),
+        "cron 到点后排到 :10"
+    )
+
+    // 冷启动 cron：过点不补执行，但保持勾选并重算下次。
+    var staleCron = store.allTimers()[0]
+    staleCron.fireAt = cronNow.addingTimeInterval(-10)
+    store.replaceAll([staleCron])
+    clock.current = cronNow.addingTimeInterval(7 * 60) // 00:07 → 下次 :10
+    cronFired.removeAll()
+    let coldCron = MacTimerService(
+        store: store,
+        clock: clock,
+        scheduler: ManualScheduler(),
+        calendar: calendar
+    )
+    coldCron.fireHandler = { cronFired.append($0) }
+    coldCron.applySavedSettings()
+    expect(cronFired.isEmpty, "冷启动 cron 过点不补执行")
+    expect(coldCron.timers[0].isRunning, "冷启动 cron 保持勾选")
+    expect(
+        coldCron.timers[0].fireAt == cronNow.addingTimeInterval(10 * 60),
+        "冷启动 cron 重算下次"
+    )
+
+    // 冷启动一次性：过点不补执行并未启动。
+    store.replaceAll([
+        MacTimer(
+            id: UUID(),
+            name: "一次",
+            kind: .once,
+            durationMinutes: 1,
+            cronExpression: nil,
+            target: .action(.blackout),
+            fireAt: cronNow.addingTimeInterval(-5)
+        )
+    ])
+    var onceFired: [KeyboardShortcutMappingTarget] = []
+    let coldOnce = MacTimerService(
+        store: store,
+        clock: clock,
+        scheduler: ManualScheduler(),
+        calendar: calendar
+    )
+    coldOnce.fireHandler = { onceFired.append($0) }
+    coldOnce.applySavedSettings()
+    expect(onceFired.isEmpty, "冷启动一次性过点不补执行")
+    expect(!coldOnce.timers[0].isRunning, "冷启动一次性变未启动")
+
+    coldOnce.delete(id: coldOnce.timers[0].id)
     expect(store.allTimers().isEmpty, "删除持久化清空")
 }
 

@@ -14,11 +14,12 @@ protocol MacTimerControlling: AnyObject {
     func delete(id: UUID)
 }
 
-/// 按最近到期时刻调度倒计时；到点执行一次后清为未启动。
+/// 按最近到期时刻调度；一次性到点后停用，cron 到点后续排。
 final class MacTimerService: MacTimerControlling {
     private let store: MacTimerStore
     private let clock: ShortcutClock
     private let scheduler: ShortcutScheduling
+    private let calendar: Calendar
     private var scheduleGeneration = 0
     private var wakeObserver: NSObjectProtocol?
     private(set) var timers: [MacTimer] = []
@@ -31,16 +32,18 @@ final class MacTimerService: MacTimerControlling {
     init(
         store: MacTimerStore = MacTimerStore(),
         clock: ShortcutClock = SystemShortcutClock(),
-        scheduler: ShortcutScheduling = MainQueueShortcutScheduler()
+        scheduler: ShortcutScheduling = MainQueueShortcutScheduler(),
+        calendar: Calendar = .current
     ) {
         self.store = store
         self.clock = clock
         self.scheduler = scheduler
+        self.calendar = calendar
     }
 
     func applySavedSettings() {
         timers = store.allTimers()
-        // 冷启动：进程未运行期间已过点的不补执行，直接未启动。
+        // 冷启动：已过点不补执行；一次性停用，cron 重算下次。
         clearDue(execute: false)
         installWakeObserver()
         scheduleNext()
@@ -63,7 +66,7 @@ final class MacTimerService: MacTimerControlling {
     func saveAndStart(
         _ draft: MacTimerDraft
     ) -> Result<MacTimer, MacTimerValidationError> {
-        switch store.saveAndStart(draft, now: clock.now()) {
+        switch store.saveAndStart(draft, now: clock.now(), calendar: calendar) {
         case .success(let saved):
             timers = store.allTimers()
             scheduleNext()
@@ -116,9 +119,23 @@ final class MacTimerService: MacTimerControlling {
         var dueTargets: [KeyboardShortcutMappingTarget] = []
         for index in timers.indices {
             guard let fireAt = timers[index].fireAt, fireAt <= now else { continue }
-            dueTargets.append(timers[index].target)
-            timers[index].fireAt = nil
             changed = true
+            if execute {
+                dueTargets.append(timers[index].target)
+            }
+            switch timers[index].kind {
+            case .once:
+                timers[index].fireAt = nil
+            case .cron:
+                if let expression = timers[index].cronExpression,
+                   let schedule = MacCronSchedule.parse(expression),
+                   let next = schedule.nextFire(after: now, calendar: calendar)
+                {
+                    timers[index].fireAt = next
+                } else {
+                    timers[index].fireAt = nil
+                }
+            }
         }
         guard changed else { return }
         store.replaceAll(timers)

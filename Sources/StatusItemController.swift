@@ -1083,7 +1083,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     @objc private func createMacTimer() {
-        presentMacTimerEditor(draft: MacTimerDraft(), mode: .create)
+        presentMacTimerEditor(
+            draft: MacTimerDraft(minutesText: "10"),
+            mode: .create
+        )
     }
 
     @objc private func editMacTimer(_ sender: NSMenuItem) {
