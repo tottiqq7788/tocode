@@ -172,6 +172,36 @@ func testModelRelayRouterAndControlPlane() {
         }
     }
 
+    let missingReference = ModelRelayUpstreamKeyReference(name: "temporarily-missing")
+    let missingConfiguration = ModelRelayConfiguration(providers: [
+        ModelRelayProvider(
+            name: "missing-provider",
+            baseURL: "https://missing.example/v1",
+            keys: [missingReference],
+            models: [ModelRelayModelRoute(upstreamModelID: "missing-upstream", alias: "missing-local")]
+        )
+    ])
+    let missingStore = MemoryModelRelayKeyStore()
+    let missingClock = MutableModelRelayClock()
+    let missingRouter = ModelRelayRouter(
+        configuration: missingConfiguration,
+        keyStore: missingStore,
+        vault: vault,
+        now: { missingClock.now }
+    )
+    do {
+        _ = try missingRouter.resolve(alias: "missing-local")
+        expect(false, "Keychain 条目缺失时不得路由")
+    } catch {
+        expect(error as? ModelRelayError == .noHealthyUpstream, "Keychain 条目缺失时失败关闭")
+    }
+    try! missingStore.save("restored-secret", id: missingReference.id)
+    missingClock.now = missingClock.now.addingTimeInterval(31)
+    expect(
+        try! missingRouter.resolve(alias: "missing-local").candidates.first?.keyID == missingReference.id,
+        "Keychain 条目恢复后可在有限冷却结束时重新路由"
+    )
+
     let initial = ModelRelayConfiguration(providers: [
         ModelRelayProvider(
             name: "one",
@@ -330,6 +360,44 @@ func testModelRelayValidatedKeyControlPlane() async {
         )
     } catch {
         expect(false, "刷新后的健康模型应可路由：\(error)")
+    }
+
+    refreshService.router.recordFailure(keyID: healthyReference.id, statusCode: 401)
+    ModelRelayURLProtocol.reset { _ in
+        ModelRelayStubResponse(
+            status: 200,
+            chunks: [Data("{\"data\":[{\"id\":\"refresh-model\"}]}".utf8)]
+        )
+    }
+    let automaticResult: Result<[ModelRelayModelRoute], Error> = await withCheckedContinuation { continuation in
+        refreshService.fetchModels(
+            providerID: refreshProvider.id,
+            resetAuthenticationFailures: false
+        ) {
+            continuation.resume(returning: $0)
+        }
+    }
+    if case .success = automaticResult {
+        expect(false, "自动刷新不得恢复 401/403 Key")
+    } else {
+        expect(true, "自动刷新保留鉴权失败状态")
+    }
+    expect(ModelRelayURLProtocol.requests.isEmpty, "自动刷新跳过全部鉴权失败 Key")
+
+    let manualResult: Result<[ModelRelayModelRoute], Error> = await withCheckedContinuation { continuation in
+        refreshService.fetchModels(providerID: refreshProvider.id) {
+            continuation.resume(returning: $0)
+        }
+    }
+    if case .failure(let error) = manualResult {
+        expect(false, "手动刷新应重新校验鉴权失败 Key：\(error)")
+    }
+    expect(ModelRelayURLProtocol.requests.count == 2, "手动刷新重新校验厂商全部 Key")
+    do {
+        let route = try refreshService.router.resolve(alias: "refresh-model")
+        expect(route.candidates.count == 2, "手动刷新成功后恢复两个 Key 的健康轮询")
+    } catch {
+        expect(false, "手动刷新恢复后模型应可路由：\(error)")
     }
 
     let corruptStore = CorruptModelRelayConfigStore()
@@ -753,6 +821,46 @@ func testModelRelayPortRollback() async {
     }
     expect(service.snapshot().port == originalPort, "端口冲突时不持久化新端口")
     expect(service.runState == .running(port: originalPort), "端口冲突后恢复原 listener")
+
+    let startupKey = ModelRelayUpstreamKeyReference(name: "startup")
+    let startupProvider = ModelRelayProvider(
+        name: "startup-provider",
+        baseURL: "https://startup.example/v1",
+        keys: [startupKey]
+    )
+    let failedStartupService = ModelRelayService(
+        configStore: MemoryModelRelayConfigStore(
+            ModelRelayConfiguration(port: occupiedPort, providers: [startupProvider])
+        ),
+        upstreamKeyStore: MemoryModelRelayKeyStore([startupKey.id: "startup-secret"]),
+        localKeyVault: vault,
+        upstreamClient: upstream
+    )
+    ModelRelayURLProtocol.reset { _ in
+        ModelRelayStubResponse(
+            status: 200,
+            chunks: [Data("{\"data\":[{\"id\":\"should-not-load\"}]}".utf8)]
+        )
+    }
+    do {
+        try failedStartupService.start()
+        for _ in 0..<50 {
+            if case .failed = failedStartupService.runState { break }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        if case .failed = failedStartupService.runState {
+            expect(true, "listener 未 ready 时服务状态明确失败")
+        } else {
+            expect(false, "占用端口启动应进入失败状态")
+        }
+        expect(
+            ModelRelayURLProtocol.requests.isEmpty,
+            "listener 未 ready 时不启动后台目录刷新"
+        )
+    } catch {
+        expect(true, "占用端口同步失败同样不得启动后台刷新")
+    }
+    failedStartupService.stop()
 }
 
 func testModelRelayManualAndLegacyAKContract() {

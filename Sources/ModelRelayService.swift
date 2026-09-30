@@ -10,6 +10,7 @@ final class ModelRelayService {
     private let startupError: Error?
     private var refreshTimer: DispatchSourceTimer?
     private var storedRunState: ModelRelayRunState = .stopped
+    private var wantsRunning = false
     let router: ModelRelayRouter
     let server: ModelRelayHTTPServer
 
@@ -54,10 +55,23 @@ final class ModelRelayService {
     }
 
     func start() throws {
+        lock.lock()
+        wantsRunning = true
+        lock.unlock()
         do {
             if let startupError { throw startupError }
             let port = configurationSnapshot().port
-            try server.start(port: port)
+            let readiness = ModelRelayServiceReadiness()
+            try server.start(port: port) { result in
+                readiness.resolve(result)
+            }
+            guard let result = readiness.wait(timeout: 5) else {
+                server.stop()
+                throw ModelRelayError.listener("启动监听超时")
+            }
+            if case .failure(let error) = result {
+                throw error
+            }
             startRefreshTimer()
             refreshAllProviders()
         } catch {
@@ -67,8 +81,12 @@ final class ModelRelayService {
     }
 
     func stop() {
-        refreshTimer?.cancel()
+        lock.lock()
+        wantsRunning = false
+        let timer = refreshTimer
         refreshTimer = nil
+        lock.unlock()
+        timer?.cancel()
         server.stop()
     }
 
@@ -121,6 +139,10 @@ final class ModelRelayService {
                 case .success:
                     do {
                         try self.mutateConfiguration { $0.port = nextPort }
+                        if self.isRunningWanted() {
+                            self.startRefreshTimer()
+                            self.refreshAllProviders()
+                        }
                         self.completeOnMain(completion, result: .success(()))
                     } catch {
                         self.restoreListener(
@@ -417,17 +439,31 @@ final class ModelRelayService {
         router.resetHealth(keyIDs: [keyID])
     }
 
-    func fetchModels(providerID: UUID, completion: @escaping (Result<[ModelRelayModelRoute], Error>) -> Void) {
+    func fetchModels(
+        providerID: UUID,
+        resetAuthenticationFailures: Bool = true,
+        completion: @escaping (Result<[ModelRelayModelRoute], Error>) -> Void
+    ) {
         let snapshot = configurationSnapshot()
         guard let provider = snapshot.providers.first(where: { $0.id == providerID }) else {
             completeOnMain(completion, result: .failure(ModelRelayError.providerNotFound))
             return
         }
-        router.resetHealth(keyIDs: provider.keys.map(\.id))
+        let references: [ModelRelayUpstreamKeyReference]
+        if resetAuthenticationFailures {
+            router.resetHealth(keyIDs: provider.keys.map(\.id))
+            references = provider.keys
+        } else {
+            let eligible = Set(router.keyIDsEligibleForAutomaticRefresh(provider.keys.map(\.id)))
+            references = provider.keys.filter { eligible.contains($0.id) }
+        }
         Task { [weak self] in
             guard let self else { return }
             do {
-                let modelIDs = try await self.fetchModels(provider: provider)
+                let modelIDs = try await self.fetchModels(
+                    provider: provider,
+                    references: references
+                )
                 do {
                     let routes = try self.mergeModels(provider: provider, modelIDs: modelIDs)
                     self.completeOnMain(completion, result: .success(routes))
@@ -498,13 +534,16 @@ final class ModelRelayService {
         try connectionInfo(localKeyID: localKeyID, password: password).clipboardText
     }
 
-    private func fetchModels(provider: ModelRelayProvider) async throws -> [String] {
+    private func fetchModels(
+        provider: ModelRelayProvider,
+        references: [ModelRelayUpstreamKeyReference]
+    ) async throws -> [String] {
         var lastError: Error = ModelRelayError.noHealthyUpstream
         var firstSuccessfulCatalog: [String]?
-        for reference in provider.keys {
+        for reference in references {
             do {
                 guard let secret = try upstreamKeyStore.load(id: reference.id) else {
-                    router.recordFailure(keyID: reference.id, statusCode: 401)
+                    router.recordFailure(keyID: reference.id, statusCode: nil)
                     lastError = ModelRelayError.keyNotFound
                     continue
                 }
@@ -613,6 +652,12 @@ final class ModelRelayService {
         return configuration
     }
 
+    private func isRunningWanted() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return wantsRunning
+    }
+
     private func setRunState(_ state: ModelRelayRunState) {
         lock.lock()
         storedRunState = state
@@ -621,7 +666,11 @@ final class ModelRelayService {
     }
 
     private func startRefreshTimer() {
-        guard refreshTimer == nil else { return }
+        lock.lock()
+        guard refreshTimer == nil else {
+            lock.unlock()
+            return
+        }
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
         timer.schedule(deadline: .now() + .seconds(300), repeating: .seconds(300))
         timer.setEventHandler { [weak self] in
@@ -629,11 +678,12 @@ final class ModelRelayService {
         }
         refreshTimer = timer
         timer.resume()
+        lock.unlock()
     }
 
     private func refreshAllProviders() {
         for provider in configurationSnapshot().providers where !provider.keys.isEmpty {
-            fetchModels(providerID: provider.id) { _ in }
+            fetchModels(providerID: provider.id, resetAuthenticationFailures: false) { _ in }
         }
     }
 
@@ -684,12 +734,43 @@ final class ModelRelayService {
     ) {
         server.stop()
         do {
-            try server.start(port: port) { [weak self] _ in
-                self?.completeOnMain(completion, result: .failure(originalError))
+            try server.start(port: port) { [weak self] result in
+                guard let self else { return }
+                if case .success = result, self.isRunningWanted() {
+                    self.startRefreshTimer()
+                    self.refreshAllProviders()
+                }
+                self.completeOnMain(completion, result: .failure(originalError))
             }
         } catch {
             setRunState(.failed(error.localizedDescription))
             completeOnMain(completion, result: .failure(originalError))
         }
+    }
+}
+
+private final class ModelRelayServiceReadiness {
+    private let lock = NSLock()
+    private let semaphore = DispatchSemaphore(value: 0)
+    private var result: Result<Void, Error>?
+
+    func resolve(_ result: Result<Void, Error>) {
+        lock.lock()
+        guard self.result == nil else {
+            lock.unlock()
+            return
+        }
+        self.result = result
+        lock.unlock()
+        semaphore.signal()
+    }
+
+    func wait(timeout: TimeInterval) -> Result<Void, Error>? {
+        guard semaphore.wait(timeout: .now() + timeout) == .success else {
+            return nil
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        return result
     }
 }

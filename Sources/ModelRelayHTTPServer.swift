@@ -2,9 +2,9 @@ import Foundation
 import Network
 
 final class ModelRelayHTTPServer {
+    private static let networkQueue = DispatchQueue(label: "com.tocode.model-relay.listener")
     private let router: ModelRelayRouter
     private let upstream: ModelRelayUpstreamClient
-    private let queue = DispatchQueue(label: "com.tocode.model-relay.listener")
     private let lock = NSLock()
     private var listener: NWListener?
     private var handlers: [UUID: ModelRelayHTTPConnection] = [:]
@@ -46,7 +46,9 @@ final class ModelRelayHTTPServer {
                 self.listener = nil
                 self.stateDidChange?(.failed(error.localizedDescription))
                 readinessState.resolve(.failure(relayError))
-                listener.cancel()
+                DispatchQueue.global(qos: .utility).async {
+                    listener.cancel()
+                }
             case .ready:
                 self.stateDidChange?(.running(port: port))
                 readinessState.resolve(.success(()))
@@ -54,7 +56,9 @@ final class ModelRelayHTTPServer {
                 self.listener = nil
                 self.stateDidChange?(.failed(error.localizedDescription))
                 readinessState.resolve(.failure(ModelRelayError.listener(error.localizedDescription)))
-                listener.cancel()
+                DispatchQueue.global(qos: .utility).async {
+                    listener.cancel()
+                }
             case .cancelled:
                 self.stateDidChange?(.stopped)
                 readinessState.resolve(.failure(ModelRelayError.listener("监听已取消")))
@@ -67,7 +71,7 @@ final class ModelRelayHTTPServer {
         }
         self.listener = listener
         stateDidChange?(.starting)
-        listener.start(queue: queue)
+        listener.start(queue: Self.networkQueue)
     }
 
     func stop() {
@@ -98,7 +102,7 @@ final class ModelRelayHTTPServer {
         lock.lock()
         handlers[id] = handler
         lock.unlock()
-        handler.start(queue: queue)
+        handler.start(queue: Self.networkQueue)
     }
 }
 

@@ -107,7 +107,7 @@ final class ModelRelayRouter: @unchecked Sendable {
         var candidates: [ModelRelayUpstreamCandidate] = []
         for reference in ordered {
             guard let secret = try keyStore.load(id: reference.id) else {
-                recordFailure(keyID: reference.id, statusCode: 401)
+                recordFailure(keyID: reference.id, statusCode: nil)
                 continue
             }
             candidates.append(ModelRelayUpstreamCandidate(
@@ -158,5 +158,14 @@ final class ModelRelayRouter: @unchecked Sendable {
             health.removeAll()
         }
         lock.unlock()
+    }
+
+    func keyIDsEligibleForAutomaticRefresh(_ keyIDs: [UUID]) -> [UUID] {
+        lock.lock()
+        let eligible = keyIDs.filter {
+            !health[$0, default: KeyHealth()].authenticationFailed
+        }
+        lock.unlock()
+        return eligible
     }
 }
