@@ -80,6 +80,10 @@ final class ModelRelayService {
         _ value: Int,
         completion: @escaping (Result<Void, Error>) -> Void
     ) {
+        if let startupError {
+            completeOnMain(completion, result: .failure(startupError))
+            return
+        }
         guard (1024...65_535).contains(value) else {
             completeOnMain(completion, result: .failure(ModelRelayError.invalidPort))
             return
@@ -496,9 +500,12 @@ final class ModelRelayService {
 
     private func fetchModels(provider: ModelRelayProvider) async throws -> [String] {
         var lastError: Error = ModelRelayError.noHealthyUpstream
+        var firstSuccessfulCatalog: [String]?
         for reference in provider.keys {
             do {
                 guard let secret = try upstreamKeyStore.load(id: reference.id) else {
+                    router.recordFailure(keyID: reference.id, statusCode: 401)
+                    lastError = ModelRelayError.keyNotFound
                     continue
                 }
                 let models = try await upstreamClient.fetchModels(
@@ -506,11 +513,22 @@ final class ModelRelayService {
                     secret: secret
                 )
                 router.recordSuccess(keyID: reference.id)
-                return models
+                if firstSuccessfulCatalog == nil {
+                    firstSuccessfulCatalog = models
+                }
             } catch {
-                router.recordFailure(keyID: reference.id, statusCode: nil)
+                let statusCode: Int?
+                if case ModelRelayError.upstreamHTTP(let status) = error {
+                    statusCode = status
+                } else {
+                    statusCode = nil
+                }
+                router.recordFailure(keyID: reference.id, statusCode: statusCode)
                 lastError = error
             }
+        }
+        if let firstSuccessfulCatalog {
+            return firstSuccessfulCatalog
         }
         throw lastError
     }

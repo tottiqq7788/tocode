@@ -149,6 +149,7 @@ enum ModelRelayError: Error, Equatable, LocalizedError {
     case configurationCorrupt
     case keychain(OSStatus)
     case cryptoFailed
+    case upstreamHTTP(Int)
     case upstream(String)
     case listener(String)
 
@@ -190,6 +191,8 @@ enum ModelRelayError: Error, Equatable, LocalizedError {
             return "钥匙串操作失败（\(status)）。"
         case .cryptoFailed:
             return "本地 Key 加密或解密失败。"
+        case .upstreamHTTP(let status):
+            return "上游请求失败：HTTP \(status)"
         case .upstream(let message):
             return "上游请求失败：\(message)"
         case .listener(let message):

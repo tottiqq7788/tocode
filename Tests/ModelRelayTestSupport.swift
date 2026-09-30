@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 final class MemoryModelRelayConfigStore: ModelRelayConfigStoring {
     var configuration: ModelRelayConfiguration
@@ -15,6 +16,19 @@ final class MemoryModelRelayConfigStore: ModelRelayConfigStoring {
     func save(_ configuration: ModelRelayConfiguration) throws {
         if let saveError { throw saveError }
         self.configuration = configuration
+    }
+}
+
+final class CorruptModelRelayConfigStore: ModelRelayConfigStoring {
+    private(set) var saveCount = 0
+
+    func load() throws -> ModelRelayConfiguration {
+        throw ModelRelayError.configurationCorrupt
+    }
+
+    func save(_ configuration: ModelRelayConfiguration) throws {
+        saveCount += 1
+        throw ModelRelayError.configurationCorrupt
     }
 }
 
@@ -42,6 +56,20 @@ final class MemoryModelRelayKeyStore: ModelRelayUpstreamKeyStoring {
         lock.lock()
         values.removeValue(forKey: id)
         lock.unlock()
+    }
+}
+
+final class DeniedModelRelayKeyStore: ModelRelayUpstreamKeyStoring {
+    func load(id: UUID) throws -> String? {
+        throw ModelRelayError.keychain(errSecAuthFailed)
+    }
+
+    func save(_ secret: String, id: UUID) throws {
+        throw ModelRelayError.keychain(errSecAuthFailed)
+    }
+
+    func delete(id: UUID) throws {
+        throw ModelRelayError.keychain(errSecAuthFailed)
     }
 }
 

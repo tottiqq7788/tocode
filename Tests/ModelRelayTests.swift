@@ -90,6 +90,15 @@ func testModelRelayHTTPParser() {
     } catch {
         expect(error as? ModelRelayHTTPParseError == .headersTooLarge, "请求头执行 64 KiB 限制")
     }
+    let overflowingChunk = Data(
+        "POST /v1/responses HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n7fffffffffffffff\r\n".utf8
+    )
+    do {
+        _ = try ModelRelayHTTPParser.parse(overflowingChunk)
+        expect(false, "超大 chunk 声明应拒绝且不得整数溢出")
+    } catch {
+        expect(error as? ModelRelayHTTPParseError == .bodyTooLarge, "chunk 大小执行 64 MiB 限制")
+    }
 }
 
 func testModelRelayRouterAndControlPlane() {
@@ -144,6 +153,24 @@ func testModelRelayRouterAndControlPlane() {
         try! router.resolve(alias: "local-a").candidates.contains { $0.keyID == secondKey.id },
         "429 Key 冷却后自动恢复"
     )
+
+    let deniedRouter = ModelRelayRouter(
+        configuration: configuration,
+        keyStore: DeniedModelRelayKeyStore(),
+        vault: vault
+    )
+    expect(deniedRouter.availableAliases().isEmpty, "Keychain 拒绝时不公布可用模型")
+    do {
+        _ = try deniedRouter.resolve(alias: "local-a")
+        expect(false, "Keychain 拒绝时不得回退明文或继续路由")
+    } catch {
+        if let relayError = error as? ModelRelayError,
+           case .keychain = relayError {
+            expect(true, "Keychain 拒绝时路由失败关闭")
+        } else {
+            expect(false, "Keychain 拒绝应返回钥匙串错误")
+        }
+    }
 
     let initial = ModelRelayConfiguration(providers: [
         ModelRelayProvider(
@@ -257,6 +284,83 @@ func testModelRelayValidatedKeyControlPlane() async {
             "替换校验失败时保留原上游 secret"
         )
     }
+
+    let healthyReference = ModelRelayUpstreamKeyReference(name: "healthy")
+    let rejectedReference = ModelRelayUpstreamKeyReference(name: "rejected")
+    let refreshProvider = ModelRelayProvider(
+        name: "refresh-all",
+        baseURL: "https://refresh.example/v1",
+        keys: [healthyReference, rejectedReference]
+    )
+    let refreshKeys = MemoryModelRelayKeyStore([
+        healthyReference.id: "healthy-secret",
+        rejectedReference.id: "rejected-secret"
+    ])
+    let refreshService = ModelRelayService(
+        configStore: MemoryModelRelayConfigStore(
+            ModelRelayConfiguration(providers: [refreshProvider])
+        ),
+        upstreamKeyStore: refreshKeys,
+        localKeyVault: ModelRelayLocalKeyVault(iterations: 1),
+        upstreamClient: client
+    )
+    ModelRelayURLProtocol.reset { request in
+        if request.value(forHTTPHeaderField: "Authorization") == "Bearer rejected-secret" {
+            return ModelRelayStubResponse(status: 401)
+        }
+        return ModelRelayStubResponse(
+            status: 200,
+            chunks: [Data("{\"data\":[{\"id\":\"refresh-model\"}]}".utf8)]
+        )
+    }
+    let refreshResult: Result<[ModelRelayModelRoute], Error> = await withCheckedContinuation { continuation in
+        refreshService.fetchModels(providerID: refreshProvider.id) {
+            continuation.resume(returning: $0)
+        }
+    }
+    if case .failure(let error) = refreshResult {
+        expect(false, "至少一个健康 Key 时刷新应成功：\(error)")
+    }
+    expect(ModelRelayURLProtocol.requests.count == 2, "一次刷新会校验厂商下全部上游 Key")
+    do {
+        let route = try refreshService.router.resolve(alias: "refresh-model")
+        expect(
+            route.candidates.map(\.keyID) == [healthyReference.id],
+            "刷新时 401 Key 被永久隔离且不进入健康轮询"
+        )
+    } catch {
+        expect(false, "刷新后的健康模型应可路由：\(error)")
+    }
+
+    let corruptStore = CorruptModelRelayConfigStore()
+    let unavailableService = ModelRelayService(
+        configStore: corruptStore,
+        upstreamKeyStore: MemoryModelRelayKeyStore(),
+        localKeyVault: ModelRelayLocalKeyVault(iterations: 1),
+        upstreamClient: client
+    )
+    if case .failed = unavailableService.runState {
+        expect(true, "配置损坏时服务保持明确失败状态")
+    } else {
+        expect(false, "配置损坏时服务不得伪装为可运行")
+    }
+    do {
+        try unavailableService.start()
+        expect(false, "配置损坏时不得启动空配置 listener")
+    } catch {
+        expect(error as? ModelRelayError == .configurationCorrupt, "配置损坏时启动失败关闭")
+    }
+    let corruptPortResult: Result<Void, Error> = await withCheckedContinuation { continuation in
+        unavailableService.updatePort(28_001) {
+            continuation.resume(returning: $0)
+        }
+    }
+    if case .success = corruptPortResult {
+        expect(false, "配置损坏时不得借改端口覆盖配置")
+    } else {
+        expect(true, "配置损坏时拒绝改端口")
+    }
+    expect(corruptStore.saveCount == 0, "配置损坏时不写回默认配置")
 }
 
 func testModelRelayUpstreamProxy() async {
@@ -281,6 +385,15 @@ func testModelRelayUpstreamProxy() async {
         expect(models == ["a", "b"], "上游模型目录去重并排序")
     } catch {
         expect(false, "上游模型目录请求应成功：\(error)")
+    }
+    ModelRelayURLProtocol.reset { _ in
+        ModelRelayStubResponse(status: 401, chunks: [Data()])
+    }
+    do {
+        _ = try await client.fetchModels(baseURL: "https://catalog.example/v1", secret: "invalid")
+        expect(false, "模型目录 401 应失败")
+    } catch {
+        expect(error as? ModelRelayError == .upstreamHTTP(401), "模型目录保留 401 状态供健康路由永久隔离")
     }
 
     let firstID = UUID()
@@ -322,6 +435,84 @@ func testModelRelayUpstreamProxy() async {
         expect(ModelRelayURLProtocol.requests.count == 2, "响应前故障恰好尝试两个 Key")
     } catch {
         expect(false, "普通代理与故障转移应成功：\(error)")
+    }
+
+    for status in [401, 403, 429] {
+        let statusRoute = ModelRelayResolvedRoute(alias: "local-model", candidates: [
+            ModelRelayUpstreamCandidate(
+                providerID: UUID(),
+                keyID: UUID(),
+                baseURL: "https://proxy.example/v1",
+                upstreamModelID: "upstream-model",
+                secret: "status-\(status)"
+            ),
+            ModelRelayUpstreamCandidate(
+                providerID: UUID(),
+                keyID: UUID(),
+                baseURL: "https://proxy.example/v1",
+                upstreamModelID: "upstream-model",
+                secret: "status-good"
+            )
+        ])
+        ModelRelayURLProtocol.reset { request in
+            if request.value(forHTTPHeaderField: "Authorization") == "Bearer status-\(status)" {
+                return ModelRelayStubResponse(status: status)
+            }
+            return ModelRelayStubResponse(status: 200, chunks: [Data("{\"ok\":true}".utf8)])
+        }
+        do {
+            let output = try await runModelRelayProxy(
+                client: client,
+                request: modelRelayRequest(),
+                route: statusRoute,
+                router: router
+            )
+            expect(
+                String(data: output, encoding: .utf8)?.contains("HTTP/1.1 200") == true
+                    && ModelRelayURLProtocol.requests.count == 2,
+                "响应前 HTTP \(status) 会故障转移"
+            )
+        } catch {
+            expect(false, "HTTP \(status) 故障转移应成功：\(error)")
+        }
+    }
+
+    let networkRoute = ModelRelayResolvedRoute(alias: "local-model", candidates: [
+        ModelRelayUpstreamCandidate(
+            providerID: UUID(),
+            keyID: UUID(),
+            baseURL: "https://proxy.example/v1",
+            upstreamModelID: "upstream-model",
+            secret: "network-bad"
+        ),
+        ModelRelayUpstreamCandidate(
+            providerID: UUID(),
+            keyID: UUID(),
+            baseURL: "https://proxy.example/v1",
+            upstreamModelID: "upstream-model",
+            secret: "network-good"
+        )
+    ])
+    ModelRelayURLProtocol.reset { request in
+        if request.value(forHTTPHeaderField: "Authorization") == "Bearer network-bad" {
+            throw URLError(.cannotConnectToHost)
+        }
+        return ModelRelayStubResponse(status: 200, chunks: [Data("{\"ok\":true}".utf8)])
+    }
+    do {
+        let output = try await runModelRelayProxy(
+            client: client,
+            request: modelRelayRequest(),
+            route: networkRoute,
+            router: router
+        )
+        expect(
+            String(data: output, encoding: .utf8)?.contains("HTTP/1.1 200") == true
+                && ModelRelayURLProtocol.requests.count == 2,
+            "响应前连接失败会故障转移"
+        )
+    } catch {
+        expect(false, "连接失败故障转移应成功：\(error)")
     }
 
     ModelRelayURLProtocol.reset { _ in

@@ -40,7 +40,7 @@ final class ModelRelayUpstreamClient: ModelRelayCatalogFetching {
             throw ModelRelayError.upstream("没有 HTTP 响应")
         }
         guard (200...299).contains(http.statusCode) else {
-            throw ModelRelayError.upstream("HTTP \(http.statusCode)")
+            throw ModelRelayError.upstreamHTTP(http.statusCode)
         }
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let entries = object["data"] as? [[String: Any]] else {

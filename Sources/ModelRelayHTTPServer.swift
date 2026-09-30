@@ -57,6 +57,7 @@ final class ModelRelayHTTPServer {
                 listener.cancel()
             case .cancelled:
                 self.stateDidChange?(.stopped)
+                readinessState.resolve(.failure(ModelRelayError.listener("监听已取消")))
             @unknown default:
                 break
             }

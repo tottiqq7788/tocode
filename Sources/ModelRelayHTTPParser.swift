@@ -71,11 +71,14 @@ enum ModelRelayHTTPParser {
         let body: Data
         let consumedBodyBytes: Int
         if let transferEncoding = headers["transfer-encoding"] {
-            guard transferEncoding.lowercased()
+            let encodings = transferEncoding.lowercased()
                 .split(separator: ",")
-                .map({ $0.trimmingCharacters(in: .whitespaces) })
-                .last == "chunked" else {
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+            guard encodings == ["chunked"], headers["content-length"] == nil else {
                 throw ModelRelayHTTPParseError.unsupportedTransferEncoding
+            }
+            guard bodyData.count <= maximumBodyBytes + maximumHeaderBytes else {
+                throw ModelRelayHTTPParseError.bodyTooLarge
             }
             guard let chunked = try parseChunked(Data(bodyData)) else { return nil }
             body = chunked.body
@@ -132,7 +135,7 @@ enum ModelRelayHTTPParser {
                 }
                 return (decoded, cursor + 2)
             }
-            guard decoded.count + size <= maximumBodyBytes else {
+            guard size <= maximumBodyBytes - decoded.count else {
                 throw ModelRelayHTTPParseError.bodyTooLarge
             }
             guard data.count >= cursor + size + 2 else { return nil }
