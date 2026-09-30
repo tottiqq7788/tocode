@@ -380,18 +380,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         )
         inputItem.submenu = inputMenu
 
-        // 工具
+        // 工具：定时器置顶，其后临时黑屏与程序坞限制。
         let toolsItem = menu.addItem(withTitle: "工具", action: nil, keyEquivalent: "")
         toolsItem.image = NSImage(systemSymbolName: "wrench.and.screwdriver", accessibilityDescription: nil)
         let toolsMenu = NSMenu()
         toolsMenu.autoenablesItems = false
-        let blackoutItem = toolsMenu.addItem(
-            withTitle: "临时黑屏",
-            action: #selector(activateScreenBlackout),
-            keyEquivalent: ""
-        )
-        blackoutItem.target = self
-        blackoutItem.image = NSImage(systemSymbolName: "display.trianglebadge.exclamationmark", accessibilityDescription: nil)
 
         let timerItem = toolsMenu.addItem(withTitle: "定时器", action: nil, keyEquivalent: "")
         timerItem.image = NSImage(systemSymbolName: "timer", accessibilityDescription: nil)
@@ -427,6 +420,14 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
         timerItem.submenu = timerMenu
         liveTimerMenu = timerMenu
+
+        let blackoutItem = toolsMenu.addItem(
+            withTitle: "临时黑屏",
+            action: #selector(activateScreenBlackout),
+            keyEquivalent: ""
+        )
+        blackoutItem.target = self
+        blackoutItem.image = NSImage(systemSymbolName: "display.trianglebadge.exclamationmark", accessibilityDescription: nil)
 
         addShortcutToggle(
             to: toolsMenu,
