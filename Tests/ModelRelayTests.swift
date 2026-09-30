@@ -3,20 +3,57 @@ import AppKit
 
 @MainActor
 func testModelRelayPromptFormLayout() {
+    let presets = ModelRelayPrompts.providerPresets
+    expect(
+        presets.map(\.baseURL) == [
+            "https://api.openai.com/v1",
+            "https://api.deepseek.com/v1",
+            "https://api.moonshot.cn/v1",
+            "https://api.siliconflow.cn/v1",
+            "https://open.bigmodel.cn/api/paas/v4",
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+            "https://api.x.ai/v1",
+            "https://api.groq.com/openai/v1",
+            "https://openrouter.ai/api/v1",
+            "https://api.mistral.ai/v1"
+        ],
+        "模型厂商预设映射到固定官方 Base URL"
+    )
+    expect(Set(presets.map(\.title)).count == presets.count, "模型厂商预设名称唯一")
+    expect(Set(presets.map(\.baseURL)).count == presets.count, "模型厂商预设 URL 唯一")
+    expect(
+        presets.allSatisfy {
+            (try? ModelRelayValidation.normalizedBaseURL($0.baseURL)) == $0.baseURL
+        },
+        "模型厂商预设均为已规范化的安全 URL"
+    )
+    expect(
+        ModelRelayPrompts.providerChoices(existingBaseURL: presets[1].baseURL) == presets,
+        "编辑预设厂商时仍选中既有预设"
+    )
+    let legacyURL = "http://127.0.0.1:11434/v1"
+    let legacyChoices = ModelRelayPrompts.providerChoices(existingBaseURL: legacyURL)
+    expect(
+        legacyChoices.count == presets.count + 1
+            && legacyChoices.last?.baseURL == legacyURL,
+        "旧自定义厂商编辑时保留原地址"
+    )
+
     let name = NSTextField()
-    let url = NSTextField()
-    let accessory = ModelRelayPrompts.formAccessory(fields: [
-        ("名称", name),
-        ("Base URL", url)
+    let provider = NSPopUpButton()
+    provider.addItems(withTitles: presets.map(\.title))
+    let accessory = ModelRelayPrompts.formAccessory(controls: [
+        ("厂商", provider),
+        ("名称", name)
     ])
     accessory.layoutSubtreeIfNeeded()
 
     expect(accessory.frame.width >= 400, "模型弹窗表单保留可输入宽度")
     expect(accessory.frame.height >= 60, "模型弹窗表单保留两行输入高度")
+    expect(provider.frame.width >= 300 && provider.frame.height >= 20, "模型弹窗厂商下拉框未被压缩")
     expect(name.frame.width >= 300 && name.frame.height >= 20, "模型弹窗名称框未被压缩")
-    expect(url.frame.width >= 300 && url.frame.height >= 20, "模型弹窗 URL 框未被压缩")
     expect(name.isEditable && name.isEnabled, "模型弹窗输入框可编辑")
-    expect(AlertFocus.firstEditableTextField(in: accessory) === name, "模型弹窗默认聚焦首个输入框")
+    expect(AlertFocus.firstEditableTextField(in: accessory) === name, "模型弹窗默认聚焦名称输入框")
 }
 
 func testModelRelayValidationConfigAndVault() {

@@ -2,6 +2,11 @@ import AppKit
 
 @MainActor
 enum ModelRelayPrompts {
+    struct ProviderPreset: Equatable {
+        let title: String
+        let baseURL: String
+    }
+
     struct ProviderInput {
         let name: String
         let baseURL: String
@@ -22,21 +27,47 @@ enum ModelRelayPrompts {
         case delete
     }
 
+    static let providerPresets: [ProviderPreset] = [
+        ProviderPreset(title: "OpenAI", baseURL: "https://api.openai.com/v1"),
+        ProviderPreset(title: "DeepSeek（深度求索）", baseURL: "https://api.deepseek.com/v1"),
+        ProviderPreset(title: "Kimi（月之暗面）", baseURL: "https://api.moonshot.cn/v1"),
+        ProviderPreset(title: "SiliconFlow（硅基流动）", baseURL: "https://api.siliconflow.cn/v1"),
+        ProviderPreset(title: "智谱 BigModel", baseURL: "https://open.bigmodel.cn/api/paas/v4"),
+        ProviderPreset(
+            title: "Google Gemini",
+            baseURL: "https://generativelanguage.googleapis.com/v1beta/openai"
+        ),
+        ProviderPreset(title: "xAI", baseURL: "https://api.x.ai/v1"),
+        ProviderPreset(title: "Groq", baseURL: "https://api.groq.com/openai/v1"),
+        ProviderPreset(title: "OpenRouter", baseURL: "https://openrouter.ai/api/v1"),
+        ProviderPreset(title: "Mistral AI", baseURL: "https://api.mistral.ai/v1")
+    ]
+
     static func provider(existing: ModelRelayProvider? = nil) -> ProviderInput? {
         let name = NSTextField(string: existing?.name ?? "")
         name.placeholderString = "唯一厂商名称"
-        let url = NSTextField(string: existing?.baseURL ?? "https://")
-        url.placeholderString = "https://api.example.com/v1"
+        let choices = providerChoices(existingBaseURL: existing?.baseURL)
+        let provider = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 330, height: 26))
+        provider.addItems(withTitles: choices.map(\.title))
+        if let existing,
+           let selected = choices.firstIndex(where: { $0.baseURL == existing.baseURL }) {
+            provider.selectItem(at: selected)
+        }
         let alert = formAlert(
             title: existing == nil ? "新增模型厂商" : "编辑模型厂商",
-            information: "仅支持 OpenAI-compatible 上游。远程地址必须使用 HTTPS。",
-            fields: [("名称", name), ("Base URL", url)],
+            information: "选择 OpenAI-compatible 上游并填写唯一名称，Base URL 会自动配置。",
+            controls: [("厂商", provider), ("名称", name)],
             primary: existing == nil ? "新增" : "保存"
         )
         while alert.runModalFocusingFirstTextField() == .alertFirstButtonReturn {
             do {
                 let normalizedName = try ModelRelayValidation.normalizedName(name.stringValue)
-                let normalizedURL = try ModelRelayValidation.normalizedBaseURL(url.stringValue)
+                guard choices.indices.contains(provider.indexOfSelectedItem) else {
+                    throw ModelRelayError.invalidBaseURL
+                }
+                let normalizedURL = try ModelRelayValidation.normalizedBaseURL(
+                    choices[provider.indexOfSelectedItem].baseURL
+                )
                 return ProviderInput(name: normalizedName, baseURL: normalizedURL)
             } catch {
                 alert.informativeText = error.localizedDescription
@@ -44,6 +75,16 @@ enum ModelRelayPrompts {
             }
         }
         return nil
+    }
+
+    static func providerChoices(existingBaseURL: String?) -> [ProviderPreset] {
+        guard let existingBaseURL,
+              !providerPresets.contains(where: { $0.baseURL == existingBaseURL }) else {
+            return providerPresets
+        }
+        return providerPresets + [
+            ProviderPreset(title: "现有自定义地址（保留）", baseURL: existingBaseURL)
+        ]
     }
 
     static func upstreamKey(existingName: String? = nil) -> UpstreamKeyInput? {
@@ -207,24 +248,42 @@ enum ModelRelayPrompts {
         fields: [(String, NSTextField)],
         primary: String
     ) -> NSAlert {
+        formAlert(
+            title: title,
+            information: information,
+            controls: fields.map { ($0.0, $0.1 as NSView) },
+            primary: primary
+        )
+    }
+
+    private static func formAlert(
+        title: String,
+        information: String,
+        controls: [(String, NSView)],
+        primary: String
+    ) -> NSAlert {
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = information
         alert.addButton(withTitle: primary)
         alert.addButton(withTitle: "取消")
 
-        alert.accessoryView = formAccessory(fields: fields)
+        alert.accessoryView = formAccessory(controls: controls)
         return alert
     }
 
     static func formAccessory(fields: [(String, NSTextField)]) -> NSView {
+        formAccessory(controls: fields.map { ($0.0, $0.1 as NSView) })
+    }
+
+    static func formAccessory(controls: [(String, NSView)]) -> NSView {
         let fieldWidth: CGFloat = 330
         let labelWidth: CGFloat = 78
-        let rowHeight: CGFloat = 26
+        let rowHeight: CGFloat = 28
         let spacing: CGFloat = 8
         let totalWidth = labelWidth + 10 + fieldWidth
-        let totalHeight = CGFloat(fields.count) * rowHeight
-            + CGFloat(max(0, fields.count - 1)) * spacing
+        let totalHeight = CGFloat(controls.count) * rowHeight
+            + CGFloat(max(0, controls.count - 1)) * spacing
 
         let form = NSStackView(frame: NSRect(
             x: 0,
@@ -236,15 +295,17 @@ enum ModelRelayPrompts {
         form.alignment = .leading
         form.spacing = spacing
 
-        for (label, field) in fields {
+        for (label, control) in controls {
             let text = NSTextField(labelWithString: label)
             text.alignment = .right
             text.translatesAutoresizingMaskIntoConstraints = false
-            field.setAccessibilityLabel(label)
-            field.isEditable = true
-            field.isSelectable = true
-            field.isEnabled = true
-            field.translatesAutoresizingMaskIntoConstraints = false
+            control.setAccessibilityLabel(label)
+            control.translatesAutoresizingMaskIntoConstraints = false
+            if let field = control as? NSTextField {
+                field.isEditable = true
+                field.isSelectable = true
+                field.isEnabled = true
+            }
 
             let row = NSStackView(frame: NSRect(
                 x: 0,
@@ -257,13 +318,15 @@ enum ModelRelayPrompts {
             row.spacing = 10
             row.translatesAutoresizingMaskIntoConstraints = false
             row.addArrangedSubview(text)
-            row.addArrangedSubview(field)
+            row.addArrangedSubview(control)
             NSLayoutConstraint.activate([
                 row.widthAnchor.constraint(equalToConstant: totalWidth),
                 row.heightAnchor.constraint(equalToConstant: rowHeight),
                 text.widthAnchor.constraint(equalToConstant: labelWidth),
-                field.widthAnchor.constraint(equalToConstant: fieldWidth),
-                field.heightAnchor.constraint(equalToConstant: 24)
+                control.widthAnchor.constraint(equalToConstant: fieldWidth),
+                control.heightAnchor.constraint(
+                    equalToConstant: control is NSPopUpButton ? 26 : 24
+                )
             ])
             form.addArrangedSubview(row)
         }
