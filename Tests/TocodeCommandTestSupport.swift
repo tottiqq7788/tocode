@@ -126,9 +126,25 @@ final class MockTocodeScreenBlackout: ScreenBlackoutOverlaying {
 
 final class MockTocodeFinderSelection: TocodeFinderSelectionCommanding {
     var result: Result<String, FinderSelectionError> = .success("/tmp/selected")
+    var selectedItemResult: Result<String, FinderSelectionError> = .success("/tmp/selected-item")
 
     func resolveInitializationDirectory() -> Result<String, FinderSelectionError> {
         result
+    }
+
+    func resolveSelectedItemPath() -> Result<String, FinderSelectionError> {
+        selectedItemResult
+    }
+}
+
+final class MockTocodeClipboard: TocodeClipboardCommanding {
+    var text: String?
+    var copiedPaths: [String] = []
+
+    func read() -> String? { text }
+    func copyPath(_ path: String) {
+        copiedPaths.append(path)
+        text = ClipboardService.formatPath(path)
     }
 }
 

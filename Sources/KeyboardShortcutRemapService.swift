@@ -58,10 +58,6 @@ final class KeyboardMappingActionDispatcher {
         switch action {
         case .openFinderAtRoot:
             openFinderAtRoot()
-        case .copyFinderSelectedPath:
-            copyFinderSelectedPath()
-        case .readClipboardRoot:
-            readClipboardRoot()
         default:
             break
         }

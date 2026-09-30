@@ -5,9 +5,17 @@ import UserNotifications
 /// 供命令执行器使用的窄接口，真实服务通过扩展适配，测试可注入 mock。
 protocol TocodeFinderSelectionCommanding {
     func resolveInitializationDirectory() -> Result<String, FinderSelectionError>
+    func resolveSelectedItemPath() -> Result<String, FinderSelectionError>
 }
 
 extension FinderSelectionService: TocodeFinderSelectionCommanding {}
+
+protocol TocodeClipboardCommanding {
+    func read() -> String?
+    func copyPath(_ path: String)
+}
+
+extension ClipboardService: TocodeClipboardCommanding {}
 
 
 protocol TocodeWheelCommanding {
@@ -42,6 +50,7 @@ final class TocodeCommandExecutor {
     private let store: RootPathStore
     private let chooser: TocodeRootChoosing
     private let finderSelection: any TocodeFinderSelectionCommanding
+    private let clipboard: any TocodeClipboardCommanding
     private let visibility: any TocodeVisibilityCommanding
     private let launchAtLogin: LaunchAtLoginControlling
     private let mouseWheel: any TocodeWheelCommanding
@@ -60,6 +69,7 @@ final class TocodeCommandExecutor {
         store: RootPathStore = RootPathStore(),
         chooser: TocodeRootChoosing? = nil,
         finderSelection: any TocodeFinderSelectionCommanding = FinderSelectionService(),
+        clipboard: any TocodeClipboardCommanding = ClipboardService(),
         visibility: any TocodeVisibilityCommanding = FinderVisibilityService(),
         launchAtLogin: LaunchAtLoginControlling = LaunchAtLoginService(),
         mouseWheel: any TocodeWheelCommanding,
@@ -89,6 +99,7 @@ final class TocodeCommandExecutor {
         self.store = store
         self.chooser = chooser ?? PanelTocodeRootChooser()
         self.finderSelection = finderSelection
+        self.clipboard = clipboard
         self.visibility = visibility
         self.launchAtLogin = launchAtLogin
         self.mouseWheel = mouseWheel
@@ -115,6 +126,8 @@ final class TocodeCommandExecutor {
             return .success(TocodeCommandOutput(lines: statusLines()))
         case .root(let subcommand):
             return executeRoot(subcommand)
+        case .finder(let subcommand):
+            return executeFinder(subcommand)
         case .codex(let subcommand):
             return executeCodex(subcommand)
         case .wechat(.send):
@@ -251,6 +264,52 @@ final class TocodeCommandExecutor {
             return applyToggle(toggle, current: finderFollow.followEnabled) { target in
                 finderFollow.followEnabled = target
                 return .success(())
+            }
+        case .clipboard:
+            return executeRootClipboard()
+        case .open:
+            return executeRootOpen()
+        }
+    }
+
+    private func executeRootClipboard() -> TocodeCommandResult {
+        guard let raw = clipboard.read() else {
+            return .failure(.operationFailed("剪贴板为空或不是文本"))
+        }
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else {
+            return .failure(.operationFailed("剪贴板为空或不是文本"))
+        }
+        guard !text.hasPrefix("\u{300C}") else {
+            return .failure(.operationFailed("剪贴板路径带「」包裹，请粘贴纯路径"))
+        }
+        let standardized = (text as NSString).standardizingPath
+        guard fs.isExistingDirectory(standardized) else {
+            return .failure(.rootNotFound(text))
+        }
+        store.save(standardized)
+        notify("根目录已更新", standardized)
+        return .success(TocodeCommandOutput("已设置根目录：\(standardized)"))
+    }
+
+    private func executeRootOpen() -> TocodeCommandResult {
+        let root = store.resolveRoot(isDirectory: fs.isExistingDirectory)
+        guard fs.isExistingDirectory(root) else {
+            return .failure(.rootNotFound(root))
+        }
+        NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: root)
+        return .success(TocodeCommandOutput("已在访达打开根目录：\(root)"))
+    }
+
+    private func executeFinder(_ subcommand: TocodeFinderCommand) -> TocodeCommandResult {
+        switch subcommand {
+        case .copy:
+            switch finderSelection.resolveSelectedItemPath() {
+            case .failure(let error):
+                return .failure(.finderSelectionFailed(error.commandMessage))
+            case .success(let path):
+                clipboard.copyPath(path)
+                return .success(TocodeCommandOutput("已复制路径：\(path)"))
             }
         }
     }
@@ -391,6 +450,21 @@ final class TocodeCommandExecutor {
             return .success(TocodeCommandOutput("已切换为 \(state)"))
         case .failure(let error):
             return .failure(error)
+        }
+    }
+}
+
+private extension FinderSelectionError {
+    var commandMessage: String {
+        switch self {
+        case .notExactlyOne:
+            return "访达需要恰好选中一项"
+        case .notPermitted:
+            return "没有控制访达的权限"
+        case .scriptFailed:
+            return "读取访达选中项失败"
+        case .invalidPath:
+            return "访达选中项路径无效"
         }
     }
 }

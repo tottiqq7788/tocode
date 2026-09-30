@@ -13,7 +13,7 @@ enum UserManual {
         Tocode 是菜单栏里的本机文件与系统助手，没有主窗口。
 
         • 左键图标：打开当前根目录的目录树（可悬停展开；根菜单有「历史」「配置」与「新增」）。
-        • 右键图标：打开功能菜单（访达、输入、工具、模型、微信、设置、退出）。
+        • 右键图标：打开功能菜单（访达、输入、工具、AK、微信、设置、退出）。
 
         根目录保存在本机。从未设置过时默认为「文稿」目录；路径失效时也会回到该默认位置。左键实际展示根默认是该固定目录；仅当前台是访达且「访达跟随」开、或前台是 Codex 且「codex跟随」开时，才临时改用对应目录。
 
@@ -90,7 +90,8 @@ enum UserManual {
         常用：
         tocode help
         tocode status
-        tocode root get|set|choose|reset|finder-follow
+        tocode root get|set|choose|reset|finder-follow|clipboard|open
+        tocode finder copy
         tocode codex status|sync|model
         tocode wechat status|bind|location|send
         tocode blackout
@@ -100,14 +101,18 @@ enum UserManual {
         tocode shortcut finder-move|double-cmdq|finder-cmdq on|off|toggle
         tocode quit
 
+        root clipboard：剪贴板是不带「」的现有文件夹路径时设为固定根。
+        root open：在访达打开固定根（不是访达/Codex 跟随后的展示根）。
+        finder copy：复制访达当前恰好选中的那一项绝对路径。
+
         开关类命令的 on / off / toggle 可以互换。每条命令都会返回结果，不会静默执行。不会执行任意 shell。
         """),
         Page(title: "设置", body: """
         右键 → 设置
         • 开机自启：随系统登录启动 Tocode。菜单显示的是系统里的真实状态。
         • 配置 → 导出配置 / 导入配置：生成或读入 .tocode 文件。只含键盘映射、触控板、快捷键开关和滚轮。导入前会确认，确认后整段覆盖这些项。根目录、开机自启、访达跟随、codex跟随、拓展设置、微信凭据和密钥不会进出该文件。
-        • 拓展设置 → AK（默认关）：勾选后才出现顶层「模型」夹，以及「设置 → 密钥 → AI」。关闭只隐藏入口，不删除已保存密钥。
-        • 密钥 → AI：录入安克 API 密钥（仅 AK 开启时出现）。
+        • 拓展设置 → AK（默认关）：勾选后才出现顶层「AK」夹（内含「AK-模型」与「密钥 → AI」）。关闭只隐藏入口，不删除已保存密钥。
+        • AK → 密钥 → AI：录入 API 密钥（仅 AK 开启时出现）。
         • 说明书：就是本窗口，位于设置夹最底部。
 
         访达子菜单里的 x/v 移动文件、⌘Q 强关访达，以及输入里的双击 ⌘Q，也都是默认关闭的开关。

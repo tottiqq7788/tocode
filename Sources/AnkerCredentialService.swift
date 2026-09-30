@@ -12,8 +12,8 @@ enum AnkerCredentialError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .invalidKey: return "请输入完整的安克 API 密钥，不要包含空格、换行或 Bearer 前缀。"
-        case .configuration(let target): return "\(target) 配置不符合预期，尚未保存。请检查该工具的安克配置。"
+        case .invalidKey: return "请输入完整的 API 密钥，不要包含空格、换行或 Bearer 前缀。"
+        case .configuration(let target): return "\(target) 配置不符合预期，尚未保存。请检查该工具的 AK 配置。"
         case .changed: return "配置已被其他程序修改，本次保存已取消。请关闭相关设置窗口后重试。"
         case .writeFailed: return "密钥保存失败，已恢复本次修改。请检查配置文件的写入权限。"
         case .database: return "无法更新 CC Switch 数据库，已取消本次保存。"

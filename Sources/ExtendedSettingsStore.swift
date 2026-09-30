@@ -5,6 +5,10 @@ struct ExtendedSettingsStore {
     static let akEnabledKey = "tocode.extendedSettings.akEnabled"
     static let folderTitle = "拓展设置"
     static let akTitle = "AK"
+    /// 右键顶层「AK」夹（仅 AK 开启时出现）。
+    static let topLevelFolderTitle = "AK"
+    /// 顶层 AK 夹内的模型入口。
+    static let modelMenuTitle = "AK-模型"
     static let secretsFolderTitle = "密钥"
     static let akCredentialTitle = "AI"
 
@@ -14,7 +18,7 @@ struct ExtendedSettingsStore {
         self.defaults = defaults
     }
 
-    /// AK 类型开启时才显示「模型」夹与「密钥 → AI」。
+    /// AK 类型开启时才显示顶层「AK → AK-模型」与「AK → 密钥 → AI」。
     var akEnabled: Bool {
         get { defaults.bool(forKey: Self.akEnabledKey) }
         nonmutating set { defaults.set(newValue, forKey: Self.akEnabledKey) }

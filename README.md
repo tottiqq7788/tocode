@@ -8,7 +8,7 @@ macOS 菜单栏文件管理器，Swift/AppKit 原生实现。
 - 每个目录菜单底部固定提供「新增」：弹出小窗口可新建文件夹，或按常见格式创建空文件（txt / md / csv / json / docx / xlsx / pptx / pdf）；文件名不带扩展名时自动追加所选格式扩展名。创建成功后自动把新建项的「绝对路径」复制到剪贴板；取消或失败不改剪贴板。
 - 左键目录树已打开时，按住 `Option` 会实时切换为删除模式：底部「新增」变为「清空」，点击文件/文件夹改为删除；松开后恢复复制路径。清空或删除都会先弹确认窗口，确认后把对应内容移入废纸篓（可恢复）。
 - 左键目录树已打开时，按住 `Command` 会实时切换为访问模式：底部「新增」变为「访问」，点击「访问」或文件夹条目会用访达打开该文件夹，点击文件则用默认应用打开。同时按住 `Option` 时仍为删除模式。不再提供单独的「访问路径」菜单项。
-- 右键菜单栏图标 → 功能菜单：访达、输入、工具、模型（AK）、微信、设置、退出。
+- 右键菜单栏图标 → 功能菜单：访达、输入、工具、AK（含 AK-模型）、微信、设置、退出。
 - 根目录保存在本机；已保存路径不存在时回退 `/Users/admin/Documents`。
 - 开关、根目录、键盘映射、触控板和滚轮写入固定偏好域 `com.tocode.app`，不跟 Bundle ID 走。从旧域 `com.tocode.mac` 启动时自动迁一次。
 - **设置 → 开机自启**（默认关闭）：把 Tocode 登记为系统登录项，开机后自动启动。菜单只显示系统里的实际状态；在系统设置里手动关掉后，下一次打开本菜单会跟着关闭。登记失败或需要批准时不会显示为已开启。
@@ -74,16 +74,16 @@ macOS 菜单栏文件管理器，Swift/AppKit 原生实现。
 ## 设置（拓展设置）
 
 - 右键菜单栏图标 → **设置 → 拓展设置**：列出功能类型开关。类型默认关闭；只有勾选后，右键菜单才显示该类型专用项。
-- **AK**（默认关闭）：勾选后才显示顶层 **模型** 夹，以及 **设置 → 密钥 → AI**。关闭只隐藏这两项，不删除已保存的密钥，也不影响 CLI / 微信命令。
+- **AK**（默认关闭）：勾选后才显示顶层 **AK** 夹（内含 **AK-模型** 与 **密钥 → AI**）。关闭只隐藏这些入口，不删除已保存的密钥，也不影响 CLI / 微信命令。
 
-## 设置（密钥 → AI）
+## 密钥（AK → 密钥 → AI）
 
-- 仅当 **设置 → 拓展设置 → AK** 勾选时出现。右键菜单栏图标 → **设置 → 密钥 → AI**，在隐藏输入框中输入新密钥，点击「保存」。旧密钥不会回填；取消不修改配置。
-- 一次保存同步 OpenCode、pi、CC Switch 当前 Anker Codex 服务商及其代理恢复备份、Hermes。pi 的 Anker `apiKey` 配置为每次请求动态读取 OpenCode 中的安克密钥（使用 macOS 自带 plutil，不依赖额外脚本）；已有的 pi / OpenCode Anker API 认证覆盖项也会同步。
-- Hermes 接入安克网关，默认使用 **DeepSeek V4 Pro**；密钥保存在 `.hermes/.env` 的 `ANKER_API_KEY`，模型配置引用该变量。其他环境变量、微信绑定、其他服务商和 Codex / pi / OpenCode 的模型选择保持不变。
+- 仅当 **设置 → 拓展设置 → AK** 勾选时出现。右键菜单栏图标 → **AK → 密钥 → AI**，在隐藏输入框中输入新密钥，点击「保存」。旧密钥不会回填；取消不修改配置。
+- 一次保存同步 OpenCode、pi、CC Switch 当前 Anker Codex 服务商及其代理恢复备份、Hermes。pi 的 Anker `apiKey` 配置为每次请求动态读取 OpenCode 中的密钥（使用 macOS 自带 plutil，不依赖额外脚本）；已有的 pi / OpenCode Anker API 认证覆盖项也会同步。
+- Hermes 接入该网关，默认使用 **DeepSeek V4 Pro**；密钥保存在 `.hermes/.env` 的 `ANKER_API_KEY`，模型配置引用该变量。其他环境变量、微信绑定、其他服务商和 Codex / pi / OpenCode 的模型选择保持不变。
 - 保存前检查全部配置，捕获写入或复核失败时回滚本次修改；遇到并发修改时不会覆盖其他程序的新内容，恢复失败会明确提示。更新后的凭据文件权限为 `0600`，密钥不进入日志、通知或命令参数。
 - Codex 的后续请求通过 CC Switch 读取更新后的服务商凭据，不改本地代理令牌，也不重启 Codex。pi 后续请求动态读取新密钥，若此前使用过手动登录凭据可打开 `/model` 重新加载配置；已打开的 Hermes / OpenCode 会话需重新加载或重开。Tocode 不会自动中断正在执行的任务。
-- 此入口只管理当前用户的默认配置。配置缺失、当前服务商不匹配、非安克网关、CC Switch 故障转移开启或 Hermes 自定义凭据池覆盖时，会停止保存并提示检查。
+- 此入口只管理当前用户的默认配置。配置缺失、当前服务商不匹配、非预期网关、CC Switch 故障转移开启或 Hermes 自定义凭据池覆盖时，会停止保存并提示检查。
 - 保存动作不发送网络请求，因此成功表示四工具本地配置写入完成；新密钥的远端有效性与额度由后续实际请求确认。跨文件和 SQLite 的恢复针对可捕获故障，不保证断电或进程被强杀时整体原子提交。
 
 ## 配置（codex跟随）
@@ -92,9 +92,9 @@ macOS 菜单栏文件管理器，Swift/AppKit 原生实现。
 - 开启后不置灰「读取剪贴板」「更改目录」「重置初始目录」。
 - 只读本机 Codex 全局状态文件 `~/.codex/.codex-global-state.json`，绝不写回；状态不可读或没有有效项目时，展示根回退固定目录。
 
-## 模型
+## 模型（AK → AK-模型）
 
-- 仅当 **设置 → 拓展设置 → AK** 勾选时出现。右键顶层 **模型** 夹（仅 AK 开启）：其下直接列实时模型选项。
+- 仅当 **设置 → 拓展设置 → AK** 勾选时出现。右键顶层 **AK → AK-模型**：其下直接列实时模型选项。
 - 每次展开模型子菜单都会使用 CC Switch 当前 **Anker AI Router** Provider 的凭据，实时请求 `https://ai-router.anker-in.com/v1/models`；不会使用旧缓存伪装实时结果。加载失败时可直接重试。
 - 规范中确认兼容 Codex `/responses` 的主模型可直接选择；尚未验证的文本模型带警告标记并要求再次确认；图片、视觉、标签以及明确不兼容 `/responses` 的模型会显示在列表中，但不可选择。
 - 选择模型后，Tocode 只替换 CC Switch 当前 Codex Provider 模板和 `~/.codex/config.toml` 中唯一的顶层 `model` 值。两份配置必须同时写入并复核成功；任何失败都会回滚，且不会退出 Codex。
@@ -129,7 +129,9 @@ CLI 通过本机 Unix domain socket 转发给**常驻 Tocode 进程**执行；To
 
 Tocode 首次启动后，会自动把 CLI 安装到 `~/.local/bin/tocode`（该目录已在 PATH 中），之后可直接在终端运行 `tocode ...`。
 
-主要命令：`help`（同 `commands`）、`status`、`root get|set|choose|reset|finder-follow`、`codex status|sync|model|model list|model set`、`wechat status|bind|location|send`、`blackout`、`login on|off|toggle`、`wheel vertical|horizontal on|off|toggle`、`hidden on|off|toggle`、`shortcut finder-move|double-cmdq|finder-cmdq on|off|toggle`、`quit`。开关类命令的 `on|off|toggle` 可互换使用；每条命令都会返回结果，不静默执行。
+主要命令：`help`（同 `commands`）、`status`、`root get|set|choose|reset|finder-follow|clipboard|open`、`finder copy`、`codex status|sync|model|model list|model set`、`wechat status|bind|location|send`、`blackout`、`login on|off|toggle`、`wheel vertical|horizontal on|off|toggle`、`hidden on|off|toggle`、`shortcut finder-move|double-cmdq|finder-cmdq on|off|toggle`、`quit`。开关类命令的 `on|off|toggle` 可互换使用；每条命令都会返回结果，不静默执行。
+
+`root clipboard`：剪贴板是不带「」的现有文件夹路径时设为固定根。`root open`：在访达打开固定根（不是跟随后的展示根）。`finder copy`：把访达恰好选中的一项绝对路径写入剪贴板并打印。
 
 `tocode wechat send [--to <user_id>] [--text <文字>] [文件...]` 通过**当前已绑定**的微信 Bot 主动发消息：默认发给最近一条入站会话；`--to` 只能指定曾经入站过的用户。文字先发，文件按参数顺序各发一条；`jpg/jpeg/png/gif/webp` 作为图片，其余作为附件。单文件不超过 20MB；失败即停，已发出的不回滚。出站内容不写入 `wechat*.md`。Tocode 未运行或未绑定时失败。
 

@@ -43,7 +43,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private weak var liveTimerMenu: NSMenu?
     private var liveTimerMenuItems: [UUID: NSMenuItem] = [:]
     private weak var liveModelMenuItem: NSMenuItem?
-    private weak var liveSettingsMenu: NSMenu?
     private static let ankerKeyItemID = "tocode.extended.ankerKey"
     private static let secretsFolderItemID = "tocode.extended.secretsFolder"
     private static let codexModelItemID = "tocode.extended.codexModel"
@@ -275,7 +274,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         modifierPollingTimer = nil
     }
 
-    /// 右键：功能菜单。访达 / 输入 / 工具 / 模型 / 微信 / 设置。
+    /// 右键：功能菜单。访达 / 输入 / 工具 / AK / 微信 / 设置。
     private func showActionMenu() {
         let menu = NSMenu()
         menu.autoenablesItems = false
@@ -440,13 +439,26 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         )
         toolsItem.submenu = toolsMenu
 
-        // 模型（AK 门控）
+        // AK → AK-模型（AK 门控）
         activeModelMenu = nil
         activeModelParentItem = nil
         currentModelID = nil
         liveModelMenuItem = nil
         if extendedSettings.akEnabled {
-            let modelItem = menu.addItem(withTitle: "模型", action: nil, keyEquivalent: "")
+            let akItem = menu.addItem(
+                withTitle: ExtendedSettingsStore.topLevelFolderTitle,
+                action: nil,
+                keyEquivalent: ""
+            )
+            akItem.image = NSImage(systemSymbolName: "sparkles", accessibilityDescription: nil)
+            let akMenu = NSMenu()
+            akMenu.autoenablesItems = false
+
+            let modelItem = akMenu.addItem(
+                withTitle: ExtendedSettingsStore.modelMenuTitle,
+                action: nil,
+                keyEquivalent: ""
+            )
             modelItem.image = NSImage(systemSymbolName: "cpu", accessibilityDescription: nil)
             modelItem.representedObject = Self.codexModelItemID
             let modelMenu = NSMenu()
@@ -454,15 +466,29 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             modelMenu.delegate = self
             addModelStatusItem("悬停后实时加载", to: modelMenu)
             modelItem.submenu = modelMenu
+            akItem.submenu = akMenu
             activeModelMenu = modelMenu
             activeModelParentItem = modelItem
-            liveModelMenuItem = modelItem
+            liveModelMenuItem = akItem
             if let state = try? codexModels.currentState() {
                 currentModelID = state.liveModelID
                 if !state.isConsistent {
                     modelItem.toolTip = "Codex 实时配置与 CC Switch Provider 模板当前不一致"
                 }
             }
+
+            let secretsFolder = NSMenuItem(
+                title: ExtendedSettingsStore.secretsFolderTitle,
+                action: nil,
+                keyEquivalent: ""
+            )
+            secretsFolder.image = NSImage(systemSymbolName: "key", accessibilityDescription: nil)
+            secretsFolder.representedObject = Self.secretsFolderItemID
+            let secretsMenu = NSMenu()
+            secretsMenu.autoenablesItems = false
+            secretsMenu.addItem(makeAnkerKeyItem())
+            secretsFolder.submenu = secretsMenu
+            akMenu.addItem(secretsFolder)
         }
 
         // 微信
@@ -544,8 +570,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             action: #selector(toggleExtendedSettingAK(_:))
         )
         extendedItem.submenu = extendedMenu
-        liveSettingsMenu = settings
-        syncSecretsFolder(in: settings)
         let manual = settings.addItem(
             withTitle: UserManual.menuTitle,
             action: #selector(showUserManual),
@@ -567,7 +591,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
         stopTimerMenuRefresh()
         liveModelMenuItem = nil
-        liveSettingsMenu = nil
         liveTimerMenu = nil
         liveTimerMenuItems.removeAll()
     }
@@ -617,48 +640,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     @objc private func toggleExtendedSettingAK(_ sender: NSMenuItem) {
         extendedSettings.akEnabled = !extendedSettings.akEnabled
         ShortcutMenuAppearance.apply(to: sender, enabled: extendedSettings.akEnabled)
-        if let settings = liveSettingsMenu {
-            syncSecretsFolder(in: settings)
-        }
-    }
-
-    private func syncSecretsFolder(in settings: NSMenu) {
-        let existingFolder = settings.items.first {
-            ($0.representedObject as? String) == Self.secretsFolderItemID
-        }
-        if extendedSettings.akEnabled {
-            if let existingFolder {
-                if let ai = existingFolder.submenu?.items.first(where: {
-                    ($0.representedObject as? String) == Self.ankerKeyItemID
-                }) {
-                    ai.title = ankerKeyItemTitle
-                    ai.isEnabled = !isUpdatingCredentials && !isSwitchingModel
-                }
-                return
-            }
-            let folder = NSMenuItem(
-                title: ExtendedSettingsStore.secretsFolderTitle,
-                action: nil,
-                keyEquivalent: ""
-            )
-            folder.image = NSImage(systemSymbolName: "key", accessibilityDescription: nil)
-            folder.representedObject = Self.secretsFolderItemID
-            let secretsMenu = NSMenu()
-            secretsMenu.autoenablesItems = false
-            secretsMenu.addItem(makeAnkerKeyItem())
-            folder.submenu = secretsMenu
-            if let manualIndex = settings.items.firstIndex(where: { $0.title == UserManual.menuTitle }) {
-                settings.insertItem(folder, at: manualIndex)
-            } else if let extendedIndex = settings.items.firstIndex(where: {
-                $0.title == ExtendedSettingsStore.folderTitle
-            }) {
-                settings.insertItem(folder, at: extendedIndex + 1)
-            } else {
-                settings.addItem(folder)
-            }
-        } else if let existingFolder {
-            settings.removeItem(existingFolder)
-        }
     }
 
     private var ankerKeyItemTitle: String {
@@ -699,7 +680,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
         if let state = try? codexModels.currentState() {
             currentModelID = state.liveModelID
-            activeModelParentItem?.title = "模型"
+            activeModelParentItem?.title = ExtendedSettingsStore.modelMenuTitle
             activeModelParentItem?.toolTip = state.isConsistent
                 ? nil
                 : "Codex 实时配置与 CC Switch Provider 模板当前不一致"
@@ -823,7 +804,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 switch result {
                 case .success:
                     self.currentModelID = modelID
-                    self.activeModelParentItem?.title = "模型"
+                    self.activeModelParentItem?.title = ExtendedSettingsStore.modelMenuTitle
                     self.notifyCodexModelSwitchScheduled(descriptor.displayName)
                     self.codexRestarter.forceRestart(after: 2) { restartResult in
                         DispatchQueue.main.async {

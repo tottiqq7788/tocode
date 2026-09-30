@@ -264,6 +264,8 @@ enum KeyboardMappingAction: String, Codable, CaseIterable, Equatable, Hashable {
             return .shortcut(.finderCmdQ, .toggle)
         case .resetRoot:
             return .root(.reset)
+        case .readClipboardRoot:
+            return .root(.clipboard)
         case .toggleCodexSync:
             return .codex(.sync(.toggle))
         case .openWeChatLocation:
@@ -280,8 +282,9 @@ enum KeyboardMappingAction: String, Codable, CaseIterable, Equatable, Hashable {
             return .login(.toggle)
         case .quit:
             return .quit
-        case .switchDesktopLeft, .switchDesktopRight, .openFinderAtRoot,
-            .copyFinderSelectedPath, .readClipboardRoot:
+        case .copyFinderSelectedPath:
+            return .finder(.copy)
+        case .switchDesktopLeft, .switchDesktopRight, .openFinderAtRoot:
             return nil
         }
     }

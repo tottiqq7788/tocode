@@ -7,7 +7,7 @@ enum AnkerCredentialPrompt {
     static func prompt() -> String? {
         let alert = NSAlert()
         alert.messageText = "AI 密钥"
-        alert.informativeText = "输入新的安克 API 密钥，保存后替换 pi、Codex（通过 CC Switch）、Hermes 和 OpenCode 的密钥。\n\nHermes 将使用安克 DeepSeek V4 Pro。已打开的会话可能需要重新加载。"
+        alert.informativeText = "输入新的 API 密钥，保存后替换 pi、Codex（通过 CC Switch）、Hermes 和 OpenCode 的密钥。\n\nHermes 将使用 DeepSeek V4 Pro。已打开的会话可能需要重新加载。"
         alert.addButton(withTitle: "保存")
         alert.addButton(withTitle: "取消")
         let field = AnkerSecureTextField(frame: NSRect(x: 0, y: 0, width: 380, height: 26))

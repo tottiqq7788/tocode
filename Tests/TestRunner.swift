@@ -421,12 +421,34 @@ func testUserManualPages() {
     expect(joined.contains("配置 → 导出配置"), "说明书覆盖配置夹导入导出")
     expect(joined.contains("设置夹最底部"), "说明书写明在设置夹底部")
     expect(joined.contains("密钥 → AI"), "说明书覆盖密钥夹")
+    expect(joined.contains("AK → 密钥 → AI"), "说明书覆盖 AK 下密钥路径")
+    expect(!joined.contains("设置 → 密钥"), "说明书不再写设置下密钥")
     expect(joined.contains("文稿/wechat"), "说明书写明归档在本机文稿/wechat")
     expect(!joined.contains("/Users/admin/Documents/wechat"), "说明书不写死 admin 用户路径")
     expect(joined.contains("wechat send") || joined.contains("快捷输入"), "说明书覆盖微信命令或快捷输入")
     expect(joined.contains("tocode help"), "说明书覆盖 CLI")
+    expect(joined.contains("root clipboard"), "说明书覆盖 root clipboard")
+    expect(joined.contains("finder copy"), "说明书覆盖 finder copy")
+    expect(joined.contains("不是访达/Codex 跟随后的展示根"), "说明书写明 root open 用固定根")
+    expect(joined.contains("顶层「AK」夹"), "说明书覆盖顶层 AK 夹")
+    expect(joined.contains("AK-模型"), "说明书覆盖 AK-模型入口")
+    expect(joined.contains("AK → 密钥 → AI"), "说明书覆盖 AK 下密钥入口")
+    expect(!joined.contains("设置 → 密钥 → AI"), "说明书不再写设置下密钥入口")
+    expect(!joined.contains("顶层「模型」夹"), "说明书不再写顶层裸模型夹")
+    expect(!joined.contains("录入安克"), "说明书点击路径文案不含安克")
     expect(!joined.contains("ANKER_API_KEY"), "说明书不含密钥字段")
     expect(!joined.contains("wechat-credential.json"), "说明书不展示凭据文件")
+}
+
+func testAnkerCredentialPromptCopyHasNoAnkerWord() {
+    expect(
+        !AnkerCredentialError.invalidKey.localizedDescription.contains("安克"),
+        "invalidKey 文案不含安克"
+    )
+    expect(
+        !AnkerCredentialError.configuration("OpenCode").localizedDescription.contains("安克"),
+        "configuration 文案不含安克"
+    )
 }
 
 func testRootPathStore() {
@@ -1282,6 +1304,8 @@ func testExtendedSettingsStore() {
     expect(!store.akEnabled, "AK 类型默认关闭")
     expect(ExtendedSettingsStore.folderTitle == "拓展设置", "拓展设置夹标题")
     expect(ExtendedSettingsStore.akTitle == "AK", "AK 类型标题")
+    expect(ExtendedSettingsStore.topLevelFolderTitle == "AK", "右键顶层 AK 夹标题")
+    expect(ExtendedSettingsStore.modelMenuTitle == "AK-模型", "AK 夹内模型入口标题")
     expect(ExtendedSettingsStore.akCredentialTitle == "AI", "安克入口菜单名为 AI")
 
     store.akEnabled = true
@@ -2303,6 +2327,10 @@ func testKeyboardShortcutMappingActionTargets() {
     )
     expect(KeyboardMappingAction.blackout.synthesizedShortcut == nil, "临时黑屏不走组合键合成")
     expect(KeyboardMappingAction.blackout.command == .blackout, "临时黑屏复用命令执行器")
+    expect(KeyboardMappingAction.readClipboardRoot.command == .root(.clipboard), "读取剪贴板复用 root clipboard")
+    expect(KeyboardMappingAction.copyFinderSelectedPath.command == .finder(.copy), "复制访达选中路径复用 finder copy")
+    expect(KeyboardMappingAction.openFinderAtRoot.command == nil, "访问路径保持菜单展示根，不映射 CLI root open")
+    expect(KeyboardMappingAction.switchDesktopLeft.command == nil, "切桌面不进 CLI")
     expect(
         KeyboardShortcutMappingTarget.action(right).resolvedShortcut == right.synthesizedShortcut,
         "桌面功能目标解析为固定组合键"
@@ -2566,20 +2594,29 @@ func testKeyboardMappingActionDispatchAndYield() {
     expect(executed == [.hidden(.toggle)], "开关只调用一次 toggle")
     expect(notices.count == 1 && notices[0].0 == "显示/隐藏隐藏文件" && notices[0].1 == "已切换为 开", "开关成功发短通知")
 
+    executed.removeAll()
+    notices.removeAll()
     dispatcher.perform(.openFinderAtRoot)
     dispatcher.perform(.copyFinderSelectedPath)
     dispatcher.perform(.readClipboardRoot)
     expect(openFinderCalls == 1, "访问路径走菜单方法")
-    expect(copyPathCalls == 1, "复制路径走菜单方法")
-    expect(readClipboardCalls == 1, "读取剪贴板走菜单方法")
+    expect(copyPathCalls == 0, "复制路径复用 finder copy 命令")
+    expect(readClipboardCalls == 0, "读取剪贴板复用 root clipboard 命令")
+    expect(
+        executed == [.finder(.copy), .root(.clipboard)],
+        "复制路径与读取剪贴板走命令执行器"
+    )
 
     executed.removeAll()
     notices.removeAll()
     readClipboardCalls = 0
     dispatcher.perform(.readClipboardRoot)
     dispatcher.perform(.resetRoot)
-    expect(readClipboardCalls == 1, "跟随开关不再拦截读取剪贴板设根")
-    expect(executed == [.root(.reset)], "跟随开关不再拦截重置根目录")
+    expect(readClipboardCalls == 0, "跟随开关不再拦截读取剪贴板设根")
+    expect(
+        executed == [.root(.clipboard), .root(.reset)],
+        "跟随开关不再拦截重置根目录"
+    )
     expect(notices.isEmpty, "改固定根成功不额外通知")
 
     executed.removeAll()
@@ -5185,7 +5222,21 @@ func testTocodeCommandParser() {
     expect(TocodeCommandParser.parse("root reset") == .success(.root(.reset)), "root reset")
     expect(TocodeCommandParser.parse("root finder-follow on") == .success(.root(.finderFollow(.on))), "root finder-follow on")
     expect(TocodeCommandParser.parse("root finder-follow toggle") == .success(.root(.finderFollow(.toggle))), "root finder-follow toggle")
+    expect(TocodeCommandParser.parse("root clipboard") == .success(.root(.clipboard)), "root clipboard")
+    expect(TocodeCommandParser.parse("root open") == .success(.root(.open)), "root open")
+    expect(TocodeCommandParser.parse("finder copy") == .success(.finder(.copy)), "finder copy")
     expect(TocodeCommandParser.parse("root init-from-finder").isFailure, "root init-from-finder 已废止")
+    expect(TocodeCommandParser.parse("root clipboard extra").isFailure, "root clipboard 多余参数失败")
+    expect(TocodeCommandParser.parse("finder").isFailure, "finder 缺子命令失败")
+    expect(TocodeCommandParser.helpText.contains("root clipboard"), "help 含 root clipboard")
+    expect(TocodeCommandParser.helpText.contains("root open"), "help 含 root open")
+    expect(TocodeCommandParser.helpText.contains("finder copy"), "help 含 finder copy")
+    expect(
+        TocodeCommandParser.weChatHelpCommands.contains(where: { $0.command == "root clipboard" })
+            && TocodeCommandParser.weChatHelpCommands.contains(where: { $0.command == "root open" })
+            && TocodeCommandParser.weChatHelpCommands.contains(where: { $0.command == "finder copy" }),
+        "微信 help 含三条新命令"
+    )
 
     expect(TocodeCommandParser.parse("codex") == .success(.codex(.status)), "codex 默认 status")
     expect(TocodeCommandParser.parse("codex status") == .success(.codex(.status)), "codex status")
@@ -5532,6 +5583,7 @@ func testTocodeCommandExecutorMapping() {
     let visibility = MockTocodeVisibility()
     let chooser = MockTocodeRootChooser()
     let finder = MockTocodeFinderSelection()
+    let clipboard = MockTocodeClipboard()
     let launch = MockTocodeLaunchAtLogin()
     let wechat = MockTocodeWeChat()
     let models = MockTocodeCodexModels()
@@ -5564,6 +5616,7 @@ func testTocodeCommandExecutorMapping() {
         store: store,
         chooser: chooser,
         finderSelection: finder,
+        clipboard: clipboard,
         visibility: visibility,
         launchAtLogin: launch,
         mouseWheel: wheel,
@@ -5600,6 +5653,54 @@ func testTocodeCommandExecutorMapping() {
     chooser.result = "/tmp/chosen"
     expect(executor.execute("root choose").isSuccess, "root choose 成功")
     expect(executor.execute("root reset").isSuccess, "root reset 成功")
+
+    let clipboardRoot = rootDir.appendingPathComponent("from-clip", isDirectory: true)
+    try! FileManager.default.createDirectory(at: clipboardRoot, withIntermediateDirectories: true)
+    clipboard.text = clipboardRoot.path
+    expect(executor.execute("root clipboard").isSuccess, "root clipboard 合法目录成功")
+    expect(
+        store.resolveRoot(isDirectory: fs.isExistingDirectory) == clipboardRoot.path,
+        "root clipboard 写入固定根"
+    )
+    clipboard.text = "\u{300C}\(clipboardRoot.path)\u{300D}"
+    if case .failure(.operationFailed(let message)) = executor.execute("root clipboard") {
+        expect(message.contains("「」"), "root clipboard 拒绝「」包裹路径")
+    } else {
+        expect(false, "root clipboard 拒绝「」包裹路径")
+    }
+    clipboard.text = "/definitely/missing-\(UUID().uuidString)"
+    if case .failure(.rootNotFound) = executor.execute("root clipboard") {
+        expect(true, "root clipboard 非目录失败")
+    } else {
+        expect(false, "root clipboard 非目录失败")
+    }
+    store.save(rootDir.path)
+    if case .success(let output) = executor.execute("root open") {
+        expect(output.text.contains(rootDir.path), "root open 打开固定根")
+        expect(!output.text.contains("from-clip"), "root open 不使用剪贴板临时路径")
+    } else {
+        expect(false, "root open 成功")
+    }
+    finder.selectedItemResult = .success("\(rootDir.path)/item.txt")
+    if case .success(let output) = executor.execute("finder copy") {
+        expect(output.text.contains("\(rootDir.path)/item.txt"), "finder copy 打印选中路径")
+        expect(clipboard.copiedPaths == ["\(rootDir.path)/item.txt"], "finder copy 写入剪贴板")
+    } else {
+        expect(false, "finder copy 成功")
+    }
+    finder.selectedItemResult = .failure(.notExactlyOne)
+    if case .failure(.finderSelectionFailed) = executor.execute("finder copy") {
+        expect(true, "finder copy 无选中失败")
+    } else {
+        expect(false, "finder copy 无选中失败")
+    }
+    if case .success(let output) = executor.execute("status") {
+        expect(!output.text.contains("程序坞"), "status 不含程序坞")
+        expect(!output.text.contains("定时器"), "status 不含定时器")
+        expect(!output.text.contains("AK"), "status 不含 AK")
+    } else {
+        expect(false, "status 成功（边界字段）")
+    }
 
     // wechat
     wechat.bound = true
@@ -6138,6 +6239,7 @@ struct TestRunnerMain {
         testTocodePreferencesMigrationReadsProcessStandardDomain()
         testTocodePortableSettingsTransfer()
         testUserManualPages()
+        testAnkerCredentialPromptCopyHasNoAnkerWord()
         testRootPathStore()
         testClipboardService()
         testDirectoryMenuResume()

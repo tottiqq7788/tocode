@@ -23,6 +23,12 @@ enum TocodeRootCommand: Equatable {
     case choose
     case reset
     case finderFollow(TocodeToggle)
+    case clipboard
+    case open
+}
+
+enum TocodeFinderCommand: Equatable {
+    case copy
 }
 
 enum TocodeCodexCommand: Equatable {
@@ -52,6 +58,7 @@ enum TocodeCommand: Equatable {
     case help
     case status
     case root(TocodeRootCommand)
+    case finder(TocodeFinderCommand)
     case codex(TocodeCodexCommand)
     case wechat(TocodeWechatCommand)
     case blackout
@@ -146,6 +153,11 @@ enum TocodeCommandParser {
         root choose                         弹出系统目录选择器
         root reset                          重置为默认目录
         root finder-follow on|off|toggle    访达跟随开关
+        root clipboard                      剪贴板为现有目录时设为根
+        root open                           在访达打开固定根目录
+
+      访达
+        finder copy                         复制访达选中项绝对路径
 
       Codex
         codex status                        当前项目名 + 根目录
@@ -182,6 +194,9 @@ enum TocodeCommandParser {
         ("root choose", "弹出系统目录选择器"),
         ("root reset", "重置为默认目录"),
         ("root finder-follow on|off|toggle", "访达跟随开关"),
+        ("root clipboard", "剪贴板为现有目录时设为根"),
+        ("root open", "在访达打开固定根目录"),
+        ("finder copy", "复制访达选中项绝对路径"),
         ("codex status", "当前项目名 + 根目录"),
         ("codex sync on|off|toggle", "codex跟随开关"),
         ("codex model", "当前模型与一致性"),
@@ -259,6 +274,8 @@ enum TocodeCommandParser {
             return .success(.status)
         case "root":
             return parseRoot(rest)
+        case "finder":
+            return parseFinder(rest)
         case "codex":
             return parseCodex(rest)
         case "wechat":
@@ -314,8 +331,27 @@ enum TocodeCommandParser {
                 return .failure(.invalidToggle(tokens[1]))
             }
             return .success(.root(.finderFollow(toggle)))
+        case "clipboard":
+            guard tokens.count == 1 else { return .failure(.invalidArguments("root clipboard")) }
+            return .success(.root(.clipboard))
+        case "open":
+            guard tokens.count == 1 else { return .failure(.invalidArguments("root open")) }
+            return .success(.root(.open))
         default:
             return .failure(.unknownCommand("root \(sub)"))
+        }
+    }
+
+    private static func parseFinder(_ tokens: [String]) -> Result<TocodeCommand, TocodeCommandError> {
+        guard let sub = tokens.first?.lowercased() else {
+            return .failure(.missingValue("finder copy"))
+        }
+        switch sub {
+        case "copy":
+            guard tokens.count == 1 else { return .failure(.invalidArguments("finder copy")) }
+            return .success(.finder(.copy))
+        default:
+            return .failure(.unknownCommand("finder \(sub)"))
         }
     }
 
