@@ -31,6 +31,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private let screenBlackout: ScreenBlackoutService
     private let commandExecutor: TocodeCommandExecutor
     private let modelRelay: ModelRelayService
+    private let togent: TogentService
     private let actionDispatcher = KeyboardMappingActionDispatcher()
     private var activeModelMenu: NSMenu?
     private var activeModelParentItem: NSMenuItem?
@@ -72,6 +73,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         extendedSettings: ExtendedSettingsStore = ExtendedSettingsStore(),
         screenBlackout: ScreenBlackoutService? = nil,
         modelRelay: ModelRelayService,
+        togent: TogentService,
         commandExecutor: TocodeCommandExecutor
     ) {
         self.shortcuts = shortcuts
@@ -92,6 +94,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         self.extendedSettings = extendedSettings
         self.screenBlackout = screenBlackout ?? ScreenBlackoutService(overlay: ScreenBlackoutOverlay())
         self.modelRelay = modelRelay
+        self.togent = togent
         self.commandExecutor = commandExecutor
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         super.init()
@@ -127,7 +130,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             button.action = #selector(handleClick(_:))
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
+        let previousModelRelayDidChange = modelRelay.didChange
         modelRelay.didChange = { [weak self] in
+            previousModelRelayDidChange?()
             MainActor.assumeIsolated {
                 self?.refreshModelRelayStatus()
             }
@@ -517,6 +522,41 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         )
         bindWeChat.target = self
         ShortcutMenuAppearance.apply(to: bindWeChat, enabled: weChat.isBound)
+
+        let togentItem = weChatMenu.addItem(withTitle: "togent", action: nil, keyEquivalent: "")
+        togentItem.image = NSImage(systemSymbolName: "person.2.wave.2", accessibilityDescription: nil)
+        let togentMenu = NSMenu()
+        togentMenu.autoenablesItems = false
+        let addTogentRole = togentMenu.addItem(
+            withTitle: "新增…",
+            action: #selector(createTogentRole),
+            keyEquivalent: ""
+        )
+        addTogentRole.target = self
+        addTogentRole.image = NSImage(systemSymbolName: "plus", accessibilityDescription: nil)
+        if let startupError = togent.startupError {
+            addTogentRole.isEnabled = false
+            addTogentRole.toolTip = startupError.localizedDescription
+        }
+        let roles = togent.roles.sorted {
+            $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }
+        if !roles.isEmpty {
+            togentMenu.addItem(.separator())
+        }
+        for role in roles {
+            let item = togentMenu.addItem(
+                withTitle: role.name,
+                action: #selector(editTogentRole(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = role.id.uuidString
+            item.state = role.isActive ? .on : .off
+            item.toolTip = "\(role.workspacePath)\n模型：\(role.publishedModelID)"
+        }
+        togentItem.submenu = togentMenu
+
         let openWeChatLocation = weChatMenu.addItem(
             withTitle: "文件位置",
             action: #selector(openWeChatLocation),
@@ -1252,6 +1292,55 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     @objc private func openWeChatLocation() {
         weChat.openArchiveLocation()
+    }
+
+    @objc private func createTogentRole() {
+        presentTogentRoleEditor(
+            draft: togent.newRoleDraft(),
+            roleID: nil
+        )
+    }
+
+    @objc private func editTogentRole(_ sender: NSMenuItem) {
+        guard let rawID = sender.representedObject as? String,
+              let id = UUID(uuidString: rawID),
+              let role = togent.roles.first(where: { $0.id == id }) else {
+            TogentPrompts.showError(TogentError.roleNotFound)
+            return
+        }
+        presentTogentRoleEditor(
+            draft: TogentRoleDraft(role: role),
+            roleID: id
+        )
+    }
+
+    private func presentTogentRoleEditor(
+        draft initialDraft: TogentRoleDraft,
+        roleID: UUID?
+    ) {
+        var draft = initialDraft
+        while true {
+            switch TogentPrompts.roleForm(
+                draft: draft,
+                models: togent.models,
+                isEditing: roleID != nil
+            ) {
+            case .cancel:
+                return
+            case .save(let candidate):
+                do {
+                    if let roleID {
+                        _ = try togent.updateRole(id: roleID, from: candidate)
+                    } else {
+                        _ = try togent.createRole(from: candidate)
+                    }
+                    return
+                } catch {
+                    TogentPrompts.showError(error)
+                    draft = candidate
+                }
+            }
+        }
     }
 
     /// 显示临时黑屏；再次点击时若已显示则为 no-op。

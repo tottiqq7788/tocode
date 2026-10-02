@@ -9,6 +9,10 @@ swiftc Tests/TestRunner.swift \
   Tests/AnkerCredentialTests.swift \
   Tests/ModelRelayTestSupport.swift \
   Tests/ModelRelayCallMetricsTestSupport.swift \
+  Tests/TogentTestSupport.swift \
+  Tests/TogentRoleTests.swift \
+  Tests/TogentRuntimeTests.swift \
+  Tests/TogentWeChatTests.swift \
   Tests/ModelRelayTests.swift \
   Sources/FileSystemService.swift \
   Sources/ClipboardService.swift \
@@ -52,6 +56,14 @@ swiftc Tests/TestRunner.swift \
   Sources/DockAutohideRestrictStore.swift \
   Sources/DockAutohideRestrictService.swift \
   Sources/ScreenBlackoutService.swift \
+  Sources/TogentModels.swift \
+  Sources/TogentStore.swift \
+  Sources/TogentWorkspaceService.swift \
+  Sources/TogentRPCClient.swift \
+  Sources/TogentSandbox.swift \
+  Sources/TogentGitService.swift \
+  Sources/TogentRuntimeService.swift \
+  Sources/TogentService.swift \
   Sources/WeChatModels.swift \
   Sources/WeChatCrypto.swift \
   Sources/WeChatILinkClient.swift \

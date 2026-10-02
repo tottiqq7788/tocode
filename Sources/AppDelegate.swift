@@ -22,6 +22,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var commandExecutor: TocodeCommandExecutor?
     private var ipcServer: TocodeIPCServer?
     private var modelRelay: ModelRelayService?
+    private var togent: TogentService?
+    private var isPreparingTermination = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         TocodePreferences.migrateIfNeeded()
@@ -77,10 +79,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 启动后把 CLI 安装/刷新到用户 PATH（~/.local/bin/tocode）。
         installCLI()
 
+        let togentRuntime = TogentRuntimeService(
+            relayAccess: { [modelRelay] in
+                modelRelay.togentRelayAccess()
+            }
+        )
+        let togent = TogentService(
+            runtime: togentRuntime,
+            availableModelOptions: { [modelRelay] in
+                modelRelay.router.availableTogentModels()
+            },
+            relayFingerprint: { [modelRelay] in
+                let access = modelRelay.togentRelayAccess()
+                let models = access.models.map(\.publishedModelID).sorted()
+                return ([access.baseURL] + models).joined(separator: "\n")
+            }
+        )
+        self.togent = togent
+        modelRelay.didChange = { [weak togent] in
+            togent?.relayDidChange()
+        }
+
         let weChat = WeChatAssociationService()
         self.weChat = weChat
         executor.attachWeChat(weChat)
         weChat.commandExecutor = executor
+        weChat.attachTogent(togent)
 
         let controller = StatusItemController(
             shortcuts: service,
@@ -92,6 +116,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             weChat: weChat,
             screenBlackout: blackout,
             modelRelay: modelRelay,
+            togent: togent,
             commandExecutor: executor
         )
         self.controller = controller
@@ -144,9 +169,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let togent else {
+            return .terminateNow
+        }
+        guard !isPreparingTermination else {
+            return .terminateLater
+        }
+        isPreparingTermination = true
+        // 先停止唯一入口，再等待受管 Pi 子进程退出，避免 App 退出后遗留运行时。
+        weChat?.stop()
+        Task {
+            await togent.stopAndWait()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         ipcServer?.stop()
         ipcServer = nil
+        togent?.stop()
+        togent = nil
         modelRelay?.stop()
         modelRelay = nil
         shortcuts?.shutdown()

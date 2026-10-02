@@ -69,6 +69,7 @@ final class WeChatAssociationService: WeChatAssociationControlling {
 
     private var listenerTask: Task<Void, Never>?
     private var bindingTask: Task<Void, Never>?
+    private weak var togent: TogentService?
 
     init(
         transport: WeChatILinkTransporting,
@@ -84,7 +85,8 @@ final class WeChatAssociationService: WeChatAssociationControlling {
         now: @escaping () -> Date = Date.init,
         archiveRoot: URL = WeChatArchiveService.defaultRoot,
         bindingPollInterval: TimeInterval = 2,
-        bindingTimeout: TimeInterval = 300
+        bindingTimeout: TimeInterval = 300,
+        togent: TogentService? = nil
     ) {
         self.transport = transport
         self.credentialStore = credentialStore
@@ -100,7 +102,11 @@ final class WeChatAssociationService: WeChatAssociationControlling {
         self.archiveRoot = archiveRoot
         self.bindingPollInterval = bindingPollInterval
         self.bindingTimeout = bindingTimeout
+        self.togent = togent
         credential = credentialStore.load()
+        if let togent {
+            attachTogent(togent)
+        }
     }
 
     convenience init() {
@@ -124,6 +130,16 @@ final class WeChatAssociationService: WeChatAssociationControlling {
         guard listenerTask == nil, let credential else { return }
         listenerTask = Task { [weak self] in
             await self?.listen(using: credential)
+        }
+    }
+
+    func attachTogent(_ service: TogentService) {
+        togent = service
+        service.replyHandler = { [weak self] job, text in
+            guard let self else {
+                throw TogentError.unavailable("微信服务已停止")
+            }
+            try await self.sendTogentReply(job: job, text: text)
         }
     }
 
@@ -270,6 +286,7 @@ final class WeChatAssociationService: WeChatAssociationControlling {
         var state = stateStore.load()
         var known = Set(state.recentKeys)
         var backoff: TimeInterval = 5
+        togent?.recover(committedDeduplicationKeys: known)
 
         while !Task.isCancelled {
             do {
@@ -296,17 +313,12 @@ final class WeChatAssociationService: WeChatAssociationControlling {
                         continue
                     }
 
-                    try await archiver.archive(message, receivedAt: now())
-                    try Task.checkCancellation()
-                    var committed = state
-                    committed.recentKeys.append(key)
-                    committed.recentKeys = Array(
-                        committed.recentKeys.suffix(WeChatDeduplication.maximumKeys)
+                    try await consumeOrdinary(
+                        message: message,
+                        key: key,
+                        state: &state,
+                        known: &known
                     )
-                    committed.rememberInbound(message)
-                    try stateStore.save(committed)
-                    state = committed
-                    known.insert(key)
                 }
 
                 var committed = state
@@ -330,6 +342,60 @@ final class WeChatAssociationService: WeChatAssociationControlling {
                 }
                 backoff = min(backoff * 2, 120)
             }
+        }
+    }
+
+    /// 普通消息严格执行“归档 → staged job → 微信去重状态 → queued job”。
+    /// 点号命令和快捷输入不会调用本方法。
+    private func consumeOrdinary(
+        message: WeChatMessage,
+        key: String,
+        state: inout WeChatReceiveState,
+        known: inout Set<String>
+    ) async throws {
+        let receivedAt = now()
+        try await archiver.archive(message, receivedAt: receivedAt)
+        try Task.checkCancellation()
+
+        var stagingError: Error?
+        if let togent {
+            do {
+                try togent.stageInbound(
+                    message: message,
+                    deduplicationKey: key,
+                    receivedAt: receivedAt
+                )
+            } catch {
+                stagingError = error
+            }
+        } else {
+            stagingError = TogentError.unavailable("Agent 服务未就绪")
+        }
+
+        var committed = state
+        committed.recentKeys.append(key)
+        committed.recentKeys = Array(
+            committed.recentKeys.suffix(WeChatDeduplication.maximumKeys)
+        )
+        committed.rememberInbound(message)
+        do {
+            try stateStore.save(committed)
+        } catch {
+            togent?.discardStagedInbound(deduplicationKey: key)
+            throw error
+        }
+        state = committed
+        known.insert(key)
+
+        if let stagingError {
+            await sendImmediateTogentError(stagingError, for: message)
+            return
+        }
+        do {
+            try togent?.commitStagedInbound(deduplicationKey: key)
+        } catch {
+            togent?.discardStagedInbound(deduplicationKey: key)
+            await sendImmediateTogentError(error, for: message)
         }
     }
 
@@ -432,6 +498,40 @@ final class WeChatAssociationService: WeChatAssociationControlling {
             }
         }
         return .success(TocodeCommandOutput(sent == 1 ? "已发送" : "已发送 \(sent) 条消息"))
+    }
+
+    private func sendTogentReply(job: TogentJob, text: String) async throws {
+        guard let credential else {
+            throw TogentError.unavailable("微信绑定已失效")
+        }
+        let chunks = TogentReplyChunker.chunks(text)
+        guard !chunks.isEmpty else {
+            throw TogentError.emptyReply
+        }
+        for chunk in chunks {
+            try await transport.sendText(
+                credential: credential,
+                toUserID: job.fromUserID,
+                contextToken: job.contextToken,
+                text: chunk
+            )
+        }
+    }
+
+    private func sendImmediateTogentError(_ error: Error, for message: WeChatMessage) async {
+        guard let credential else { return }
+        let detail = (error as? LocalizedError)?.errorDescription
+            ?? error.localizedDescription
+        do {
+            try await transport.sendText(
+                credential: credential,
+                toUserID: message.fromUserID,
+                contextToken: message.contextToken,
+                text: "❌ Togent：\(detail)"
+            )
+        } catch {
+            notifier.notify(title: "Togent 错误回复发送失败", body: detail)
+        }
     }
 
     private func sendFile(

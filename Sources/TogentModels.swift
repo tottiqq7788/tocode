@@ -1,0 +1,196 @@
+import Foundation
+
+struct TogentModelOption: Codable, Equatable {
+    let publishedModelID: String
+    let providerName: String
+
+    var displayName: String {
+        "\(providerName) · \(publishedModelID)"
+    }
+}
+
+struct TogentRelayAccess: Equatable {
+    let baseURL: String
+    let bearerToken: String
+    let models: [TogentModelOption]
+}
+
+struct TogentRole: Codable, Equatable, Identifiable {
+    let id: UUID
+    var name: String
+    var workspacePath: String
+    var prompt: String
+    var publishedModelID: String
+    var isActive: Bool
+    let createdAt: Date
+    var updatedAt: Date
+
+    init(
+        id: UUID = UUID(),
+        name: String,
+        workspacePath: String,
+        prompt: String,
+        publishedModelID: String,
+        isActive: Bool = false,
+        createdAt: Date = Date(),
+        updatedAt: Date = Date()
+    ) {
+        self.id = id
+        self.name = name
+        self.workspacePath = workspacePath
+        self.prompt = prompt
+        self.publishedModelID = publishedModelID
+        self.isActive = isActive
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+}
+
+struct TogentRoleDraft: Equatable {
+    var name: String
+    var workspacePath: String
+    var prompt: String
+    var publishedModelID: String
+    var isActive: Bool
+
+    init(
+        name: String = "",
+        workspacePath: String,
+        prompt: String = "",
+        publishedModelID: String = "",
+        isActive: Bool = false
+    ) {
+        self.name = name
+        self.workspacePath = workspacePath
+        self.prompt = prompt
+        self.publishedModelID = publishedModelID
+        self.isActive = isActive
+    }
+
+    init(role: TogentRole) {
+        name = role.name
+        workspacePath = role.workspacePath
+        prompt = role.prompt
+        publishedModelID = role.publishedModelID
+        isActive = role.isActive
+    }
+}
+
+enum TogentJobState: String, Codable {
+    case staged
+    case queued
+    case running
+    case completed
+    case failed
+}
+
+struct TogentJob: Codable, Equatable, Identifiable {
+    let id: UUID
+    let deduplicationKey: String
+    let roleID: UUID?
+    let fromUserID: String
+    let contextToken: String
+    let messageText: String
+    let receivedAt: Date
+    var state: TogentJobState
+    var attemptCount: Int
+    var lastError: String?
+    let createdAt: Date
+    var updatedAt: Date
+}
+
+enum TogentError: Error, Equatable, LocalizedError {
+    case unavailable(String)
+    case invalidRoleName
+    case duplicateRoleName
+    case invalidWorkspacePath
+    case duplicateWorkspacePath
+    case overlappingWorkspacePath
+    case workspaceOutsideBoundary
+    case modelUnavailable
+    case roleNotFound
+    case busy
+    case database(String)
+    case workspace(String)
+    case runtimeMissing
+    case runtimeLaunch(String)
+    case runtimeExited(String)
+    case rpcProtocol(String)
+    case rpcTimeout
+    case noActiveRole
+    case emptyReply
+    case gitOperationDenied
+    case gitFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .unavailable(let message):
+            return "Togent 不可用：\(message)"
+        case .invalidRoleName:
+            return "角色名称不能为空，且最多 80 个字符。"
+        case .duplicateRoleName:
+            return "角色名称已存在（不区分大小写）。"
+        case .invalidWorkspacePath:
+            return "项目路径必须是有效的绝对目录路径。"
+        case .duplicateWorkspacePath:
+            return "该项目路径已被其他角色使用。"
+        case .overlappingWorkspacePath:
+            return "角色项目路径不能与其他角色目录互相包含。"
+        case .workspaceOutsideBoundary:
+            return "路径解析后超出允许的角色项目边界。"
+        case .modelUnavailable:
+            return "所选模型当前不可用，请在角色设置中重新选择健康模型。"
+        case .roleNotFound:
+            return "角色不存在。"
+        case .busy:
+            return "当前仍有 Togent 任务排队或运行，请等待完成后再修改角色。"
+        case .database(let message):
+            return "Togent 数据库失败：\(message)"
+        case .workspace(let message):
+            return "角色项目目录初始化失败：\(message)"
+        case .runtimeMissing:
+            return "Togent 内置 Pi 运行时缺失，请重新安装或构建 Tocode。"
+        case .runtimeLaunch(let message):
+            return "Togent 运行时启动失败：\(message)"
+        case .runtimeExited(let message):
+            return "Togent 运行时意外退出：\(message)"
+        case .rpcProtocol(let message):
+            return "Togent RPC 协议错误：\(message)"
+        case .rpcTimeout:
+            return "Togent 任务执行超时。"
+        case .noActiveRole:
+            return "尚未激活 Togent 角色，请在 Tocode 的“微信 → togent”中配置并勾选角色。"
+        case .emptyReply:
+            return "Agent 已结束，但没有生成可发送的文本回复。"
+        case .gitOperationDenied:
+            return "该远程 Git 操作不在 Togent 允许范围内。"
+        case .gitFailed(let message):
+            return "受控 Git 操作失败：\(message)"
+        }
+    }
+}
+
+enum TogentReplyChunker {
+    static func chunks(_ text: String, limit: Int = 1_800) -> [String] {
+        guard limit > 0 else { return [] }
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return [] }
+        var result: [String] = []
+        var start = normalized.startIndex
+        while start < normalized.endIndex {
+            var end = normalized.index(start, offsetBy: limit, limitedBy: normalized.endIndex)
+                ?? normalized.endIndex
+            if end < normalized.endIndex,
+               let breakIndex = normalized[start..<end].lastIndex(where: { $0 == "\n" || $0 == " " }),
+               normalized.distance(from: breakIndex, to: end) < max(40, limit / 3) {
+                end = normalized.index(after: breakIndex)
+            }
+            let chunk = normalized[start..<end].trimmingCharacters(in: .whitespacesAndNewlines)
+            if !chunk.isEmpty {
+                result.append(String(chunk))
+            }
+            start = end
+        }
+        return result
+    }
+}

@@ -28,19 +28,36 @@ final class ModelRelayRouter: @unchecked Sendable {
     private let keyStore: ModelRelayUpstreamKeyStoring
     private let vault: ModelRelayLocalKeyVault
     private let now: () -> Date
+    private let internalCredentialDigest: Data?
     private var configuration: ModelRelayConfiguration
     private var health: [UUID: KeyHealth] = [:]
+    private var availabilityChangeHandler: (() -> Void)?
 
     init(
         configuration: ModelRelayConfiguration,
         keyStore: ModelRelayUpstreamKeyStoring,
         vault: ModelRelayLocalKeyVault,
+        internalCredentialDigest: Data? = nil,
         now: @escaping () -> Date = Date.init
     ) {
         self.configuration = configuration
         self.keyStore = keyStore
         self.vault = vault
+        self.internalCredentialDigest = internalCredentialDigest
         self.now = now
+    }
+
+    var availabilityDidChange: (() -> Void)? {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return availabilityChangeHandler
+        }
+        set {
+            lock.lock()
+            availabilityChangeHandler = newValue
+            lock.unlock()
+        }
     }
 
     func update(configuration: ModelRelayConfiguration) {
@@ -55,7 +72,12 @@ final class ModelRelayRouter: @unchecked Sendable {
         lock.lock()
         let records = configuration.localKeys
         lock.unlock()
-        return vault.authenticates(secret, records: records)
+        let localMatch = vault.authenticates(secret, records: records)
+        let candidate = ModelRelayLocalKeyVault.digest(secret)
+        let internalMatch = internalCredentialDigest.map {
+            ModelRelayLocalKeyVault.constantTimeEqual(candidate, $0)
+        } ?? false
+        return localMatch || internalMatch
     }
 
     func availableAliases() -> [String] {
@@ -78,6 +100,37 @@ final class ModelRelayRouter: @unchecked Sendable {
             return hasAvailableKey ? provider.models.map(\.alias) : []
         }
         return aliases.sorted()
+    }
+
+    func availableTogentModels() -> [TogentModelOption] {
+        lock.lock()
+        let date = now()
+        let providers = configuration.providers
+        let healthSnapshot = health
+        lock.unlock()
+
+        return providers.flatMap { provider -> [TogentModelOption] in
+            guard let reference = provider.upstreamKey,
+                  healthSnapshot[reference.id, default: KeyHealth()].isAvailable(at: date),
+                  (try? keyStore.load(id: reference.id)) != nil else {
+                return []
+            }
+            return provider.models.map {
+                TogentModelOption(
+                    publishedModelID: $0.alias,
+                    providerName: provider.name
+                )
+            }
+        }.sorted {
+            if $0.providerName.localizedCaseInsensitiveCompare($1.providerName) == .orderedSame {
+                return $0.publishedModelID.localizedCaseInsensitiveCompare(
+                    $1.publishedModelID
+                ) == .orderedAscending
+            }
+            return $0.providerName.localizedCaseInsensitiveCompare(
+                $1.providerName
+            ) == .orderedAscending
+        }
     }
 
     func resolve(alias: String) throws -> ModelRelayResolvedRoute {
@@ -115,26 +168,35 @@ final class ModelRelayRouter: @unchecked Sendable {
 
     func recordSuccess(keyID: UUID) {
         lock.lock()
+        let wasAvailable = health[keyID, default: KeyHealth()].isAvailable(at: now())
         health[keyID] = KeyHealth()
+        let callback = wasAvailable ? nil : availabilityChangeHandler
         lock.unlock()
+        callback?()
     }
 
     func recordFailure(keyID: UUID, statusCode: Int?) {
         lock.lock()
+        let date = now()
         var state = health[keyID, default: KeyHealth()]
+        let wasAvailable = state.isAvailable(at: date)
         switch statusCode {
         case 401?, 403?:
             state.authenticationFailed = true
             state.unavailableUntil = nil
         case 429?:
-            state.unavailableUntil = now().addingTimeInterval(60)
+            state.unavailableUntil = date.addingTimeInterval(60)
         case let code? where (500...599).contains(code):
-            state.unavailableUntil = now().addingTimeInterval(30)
+            state.unavailableUntil = date.addingTimeInterval(30)
         default:
-            state.unavailableUntil = now().addingTimeInterval(30)
+            state.unavailableUntil = date.addingTimeInterval(30)
         }
         health[keyID] = state
+        let callback = wasAvailable == state.isAvailable(at: date)
+            ? nil
+            : availabilityChangeHandler
         lock.unlock()
+        callback?()
     }
 
     func resetHealth(keyIDs: [UUID]? = nil) {

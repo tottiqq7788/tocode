@@ -6051,7 +6051,10 @@ func testWeChatCommandConsumption() async {
         _ = await waitUntil { states.state.cursor == "cursor-plain" }
         expect(archiver.messages.count == 1, "未包裹组合按普通消息归档")
         expect(injector.segmentsLog.isEmpty, "未包裹组合不走快捷输入")
-        expect(transport.sentTexts.isEmpty, "普通消息不回复")
+        expect(
+            transport.sentTexts.first?.text.contains("Agent 服务未就绪") == true,
+            "普通消息在 Togent 未就绪时明确回复错误"
+        )
         service.stop()
     }
 }
@@ -6253,6 +6256,18 @@ struct TestRunnerMain {
         testModelRelayManualAndLegacyAKContract()
         testModelRelayCallMetricsStore()
         await testModelRelayProxyRecordsOneCallEvenOnUpstreamRetryExhaustion()
+        testTogentStoreAndUniqueActivation()
+        testTogentWorkspaceNumberingAndManagedAgents()
+        testTogentWorkspaceCanonicalIsolation()
+        await testTogentRoleServiceModelGate()
+        await testTogentBusyRoleAndRelayBoundary()
+        testTogentJSONLFramingAndReplyChunks()
+        testTogentRelayInternalCredentialAndHealthModels()
+        testTogentSandboxProfileAndEnvironment()
+        await testTogentRPCWaitsForAgentSettled()
+        await testTogentRPCCrashAndTimeoutFaults()
+        testTogentGitBrokerRejectsUncontrolledOperations()
+        await testRealPiThroughSandboxAndRelay()
         testAnkerCredentialPromptCopyHasNoAnkerWord()
         testRootPathStore()
         testClipboardService()
@@ -6308,6 +6323,11 @@ struct TestRunnerMain {
         await testWeChatCommandConsumption()
         await testWeChatCLISend()
         testWeChatHelpFormatting()
+        await testTogentWeChatArchiveQueueReplyIntegration()
+        await testTogentWeChatNoRoleAndDuplicateFaults()
+        await testTogentTwoPhaseRecoveryAndStateFailure()
+        await testTogentArchiveReplyModelAndCrashFaults()
+        await testTogentWeChatRealPiEndToEnd()
         testTocodeCommandParser()
         testTocodeWeChatCommandGate()
         testWeChatQuickInputParseAndInject()

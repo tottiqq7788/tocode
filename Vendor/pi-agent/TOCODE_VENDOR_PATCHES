@@ -1,0 +1,16 @@
+The source tree is copied from the exact commit in TOCODE_VENDOR_SOURCE.
+
+To make application builds independent of the live models.dev catalog,
+`packages/ai/src/providers/data/` is generated once with the vendored
+`npm run hydrate:model-data` command and checked into the Tocode vendor
+snapshot. Runtime self-update and model-catalog refresh are not used.
+
+The root development lock adds exact `bun@1.3.13` solely as the binary
+compiler. Bun 1.3.13 contains the macOS Seatbelt fix that preserves inherited
+environment variables when cwd ancestors are intentionally unreadable; this
+is required for the role-private `PI_CODING_AGENT_DIR` and ephemeral relay
+credential. Bun is compiled into `pi` and is not installed at runtime.
+
+Trailing whitespace in a small set of upstream documentation, examples, and
+maintenance files is normalized so the enclosing Tocode repository passes its
+patch-integrity check. This does not alter the Pi runtime.

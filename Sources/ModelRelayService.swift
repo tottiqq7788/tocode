@@ -1,6 +1,6 @@
 import Foundation
 
-final class ModelRelayService {
+final class ModelRelayService: @unchecked Sendable {
     private let configStore: ModelRelayConfigStoring
     private let upstreamKeyStore: ModelRelayUpstreamKeyStoring
     private let localKeyVault: ModelRelayLocalKeyVault
@@ -12,6 +12,7 @@ final class ModelRelayService {
     private var refreshTimer: DispatchSourceTimer?
     private var storedRunState: ModelRelayRunState = .stopped
     private var wantsRunning = false
+    private let internalAccessToken: String
     let router: ModelRelayRouter
     let server: ModelRelayHTTPServer
     let callMetrics: ModelRelayCallMetricsRecording
@@ -36,6 +37,9 @@ final class ModelRelayService {
         self.localKeyVault = localKeyVault
         self.upstreamClient = upstreamClient
         self.callMetrics = callMetrics
+        internalAccessToken = "tg_"
+            + UUID().uuidString.replacingOccurrences(of: "-", with: "")
+            + UUID().uuidString.replacingOccurrences(of: "-", with: "")
         let loaded: ModelRelayConfiguration
         do {
             let stored = try configStore.load()
@@ -53,10 +57,18 @@ final class ModelRelayService {
             storedRunState = .failed(error.localizedDescription)
         }
         configuration = loaded
-        router = ModelRelayRouter(configuration: loaded, keyStore: upstreamKeyStore, vault: localKeyVault)
+        router = ModelRelayRouter(
+            configuration: loaded,
+            keyStore: upstreamKeyStore,
+            vault: localKeyVault,
+            internalCredentialDigest: ModelRelayLocalKeyVault.digest(internalAccessToken)
+        )
         server = ModelRelayHTTPServer(router: router, upstream: upstreamClient, metrics: callMetrics)
         server.stateDidChange = { [weak self] state in
             self?.setRunState(state)
+        }
+        router.availabilityDidChange = { [weak self] in
+            self?.notifyChange()
         }
         cleanupPendingUpstreamKeys()
     }
@@ -215,6 +227,16 @@ final class ModelRelayService {
 
     func snapshot() -> ModelRelayConfiguration {
         configurationSnapshot()
+    }
+
+    /// 仅供同一 Tocode 进程启动受管 Togent 子进程；token 从不进入持久配置或日志。
+    func togentRelayAccess() -> TogentRelayAccess {
+        let snapshot = configurationSnapshot()
+        return TogentRelayAccess(
+            baseURL: "http://127.0.0.1:\(snapshot.port)/v1",
+            bearerToken: internalAccessToken,
+            models: router.availableTogentModels()
+        )
     }
 
     func updatePort(
