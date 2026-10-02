@@ -1367,9 +1367,9 @@ func testModelRelayManualAndLegacyAKContract() {
     expect(manual.contains("直接打开与新增相同的编辑弹窗"), "说明书写明厂家点击直达编辑弹窗")
     expect(manual.contains("不提供人工别名"), "说明书明确无模型别名配置")
     expect(!manual.contains("模型别名"), "说明书不再出现模型别名入口")
-    expect(manual.contains("AK → AK-模型"), "说明书保留既有 AK 模型入口")
+    expect(manual.contains("AK → 模型"), "说明书保留既有 AK 模型入口")
     expect(ExtendedSettingsStore.topLevelFolderTitle == "AK", "既有 AK 顶层夹名称保持不变")
-    expect(ExtendedSettingsStore.modelMenuTitle == "AK-模型", "既有 AK-模型名称保持不变")
+    expect(ExtendedSettingsStore.modelMenuTitle == "模型", "AK 夹内模型入口名为模型")
 }
 
 func testModelRelayCallMetricsStore() {

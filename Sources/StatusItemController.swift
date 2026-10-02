@@ -453,7 +453,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         // 独立顶层「模型」：本地 OpenAI-compatible 中转站，始终显示。
         menu.addItem(makeModelRelayMenuItem())
 
-        // AK → AK-模型（AK 门控）
+        // AK → 模型（AK 门控）
         activeModelMenu = nil
         activeModelParentItem = nil
         currentModelID = nil

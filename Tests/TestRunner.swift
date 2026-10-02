@@ -431,7 +431,8 @@ func testUserManualPages() {
     expect(joined.contains("finder copy"), "说明书覆盖 finder copy")
     expect(joined.contains("不是访达/Codex 跟随后的展示根"), "说明书写明 root open 用固定根")
     expect(joined.contains("顶层「AK」夹"), "说明书覆盖顶层 AK 夹")
-    expect(joined.contains("AK-模型"), "说明书覆盖 AK-模型入口")
+    expect(joined.contains("AK → 模型"), "说明书覆盖 AK → 模型入口")
+    expect(joined.contains("内含「模型」与「密钥 → AI」"), "说明书覆盖 AK 夹内模型入口")
     expect(joined.contains("AK → 密钥 → AI"), "说明书覆盖 AK 下密钥入口")
     expect(!joined.contains("设置 → 密钥 → AI"), "说明书不再写设置下密钥入口")
     expect(joined.contains("顶层「模型」"), "说明书覆盖独立顶层模型中转站")
@@ -1306,7 +1307,7 @@ func testExtendedSettingsStore() {
     expect(ExtendedSettingsStore.folderTitle == "拓展设置", "拓展设置夹标题")
     expect(ExtendedSettingsStore.akTitle == "AK", "AK 类型标题")
     expect(ExtendedSettingsStore.topLevelFolderTitle == "AK", "右键顶层 AK 夹标题")
-    expect(ExtendedSettingsStore.modelMenuTitle == "AK-模型", "AK 夹内模型入口标题")
+    expect(ExtendedSettingsStore.modelMenuTitle == "模型", "AK 夹内模型入口标题")
     expect(ExtendedSettingsStore.akCredentialTitle == "AI", "安克入口菜单名为 AI")
 
     store.akEnabled = true
