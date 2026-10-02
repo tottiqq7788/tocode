@@ -66,9 +66,7 @@ enum ModelRelayPrompts {
     }
 
     enum ProviderFormAction {
-        case test(ProviderDraft)
-        case save(ProviderDraft)
-        case refresh(ProviderDraft)
+        case save(ProviderDraft, tested: ModelRelayProviderConnectionTest?)
         case delete(ProviderDraft)
         case cancel
     }
@@ -117,8 +115,15 @@ enum ModelRelayPrompts {
     static func providerForm(
         existing: ModelRelayProvider?,
         draft initialDraft: ProviderDraft? = nil,
-        tested: ModelRelayProviderConnectionTest? = nil,
-        status: String? = nil
+        tested initialTested: ModelRelayProviderConnectionTest? = nil,
+        status initialStatus: String? = nil,
+        performTest: @escaping (
+            ProviderDraft,
+            @escaping (Result<ModelRelayProviderConnectionTest, Error>) -> Void
+        ) -> Void,
+        performRefresh: ((
+            @escaping (Result<Int, Error>) -> Void
+        ) -> Void)? = nil
     ) -> ProviderFormAction {
         let draft = initialDraft ?? initialProviderDraft(existing: existing)
         let name = NSTextField(string: draft.name)
@@ -133,8 +138,7 @@ enum ModelRelayPrompts {
         )
         secret.stringValue = draft.secret
         secret.placeholderString = existing == nil ? "上游 API Key" : "留空则保留现有 Key"
-        let alert = NSAlert()
-        alert.messageText = existing == nil ? "新增厂家" : "编辑厂家"
+
         let modelHint: String
         if let existing {
             modelHint = existing.models.isEmpty
@@ -143,66 +147,140 @@ enum ModelRelayPrompts {
         } else {
             modelHint = "选择预设或自定义地址，连接测试通过后才能保存。"
         }
-        alert.informativeText = status ?? modelHint
-        alert.addButton(withTitle: "保存")
-        alert.addButton(withTitle: "测试连接")
-        if existing != nil {
-            alert.addButton(withTitle: "刷新模型")
-            alert.addButton(withTitle: "删除…")
-        }
-        alert.addButton(withTitle: "取消")
-        alert.accessoryView = formAccessory(controls: [
+        let statusLabel = NSTextField(wrappingLabelWithString: initialStatus ?? modelHint)
+        statusLabel.textColor = .secondaryLabelColor
+        statusLabel.maximumNumberOfLines = 3
+        statusLabel.preferredMaxLayoutWidth = 418
+
+        let saveButton = formActionButton("保存")
+        saveButton.keyEquivalent = "\r"
+        let testButton = formActionButton("测试连接")
+        let refreshButton = existing == nil ? nil : formActionButton("刷新模型")
+        let deleteButton = existing == nil ? nil : formActionButton("删除…")
+        let cancelButton = formActionButton("取消")
+
+        var actionButtons = [saveButton, testButton]
+        if let refreshButton { actionButtons.append(refreshButton) }
+        if let deleteButton { actionButtons.append(deleteButton) }
+        actionButtons.append(cancelButton)
+        let buttonRow = formButtonRow(actionButtons)
+
+        let fields = formAccessory(controls: [
             ("名称", name),
             ("厂商", provider),
             ("自定义 URL", url),
             ("API Key", secret)
         ])
-        guard let accessory = alert.accessoryView as? NSStackView,
-              accessory.arrangedSubviews.count == 4 else {
-            return .cancel
+        guard let fieldStack = fields as? NSStackView else { return .cancel }
+
+        let contentWidth = max(fieldStack.frame.width, 418)
+        let statusHeight: CGFloat = 42
+        let content = NSStackView(frame: NSRect(
+            x: 0,
+            y: 0,
+            width: contentWidth,
+            height: fieldStack.frame.height + 10 + statusHeight + 10 + 28
+        ))
+        content.orientation = .vertical
+        content.alignment = .leading
+        content.spacing = 10
+        content.translatesAutoresizingMaskIntoConstraints = false
+        for view in [fieldStack, statusLabel, buttonRow] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            content.addArrangedSubview(view)
         }
+        NSLayoutConstraint.activate([
+            fieldStack.widthAnchor.constraint(equalToConstant: contentWidth),
+            statusLabel.widthAnchor.constraint(equalToConstant: contentWidth),
+            statusLabel.heightAnchor.constraint(greaterThanOrEqualToConstant: statusHeight),
+            buttonRow.widthAnchor.constraint(equalToConstant: contentWidth),
+            buttonRow.heightAnchor.constraint(equalToConstant: 28)
+        ])
+        content.layoutSubtreeIfNeeded()
+        content.frame = NSRect(
+            x: 0,
+            y: 0,
+            width: contentWidth,
+            height: fieldStack.frame.height + 10 + statusHeight + 10 + 28
+        )
+
+        let alert = NSAlert()
+        alert.messageText = existing == nil ? "新增厂家" : "编辑厂家"
+        alert.informativeText = ""
+        // NSAlert 至少要有一个按钮；动作全部改由 accessory 横向按钮驱动，避免竖排与重开闪烁。
+        // Escape 落到这个隐藏取消按钮，避免误触保存。
+        alert.addButton(withTitle: "取消")
+        alert.buttons[0].isHidden = true
+        alert.buttons[0].keyEquivalent = "\u{1b}"
+        alert.accessoryView = content
+
         let bridge = ModelRelayProviderFormBridge(
             alert: alert,
-            accessory: accessory,
+            fieldStack: fieldStack,
+            statusLabel: statusLabel,
+            content: content,
             name: name,
             provider: provider,
             customURL: url,
             secret: secret,
+            saveButton: saveButton,
+            testButton: testButton,
+            refreshButton: refreshButton,
+            deleteButton: deleteButton,
+            cancelButton: cancelButton,
             initial: draft,
-            tested: tested,
+            tested: initialTested,
             presetCount: providerPresets.count,
-            allowsRefreshAndDelete: existing != nil
+            defaultStatus: modelHint,
+            performTest: performTest,
+            performRefresh: performRefresh
         )
         bridge.refresh()
         let response = withExtendedLifetime(bridge) {
             alert.runModalFocusingFirstTextField()
         }
         let result = bridge.makeDraft()
+        let tested = bridge.currentTest
         bridge.detach()
         secret.stringValue = ""
-        let index = response.rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
-        if existing == nil {
-            switch index {
-            case 0:
-                return result.canSave(using: tested) ? .save(result) : .cancel
-            case 1:
-                return result.isReadyToTest() ? .test(result) : .cancel
-            default:
-                return .cancel
-            }
-        }
-        switch index {
-        case 0:
-            return result.canSave(using: tested) ? .save(result) : .cancel
-        case 1:
-            return result.isReadyToTest() ? .test(result) : .cancel
-        case 2:
-            return .refresh(result)
-        case 3:
+        switch response.rawValue {
+        case ModelRelayProviderFormBridge.saveCode:
+            return result.canSave(using: tested) ? .save(result, tested: tested) : .cancel
+        case ModelRelayProviderFormBridge.deleteCode:
             return .delete(result)
         default:
             return .cancel
         }
+    }
+
+    static func formActionButton(_ title: String) -> NSButton {
+        let button = NSButton(title: title, target: nil, action: nil)
+        button.bezelStyle = .rounded
+        button.setButtonType(.momentaryPushIn)
+        button.setContentHuggingPriority(.required, for: .horizontal)
+        button.setContentCompressionResistancePriority(.required, for: .horizontal)
+        return button
+    }
+
+    static func formButtonRow(_ buttons: [NSButton]) -> NSView {
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
+        row.distribution = .fill
+        row.translatesAutoresizingMaskIntoConstraints = false
+        let spacer = NSView()
+        spacer.translatesAutoresizingMaskIntoConstraints = false
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        row.addArrangedSubview(spacer)
+        for button in buttons {
+            button.translatesAutoresizingMaskIntoConstraints = false
+            row.addArrangedSubview(button)
+            button.widthAnchor.constraint(greaterThanOrEqualToConstant: 72).isActive = true
+            button.heightAnchor.constraint(equalToConstant: 28).isActive = true
+        }
+        row.frame = NSRect(x: 0, y: 0, width: 420, height: 28)
+        return row
     }
 
     static func providerMenuItem(
@@ -435,45 +513,92 @@ enum ModelRelayPrompts {
 
 @MainActor
 private final class ModelRelayProviderFormBridge: NSObject, NSTextFieldDelegate {
+    static let saveCode = 1_000
+    static let deleteCode = 1_001
+
     private let alert: NSAlert
-    private let accessory: NSStackView
+    private let fieldStack: NSStackView
+    private let statusLabel: NSTextField
+    private let content: NSStackView
     private let name: NSTextField
     private let provider: NSPopUpButton
     private let customURL: NSTextField
     private let secret: NSSecureTextField
+    private let saveButton: NSButton
+    private let testButton: NSButton
+    private let refreshButton: NSButton?
+    private let deleteButton: NSButton?
+    private let cancelButton: NSButton
     private let initial: ModelRelayPrompts.ProviderDraft
-    private let tested: ModelRelayProviderConnectionTest?
+    private(set) var currentTest: ModelRelayProviderConnectionTest?
     private let presetCount: Int
-    private let allowsRefreshAndDelete: Bool
+    private let defaultStatus: String
+    private let performTest: (
+        ModelRelayPrompts.ProviderDraft,
+        @escaping (Result<ModelRelayProviderConnectionTest, Error>) -> Void
+    ) -> Void
+    private let performRefresh: ((@escaping (Result<Int, Error>) -> Void) -> Void)?
+    private var isBusy = false
 
     init(
         alert: NSAlert,
-        accessory: NSStackView,
+        fieldStack: NSStackView,
+        statusLabel: NSTextField,
+        content: NSStackView,
         name: NSTextField,
         provider: NSPopUpButton,
         customURL: NSTextField,
         secret: NSSecureTextField,
+        saveButton: NSButton,
+        testButton: NSButton,
+        refreshButton: NSButton?,
+        deleteButton: NSButton?,
+        cancelButton: NSButton,
         initial: ModelRelayPrompts.ProviderDraft,
         tested: ModelRelayProviderConnectionTest?,
         presetCount: Int,
-        allowsRefreshAndDelete: Bool
+        defaultStatus: String,
+        performTest: @escaping (
+            ModelRelayPrompts.ProviderDraft,
+            @escaping (Result<ModelRelayProviderConnectionTest, Error>) -> Void
+        ) -> Void,
+        performRefresh: ((@escaping (Result<Int, Error>) -> Void) -> Void)?
     ) {
         self.alert = alert
-        self.accessory = accessory
+        self.fieldStack = fieldStack
+        self.statusLabel = statusLabel
+        self.content = content
         self.name = name
         self.provider = provider
         self.customURL = customURL
         self.secret = secret
+        self.saveButton = saveButton
+        self.testButton = testButton
+        self.refreshButton = refreshButton
+        self.deleteButton = deleteButton
+        self.cancelButton = cancelButton
         self.initial = initial
-        self.tested = tested
+        self.currentTest = tested
         self.presetCount = presetCount
-        self.allowsRefreshAndDelete = allowsRefreshAndDelete
+        self.defaultStatus = defaultStatus
+        self.performTest = performTest
+        self.performRefresh = performRefresh
         super.init()
         name.delegate = self
         customURL.delegate = self
         secret.delegate = self
         provider.target = self
         provider.action = #selector(selectionChanged(_:))
+        saveButton.target = self
+        saveButton.action = #selector(saveTapped(_:))
+        testButton.target = self
+        testButton.action = #selector(testTapped(_:))
+        refreshButton?.target = self
+        refreshButton?.action = #selector(refreshTapped(_:))
+        deleteButton?.target = self
+        deleteButton?.action = #selector(deleteTapped(_:))
+        cancelButton.target = self
+        cancelButton.action = #selector(cancelTapped(_:))
     }
 
     func makeDraft() -> ModelRelayPrompts.ProviderDraft {
@@ -492,23 +617,36 @@ private final class ModelRelayProviderFormBridge: NSObject, NSTextFieldDelegate 
 
     func refresh() {
         let isCustom = provider.indexOfSelectedItem == presetCount
-        customURL.isEnabled = isCustom
-        accessory.arrangedSubviews[2].isHidden = !isCustom
-        var frame = accessory.frame
-        frame.size.height = isCustom ? 136 : 100
-        accessory.frame = frame
+        customURL.isEnabled = !isBusy && isCustom
+        fieldStack.arrangedSubviews[2].isHidden = !isCustom
+        var fieldFrame = fieldStack.frame
+        fieldFrame.size.height = isCustom ? 136 : 100
+        fieldStack.frame = fieldFrame
+        let contentWidth = max(content.frame.width, fieldFrame.width)
+        content.frame = NSRect(
+            x: 0,
+            y: 0,
+            width: contentWidth,
+            height: fieldFrame.height + 10 + 42 + 10 + 28
+        )
+
         let draft = makeDraft()
         let validName = (try? ModelRelayValidation.normalizedName(draft.name)) != nil
-        alert.buttons[0].isEnabled = draft.canSave(using: tested)
-        alert.buttons[1].isEnabled = validName && draft.isReadyToTest()
-        alert.buttons[1].title = draft.canSave(using: tested) && draft.requiresConnectionTest()
+        saveButton.isEnabled = !isBusy && draft.canSave(using: currentTest)
+        testButton.isEnabled = !isBusy && validName && draft.isReadyToTest()
+        testButton.title = draft.canSave(using: currentTest) && draft.requiresConnectionTest()
             ? "重新测试"
             : "测试连接"
-        if allowsRefreshAndDelete {
-            alert.buttons[2].isEnabled = initial.hasStoredKey && !draft.requiresConnectionTest()
-            alert.buttons[3].isEnabled = true
-        }
+        refreshButton?.isEnabled = !isBusy
+            && initial.hasStoredKey
+            && !draft.requiresConnectionTest()
+        deleteButton?.isEnabled = !isBusy
+        cancelButton.isEnabled = !isBusy
+        name.isEnabled = !isBusy
+        provider.isEnabled = !isBusy
+        secret.isEnabled = !isBusy
         alert.layout()
+        alert.window.layoutIfNeeded()
     }
 
     func detach() {
@@ -517,14 +655,83 @@ private final class ModelRelayProviderFormBridge: NSObject, NSTextFieldDelegate 
         secret.delegate = nil
         provider.target = nil
         provider.action = nil
+        saveButton.target = nil
+        testButton.target = nil
+        refreshButton?.target = nil
+        deleteButton?.target = nil
+        cancelButton.target = nil
     }
 
     func controlTextDidChange(_ obj: Notification) {
+        if currentTest != nil {
+            let draft = makeDraft()
+            if draft.requiresConnectionTest() {
+                currentTest = nil
+                if statusLabel.stringValue.hasPrefix("连接成功") {
+                    statusLabel.stringValue = defaultStatus
+                }
+            }
+        }
         refresh()
     }
 
     @objc private func selectionChanged(_ sender: NSPopUpButton) {
+        currentTest = nil
+        statusLabel.stringValue = defaultStatus
         refresh()
+    }
+
+    @objc private func saveTapped(_ sender: NSButton) {
+        let draft = makeDraft()
+        guard draft.canSave(using: currentTest) else { return }
+        NSApp.stopModal(withCode: NSApplication.ModalResponse(rawValue: Self.saveCode))
+    }
+
+    @objc private func cancelTapped(_ sender: NSButton) {
+        NSApp.stopModal(withCode: .alertFirstButtonReturn)
+    }
+
+    @objc private func deleteTapped(_ sender: NSButton) {
+        NSApp.stopModal(withCode: NSApplication.ModalResponse(rawValue: Self.deleteCode))
+    }
+
+    @objc private func testTapped(_ sender: NSButton) {
+        let draft = makeDraft()
+        guard draft.isReadyToTest() else { return }
+        isBusy = true
+        statusLabel.stringValue = "正在测试连接…"
+        refresh()
+        performTest(draft) { [weak self] result in
+            guard let self else { return }
+            self.isBusy = false
+            switch result {
+            case .success(let test):
+                self.currentTest = test
+                self.statusLabel.stringValue = "连接成功，发现 \(test.modelIDs.count) 个模型，可以保存。"
+            case .failure(let error):
+                self.currentTest = nil
+                self.statusLabel.stringValue = "连接失败：\(error.localizedDescription)"
+            }
+            self.refresh()
+        }
+    }
+
+    @objc private func refreshTapped(_ sender: NSButton) {
+        guard let performRefresh else { return }
+        isBusy = true
+        statusLabel.stringValue = "正在刷新模型…"
+        refresh()
+        performRefresh { [weak self] result in
+            guard let self else { return }
+            self.isBusy = false
+            switch result {
+            case .success(let count):
+                self.statusLabel.stringValue = "已刷新，同步 \(count) 个模型。"
+            case .failure(let error):
+                self.statusLabel.stringValue = "刷新失败：\(error.localizedDescription)"
+            }
+            self.refresh()
+        }
     }
 }
 

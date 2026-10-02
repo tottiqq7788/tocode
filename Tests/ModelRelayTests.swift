@@ -81,6 +81,18 @@ func testModelRelayPromptFormLayout() {
     expect(name.isEditable && name.isEnabled, "模型弹窗输入框可编辑")
     expect(AlertFocus.firstEditableTextField(in: accessory) === name, "模型弹窗默认聚焦名称输入框")
 
+    let save = ModelRelayPrompts.formActionButton("保存")
+    let test = ModelRelayPrompts.formActionButton("测试连接")
+    let cancel = ModelRelayPrompts.formActionButton("取消")
+    let buttons = ModelRelayPrompts.formButtonRow([save, test, cancel])
+    buttons.layoutSubtreeIfNeeded()
+    expect(
+        (buttons as? NSStackView)?.orientation == .horizontal,
+        "厂家弹窗动作按钮横向排列"
+    )
+    expect(buttons.frame.height <= 36, "厂家弹窗动作按钮保持单行高度")
+    expect(save.frame.width >= 72 && test.frame.width >= 72 && cancel.frame.width >= 72, "厂家弹窗按钮保留可点宽度")
+
     let entity = ModelRelayProvider(name: "厂家 A", baseURL: presets[0].baseURL)
     let entityItem = ModelRelayPrompts.providerMenuItem(
         entity,

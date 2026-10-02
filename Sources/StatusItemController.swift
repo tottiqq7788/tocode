@@ -797,56 +797,46 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             existing: existing,
             draft: draft,
             tested: tested,
-            status: status
+            status: status,
+            performTest: { [weak self] nextDraft, completion in
+                guard let self else { return }
+                let baseURL: String
+                do {
+                    baseURL = try nextDraft.resolvedBaseURL()
+                } catch {
+                    completion(.failure(error))
+                    return
+                }
+                if let providerID {
+                    self.relayBusyProviderIDs.insert(providerID)
+                }
+                self.modelRelay.testProviderConnection(
+                    providerID: providerID,
+                    baseURL: baseURL,
+                    candidateSecret: nextDraft.secret.isEmpty ? nil : nextDraft.secret
+                ) { [weak self] result in
+                    if let providerID {
+                        self?.relayBusyProviderIDs.remove(providerID)
+                    }
+                    completion(result)
+                }
+            },
+            performRefresh: providerID.map { id in
+                { [weak self] completion in
+                    guard let self else { return }
+                    self.relayBusyProviderIDs.insert(id)
+                    self.modelRelay.fetchModels(providerID: id) { [weak self] result in
+                        self?.relayBusyProviderIDs.remove(id)
+                        completion(result.map(\.count))
+                    }
+                }
+            }
         ) {
         case .cancel:
             if providerID == nil {
                 isCreatingModelRelayProvider = false
             }
             return
-        case .test(let nextDraft):
-            let baseURL: String
-            do {
-                baseURL = try nextDraft.resolvedBaseURL()
-            } catch {
-                presentModelRelayProviderForm(
-                    providerID: providerID,
-                    draft: nextDraft,
-                    status: error.localizedDescription
-                )
-                return
-            }
-            if let providerID {
-                relayBusyProviderIDs.insert(providerID)
-            }
-            modelRelay.testProviderConnection(
-                providerID: providerID,
-                baseURL: baseURL,
-                candidateSecret: nextDraft.secret.isEmpty ? nil : nextDraft.secret
-            ) { [weak self] result in
-                guard let self else { return }
-                if let providerID {
-                    self.relayBusyProviderIDs.remove(providerID)
-                }
-                switch result {
-                case .success(let test):
-                    self.presentModelRelayProviderForm(
-                        providerID: providerID,
-                        draft: nextDraft,
-                        tested: test,
-                        status: "连接成功，发现 \(test.modelIDs.count) 个模型，可以保存。"
-                    )
-                case .failure(let error):
-                    self.presentModelRelayProviderForm(
-                        providerID: providerID,
-                        draft: nextDraft,
-                        status: "连接失败：\(error.localizedDescription)"
-                    )
-                }
-            }
-        case .refresh(let nextDraft):
-            guard let providerID else { return }
-            refreshModelRelayProvider(providerID, reopenDraft: nextDraft)
         case .delete(let nextDraft):
             guard let providerID,
                   let provider = modelRelay.snapshot().providers.first(where: { $0.id == providerID }) else {
@@ -875,26 +865,26 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                     status: error.localizedDescription
                 )
             }
-        case .save(let nextDraft):
+        case .save(let nextDraft, let latestTest):
             do {
                 if let providerID {
                     try modelRelay.updateProvider(
                         id: providerID,
                         name: nextDraft.name,
-                        using: nextDraft.requiresConnectionTest() ? tested : nil
+                        using: nextDraft.requiresConnectionTest() ? latestTest : nil
                     )
                 } else {
-                    guard let tested else {
+                    guard let latestTest else {
                         throw ModelRelayError.providerConnectionNotTested
                     }
-                    try modelRelay.createProvider(name: nextDraft.name, using: tested)
+                    try modelRelay.createProvider(name: nextDraft.name, using: latestTest)
                     isCreatingModelRelayProvider = false
                 }
             } catch {
                 presentModelRelayProviderForm(
                     providerID: providerID,
                     draft: nextDraft,
-                    tested: tested,
+                    tested: latestTest,
                     status: error.localizedDescription
                 )
             }
@@ -904,39 +894,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     @objc private func manageModelRelayProvider(_ sender: NSMenuItem) {
         guard let providerID = representedUUID(sender) else { return }
         presentModelRelayProviderForm(providerID: providerID)
-    }
-
-    private func refreshModelRelayProvider(
-        _ providerID: UUID,
-        reopenDraft: ModelRelayPrompts.ProviderDraft? = nil
-    ) {
-        relayBusyProviderIDs.insert(providerID)
-        modelRelay.fetchModels(providerID: providerID) { [weak self] result in
-            guard let self else { return }
-            self.relayBusyProviderIDs.remove(providerID)
-            switch result {
-            case .success(let models):
-                if let reopenDraft {
-                    self.presentModelRelayProviderForm(
-                        providerID: providerID,
-                        draft: reopenDraft,
-                        status: "已刷新，同步 \(models.count) 个模型。"
-                    )
-                } else {
-                    ModelRelayPrompts.showMessage(title: "模型已刷新", detail: "已同步 \(models.count) 个模型。")
-                }
-            case .failure(let error):
-                if let reopenDraft {
-                    self.presentModelRelayProviderForm(
-                        providerID: providerID,
-                        draft: reopenDraft,
-                        status: "刷新失败：\(error.localizedDescription)"
-                    )
-                } else {
-                    ModelRelayPrompts.showError(error, title: "模型刷新失败")
-                }
-            }
-        }
     }
 
     @objc private func addModelRelayLocalKey() {
