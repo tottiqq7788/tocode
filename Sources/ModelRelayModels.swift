@@ -200,7 +200,7 @@ enum ModelRelayError: Error, Equatable, LocalizedError {
         case .duplicateKeyName:
             return "Key 名称已存在。"
         case .duplicateAlias:
-            return "模型别名已存在。"
+            return "模型名已存在。"
         case .providerAlreadyHasKey:
             return "每个厂家只能配置一个上游 Key。"
         case .providerConnectionNotTested:

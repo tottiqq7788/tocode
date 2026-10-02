@@ -435,6 +435,7 @@ func testUserManualPages() {
     expect(joined.contains("AK → 密钥 → AI"), "说明书覆盖 AK 下密钥入口")
     expect(!joined.contains("设置 → 密钥 → AI"), "说明书不再写设置下密钥入口")
     expect(joined.contains("顶层「模型」"), "说明书覆盖独立顶层模型中转站")
+    expect(joined.contains("不提供人工别名"), "说明书覆盖无模型别名")
     expect(!joined.contains("录入安克"), "说明书点击路径文案不含安克")
     expect(!joined.contains("ANKER_API_KEY"), "说明书不含密钥字段")
     expect(!joined.contains("wechat-credential.json"), "说明书不展示凭据文件")

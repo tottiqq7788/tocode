@@ -844,6 +844,37 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                     )
                 }
             }
+        case .refresh(let nextDraft):
+            guard let providerID else { return }
+            refreshModelRelayProvider(providerID, reopenDraft: nextDraft)
+        case .delete(let nextDraft):
+            guard let providerID,
+                  let provider = modelRelay.snapshot().providers.first(where: { $0.id == providerID }) else {
+                return
+            }
+            guard ModelRelayPrompts.confirm(
+                title: "删除厂家“\(provider.name)”？",
+                detail: "该厂家的模型目录和唯一上游 Key 都会删除。"
+            ) else {
+                presentModelRelayProviderForm(
+                    providerID: providerID,
+                    draft: nextDraft,
+                    tested: tested,
+                    status: status
+                )
+                return
+            }
+            do {
+                try modelRelay.deleteProvider(id: providerID)
+            } catch {
+                ModelRelayPrompts.showError(error, title: "厂家未删除")
+                presentModelRelayProviderForm(
+                    providerID: providerID,
+                    draft: nextDraft,
+                    tested: tested,
+                    status: error.localizedDescription
+                )
+            }
         case .save(let nextDraft):
             do {
                 if let providerID {
@@ -871,51 +902,39 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     @objc private func manageModelRelayProvider(_ sender: NSMenuItem) {
-        guard let providerID = representedUUID(sender),
-              let provider = modelRelay.snapshot().providers.first(where: { $0.id == providerID }) else {
-            return
-        }
-        switch ModelRelayPrompts.providerManagementAction(provider) {
-        case .edit:
-            presentModelRelayProviderForm(providerID: providerID)
-        case .refresh:
-            refreshModelRelayProvider(providerID)
-        case .models:
-            guard let route = ModelRelayPrompts.modelRoute(in: provider),
-                  let alias = ModelRelayPrompts.alias(
-                    current: route.alias,
-                    upstreamModelID: route.upstreamModelID
-                  ) else { return }
-            do {
-                try modelRelay.updateAlias(routeID: route.id, alias: alias)
-            } catch {
-                ModelRelayPrompts.showError(error, title: "模型别名未更新")
-            }
-        case .delete:
-            guard ModelRelayPrompts.confirm(
-                title: "删除厂家“\(provider.name)”？",
-                detail: "该厂家的模型路由和唯一上游 Key 都会删除。"
-            ) else { return }
-            do {
-                try modelRelay.deleteProvider(id: providerID)
-            } catch {
-                ModelRelayPrompts.showError(error, title: "厂家未删除")
-            }
-        case .cancel:
-            return
-        }
+        guard let providerID = representedUUID(sender) else { return }
+        presentModelRelayProviderForm(providerID: providerID)
     }
 
-    private func refreshModelRelayProvider(_ providerID: UUID) {
+    private func refreshModelRelayProvider(
+        _ providerID: UUID,
+        reopenDraft: ModelRelayPrompts.ProviderDraft? = nil
+    ) {
         relayBusyProviderIDs.insert(providerID)
         modelRelay.fetchModels(providerID: providerID) { [weak self] result in
             guard let self else { return }
             self.relayBusyProviderIDs.remove(providerID)
             switch result {
             case .success(let models):
-                ModelRelayPrompts.showMessage(title: "模型已刷新", detail: "已同步 \(models.count) 个模型。")
+                if let reopenDraft {
+                    self.presentModelRelayProviderForm(
+                        providerID: providerID,
+                        draft: reopenDraft,
+                        status: "已刷新，同步 \(models.count) 个模型。"
+                    )
+                } else {
+                    ModelRelayPrompts.showMessage(title: "模型已刷新", detail: "已同步 \(models.count) 个模型。")
+                }
             case .failure(let error):
-                ModelRelayPrompts.showError(error, title: "模型刷新失败")
+                if let reopenDraft {
+                    self.presentModelRelayProviderForm(
+                        providerID: providerID,
+                        draft: reopenDraft,
+                        status: "刷新失败：\(error.localizedDescription)"
+                    )
+                } else {
+                    ModelRelayPrompts.showError(error, title: "模型刷新失败")
+                }
             }
         }
     }

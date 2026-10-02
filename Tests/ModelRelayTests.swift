@@ -88,7 +88,7 @@ func testModelRelayPromptFormLayout() {
         target: nil,
         action: NSSelectorFromString("manageProvider:")
     )
-    expect(entityItem.action != nil && entityItem.submenu == nil, "厂家是普通可点击项而不是文件夹")
+    expect(entityItem.action != nil && entityItem.submenu == nil, "厂家是普通可点击项，直接进入编辑弹窗")
     expect(entityItem.representedObject as? String == entity.id.uuidString, "厂家菜单项绑定实体 ID")
     let busyItem = ModelRelayPrompts.providerMenuItem(
         entity,
@@ -330,8 +330,15 @@ func testModelRelayRouterAndControlPlane() {
             name: "one",
             baseURL: "https://one.example/v1",
             models: [
-                ModelRelayModelRoute(upstreamModelID: "a", alias: "shared"),
-                ModelRelayModelRoute(upstreamModelID: "b", alias: "other")
+                ModelRelayModelRoute(upstreamModelID: "a", alias: "custom-a"),
+                ModelRelayModelRoute(upstreamModelID: "b", alias: "custom-b")
+            ]
+        ),
+        ModelRelayProvider(
+            name: "two",
+            baseURL: "https://two.example/v1",
+            models: [
+                ModelRelayModelRoute(upstreamModelID: "a", alias: "still-custom")
             ]
         )
     ])
@@ -341,15 +348,10 @@ func testModelRelayRouterAndControlPlane() {
         localKeyVault: vault,
         upstreamClient: ModelRelayUpstreamClient(sessionConfiguration: modelRelayTestSessionConfiguration())
     )
-    do {
-        try service.updateAlias(
-            routeID: initial.providers[0].models[1].id,
-            alias: "SHARED"
-        )
-        expect(false, "模型别名应忽略大小写保持全局唯一")
-    } catch {
-        expect(error as? ModelRelayError == .duplicateAlias, "重复模型别名返回明确错误")
-    }
+    expect(
+        service.snapshot().providers.flatMap(\.models).map(\.alias).sorted() == ["a", "b", "two/a"],
+        "启动时剥离人工别名，冲突上游 id 自动加厂家前缀"
+    )
     _ = try! service.createLocalKey(name: "client-a", password: "password-123")
     do {
         _ = try service.createLocalKey(name: "CLIENT-A", password: "password-456")
@@ -425,7 +427,7 @@ func testModelRelayValidatedKeyControlPlane() async {
     do {
         secondProvider = try service.createProvider(name: "second", using: connection)
         expect(secondProvider.keys.count == 1, "厂家实体只保存一个上游 Key")
-        expect(secondProvider.models.first?.alias == "second/shared", "冲突模型使用 厂家/model-id 别名")
+        expect(secondProvider.models.first?.alias == "second/shared", "冲突模型自动使用 厂家/model-id")
         expect(
             secondProvider.upstreamKey.flatMap { try? keyStore.load(id: $0.id) } == "valid-secret",
             "保存后 secret 只进入 Keychain 抽象"
@@ -797,7 +799,11 @@ func testModelRelayValidatedKeyControlPlane() async {
     expect(migrated.allSatisfy { $0.models.map(\.upstreamModelID) == ["legacy-model"] }, "迁移后每个厂家立即保留模型目录")
     expect(
         Set(migrated.flatMap(\.models).map { $0.alias.lowercased() }).count == 2,
-        "迁移为拆分厂家生成全局唯一模型别名"
+        "迁移后自动派生全局唯一模型名"
+    )
+    expect(
+        migrated.contains { $0.models.contains { $0.alias == "legacy-model" } },
+        "首个厂家直接暴露上游 model id"
     )
     expect(legacyStore.configuration.providers == migrated, "迁移结果原子写回配置")
 
@@ -1337,6 +1343,9 @@ func testModelRelayPortRollback() async {
 func testModelRelayManualAndLegacyAKContract() {
     let manual = UserManual.pages.map { $0.title + "\n" + $0.body }.joined(separator: "\n")
     expect(manual.contains("顶层「模型」"), "说明书标明独立顶层模型中转站")
+    expect(manual.contains("直接打开与新增相同的编辑弹窗"), "说明书写明厂家点击直达编辑弹窗")
+    expect(manual.contains("不提供人工别名"), "说明书明确无模型别名配置")
+    expect(!manual.contains("模型别名"), "说明书不再出现模型别名入口")
     expect(manual.contains("AK → AK-模型"), "说明书保留既有 AK 模型入口")
     expect(ExtendedSettingsStore.topLevelFolderTitle == "AK", "既有 AK 顶层夹名称保持不变")
     expect(ExtendedSettingsStore.modelMenuTitle == "AK-模型", "既有 AK-模型名称保持不变")

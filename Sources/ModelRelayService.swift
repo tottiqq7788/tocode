@@ -36,7 +36,9 @@ final class ModelRelayService {
         let loaded: ModelRelayConfiguration
         do {
             let stored = try configStore.load()
-            let migrated = Self.migratingLegacyProviderKeys(stored)
+            let migrated = Self.normalizingPublishedModelIDs(
+                Self.migratingLegacyProviderKeys(stored)
+            )
             if migrated != stored {
                 try configStore.save(migrated)
             }
@@ -64,9 +66,6 @@ final class ModelRelayService {
         }
         var migrated = configuration
         var occupied = Set(configuration.providers.map { $0.name.lowercased() })
-        var occupiedAliases = Set(configuration.providers
-            .flatMap(\.models)
-            .map { $0.alias.lowercased() })
         var providers: [ModelRelayProvider] = []
         for provider in configuration.providers {
             guard let first = provider.keys.first, provider.keys.count > 1 else {
@@ -82,27 +81,51 @@ final class ModelRelayService {
                     occupied: occupied
                 )
                 occupied.insert(name.lowercased())
-                let models = provider.models.map { route in
-                    let alias = uniqueMigratedAlias(
-                        preferred: "\(name)/\(route.upstreamModelID)",
-                        occupied: occupiedAliases
-                    )
-                    occupiedAliases.insert(alias.lowercased())
-                    return ModelRelayModelRoute(
-                        upstreamModelID: route.upstreamModelID,
-                        alias: alias
-                    )
-                }
                 providers.append(ModelRelayProvider(
                     name: name,
                     baseURL: provider.baseURL,
                     keys: [key],
-                    models: models
+                    models: provider.models.map {
+                        ModelRelayModelRoute(
+                            id: UUID(),
+                            upstreamModelID: $0.upstreamModelID,
+                            alias: $0.upstreamModelID
+                        )
+                    }
                 ))
             }
         }
         migrated.providers = providers
         return migrated
+    }
+
+    static func normalizingPublishedModelIDs(
+        _ configuration: ModelRelayConfiguration
+    ) -> ModelRelayConfiguration {
+        var updated = configuration
+        var occupied = Set<String>()
+        var providers: [ModelRelayProvider] = []
+        for provider in configuration.providers {
+            var next = provider
+            var models: [ModelRelayModelRoute] = []
+            for route in provider.models {
+                let published = publishedModelID(
+                    upstreamModelID: route.upstreamModelID,
+                    providerName: provider.name,
+                    occupied: occupied
+                )
+                occupied.insert(published.lowercased())
+                models.append(ModelRelayModelRoute(
+                    id: route.id,
+                    upstreamModelID: route.upstreamModelID,
+                    alias: published
+                ))
+            }
+            next.models = models
+            providers.append(next)
+        }
+        updated.providers = providers
+        return updated
     }
 
     private static func uniqueMigratedProviderName(
@@ -128,10 +151,14 @@ final class ModelRelayService {
         }
     }
 
-    private static func uniqueMigratedAlias(
-        preferred: String,
+    private static func publishedModelID(
+        upstreamModelID: String,
+        providerName: String,
         occupied: Set<String>
     ) -> String {
+        let preferred = occupied.contains(upstreamModelID.lowercased())
+            ? "\(providerName)/\(upstreamModelID)"
+            : upstreamModelID
         if !occupied.contains(preferred.lowercased()) {
             return preferred
         }
@@ -398,6 +425,7 @@ final class ModelRelayService {
                     configuration: configuration
                 )
                 configuration.providers[index].name = normalizedName
+                configuration = Self.normalizingPublishedModelIDs(configuration)
             }
             return
         }
@@ -792,25 +820,6 @@ final class ModelRelayService {
         }
     }
 
-    func updateAlias(routeID: UUID, alias: String) throws {
-        let normalizedAlias = try ModelRelayValidation.normalizedName(alias)
-        try mutateConfiguration { configuration in
-            guard let providerIndex = configuration.providers.firstIndex(where: {
-                $0.models.contains(where: { $0.id == routeID })
-            }), let modelIndex = configuration.providers[providerIndex].models.firstIndex(where: {
-                $0.id == routeID
-            }) else {
-                throw ModelRelayError.modelNotFound
-            }
-            guard !configuration.providers.flatMap(\.models).contains(where: {
-                $0.id != routeID && $0.alias.caseInsensitiveCompare(normalizedAlias) == .orderedSame
-            }) else {
-                throw ModelRelayError.duplicateAlias
-            }
-            configuration.providers[providerIndex].models[modelIndex].alias = normalizedAlias
-        }
-    }
-
     @discardableResult
     func createLocalKey(name: String, password: String) throws -> ModelRelayLocalKeyRecord {
         persistenceLock.lock()
@@ -926,26 +935,22 @@ final class ModelRelayService {
             .map { $0.alias.lowercased() })
         var routes: [ModelRelayModelRoute] = []
         for modelID in Array(Set(modelIDs)).sorted() {
-            if var route = existingByID[modelID] {
-                if occupied.contains(route.alias.lowercased()) {
-                    route.alias = uniqueAlias(
-                        preferred: "\(providerName)/\(modelID)",
-                        occupied: occupied
-                    )
-                }
-                occupied.insert(route.alias.lowercased())
-                routes.append(route)
+            let published = Self.publishedModelID(
+                upstreamModelID: modelID,
+                providerName: providerName,
+                occupied: occupied
+            )
+            occupied.insert(published.lowercased())
+            if let existing = existingByID[modelID] {
+                routes.append(ModelRelayModelRoute(
+                    id: existing.id,
+                    upstreamModelID: modelID,
+                    alias: published
+                ))
             } else {
-                let alias = uniqueAlias(
-                    preferred: occupied.contains(modelID.lowercased())
-                        ? "\(providerName)/\(modelID)"
-                        : modelID,
-                    occupied: occupied
-                )
-                occupied.insert(alias.lowercased())
                 routes.append(ModelRelayModelRoute(
                     upstreamModelID: modelID,
-                    alias: alias
+                    alias: published
                 ))
             }
         }
@@ -962,6 +967,7 @@ final class ModelRelayService {
                   configuration.providers[providerIndex].upstreamKey?.id == provider.upstreamKey?.id else {
                 throw ModelRelayError.providerNotFound
             }
+            let currentName = configuration.providers[providerIndex].name
             let existingForProvider = Dictionary(
                 uniqueKeysWithValues: configuration.providers[providerIndex].models
                     .map { ($0.upstreamModelID, $0) }
@@ -972,26 +978,22 @@ final class ModelRelayService {
                 .map { $0.alias.lowercased() })
             var merged: [ModelRelayModelRoute] = []
             for modelID in uniqueIDs {
-                if var existing = existingForProvider[modelID] {
-                    if occupied.contains(existing.alias.lowercased()) {
-                        existing.alias = uniqueAlias(
-                            preferred: "\(provider.name)/\(modelID)",
-                            occupied: occupied
-                        )
-                    }
-                    occupied.insert(existing.alias.lowercased())
-                    merged.append(existing)
+                let published = Self.publishedModelID(
+                    upstreamModelID: modelID,
+                    providerName: currentName,
+                    occupied: occupied
+                )
+                occupied.insert(published.lowercased())
+                if let existing = existingForProvider[modelID] {
+                    merged.append(ModelRelayModelRoute(
+                        id: existing.id,
+                        upstreamModelID: modelID,
+                        alias: published
+                    ))
                 } else {
-                    let alias = uniqueAlias(
-                        preferred: occupied.contains(modelID.lowercased())
-                            ? "\(provider.name)/\(modelID)"
-                            : modelID,
-                        occupied: occupied
-                    )
-                    occupied.insert(alias.lowercased())
                     merged.append(ModelRelayModelRoute(
                         upstreamModelID: modelID,
-                        alias: alias
+                        alias: published
                     ))
                 }
             }
@@ -999,15 +1001,6 @@ final class ModelRelayService {
             result = merged
         }
         return result.sorted { $0.alias.localizedCaseInsensitiveCompare($1.alias) == .orderedAscending }
-    }
-
-    private func uniqueAlias(preferred: String, occupied: Set<String>) -> String {
-        if !occupied.contains(preferred.lowercased()) { return preferred }
-        var suffix = 2
-        while occupied.contains("\(preferred)-\(suffix)".lowercased()) {
-            suffix += 1
-        }
-        return "\(preferred)-\(suffix)"
     }
 
     private func mutateConfiguration(_ body: (inout ModelRelayConfiguration) throws -> Void) throws {

@@ -68,14 +68,8 @@ enum ModelRelayPrompts {
     enum ProviderFormAction {
         case test(ProviderDraft)
         case save(ProviderDraft)
-        case cancel
-    }
-
-    enum ProviderManagementAction {
-        case edit
-        case refresh
-        case models
-        case delete
+        case refresh(ProviderDraft)
+        case delete(ProviderDraft)
         case cancel
     }
 
@@ -141,9 +135,21 @@ enum ModelRelayPrompts {
         secret.placeholderString = existing == nil ? "上游 API Key" : "留空则保留现有 Key"
         let alert = NSAlert()
         alert.messageText = existing == nil ? "新增厂家" : "编辑厂家"
-        alert.informativeText = status ?? "选择预设或自定义地址，连接测试通过后才能保存。"
+        let modelHint: String
+        if let existing {
+            modelHint = existing.models.isEmpty
+                ? "已保存厂家。修改地址或 Key 后需重新测试；也可刷新上游模型目录。"
+                : "已保存厂家，当前同步 \(existing.models.count) 个模型。修改地址或 Key 后需重新测试。"
+        } else {
+            modelHint = "选择预设或自定义地址，连接测试通过后才能保存。"
+        }
+        alert.informativeText = status ?? modelHint
         alert.addButton(withTitle: "保存")
         alert.addButton(withTitle: "测试连接")
+        if existing != nil {
+            alert.addButton(withTitle: "刷新模型")
+            alert.addButton(withTitle: "删除…")
+        }
         alert.addButton(withTitle: "取消")
         alert.accessoryView = formAccessory(controls: [
             ("名称", name),
@@ -164,7 +170,8 @@ enum ModelRelayPrompts {
             secret: secret,
             initial: draft,
             tested: tested,
-            presetCount: providerPresets.count
+            presetCount: providerPresets.count,
+            allowsRefreshAndDelete: existing != nil
         )
         bridge.refresh()
         let response = withExtendedLifetime(bridge) {
@@ -173,66 +180,29 @@ enum ModelRelayPrompts {
         let result = bridge.makeDraft()
         bridge.detach()
         secret.stringValue = ""
-        switch response {
-        case .alertFirstButtonReturn:
+        let index = response.rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+        if existing == nil {
+            switch index {
+            case 0:
+                return result.canSave(using: tested) ? .save(result) : .cancel
+            case 1:
+                return result.isReadyToTest() ? .test(result) : .cancel
+            default:
+                return .cancel
+            }
+        }
+        switch index {
+        case 0:
             return result.canSave(using: tested) ? .save(result) : .cancel
-        case .alertSecondButtonReturn:
+        case 1:
             return result.isReadyToTest() ? .test(result) : .cancel
+        case 2:
+            return .refresh(result)
+        case 3:
+            return .delete(result)
         default:
             return .cancel
         }
-    }
-
-    static func providerManagementAction(
-        _ provider: ModelRelayProvider
-    ) -> ProviderManagementAction {
-        let source = providerPresets.first(where: { $0.baseURL == provider.baseURL })?.title
-            ?? "自定义"
-        let alert = NSAlert()
-        alert.messageText = provider.name
-        alert.informativeText = """
-        厂商：\(source)
-        Base URL：\(provider.baseURL)
-        Key：\(provider.upstreamKey == nil ? "未配置" : "已配置")
-        模型：\(provider.models.count)
-        """
-        alert.addButton(withTitle: "编辑…")
-        alert.addButton(withTitle: "测试并刷新")
-        alert.addButton(withTitle: "模型别名…")
-        alert.addButton(withTitle: "删除…")
-        alert.addButton(withTitle: "关闭")
-        alert.buttons[1].isEnabled = provider.upstreamKey != nil
-        alert.buttons[2].isEnabled = !provider.models.isEmpty
-        NSApp.activate(ignoringOtherApps: true)
-        let response = alert.runModal()
-        switch response.rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue {
-        case 0: return .edit
-        case 1: return .refresh
-        case 2: return .models
-        case 3: return .delete
-        default: return .cancel
-        }
-    }
-
-    static func modelRoute(in provider: ModelRelayProvider) -> ModelRelayModelRoute? {
-        guard !provider.models.isEmpty else { return nil }
-        let routes = provider.models.sorted {
-            $0.alias.localizedCaseInsensitiveCompare($1.alias) == .orderedAscending
-        }
-        let selector = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 360, height: 26))
-        selector.addItems(withTitles: routes.map(\.alias))
-        let alert = NSAlert()
-        alert.messageText = "模型别名"
-        alert.informativeText = "选择模型后修改它的本地唯一别名。"
-        alert.addButton(withTitle: "修改…")
-        alert.addButton(withTitle: "取消")
-        alert.accessoryView = selector
-        NSApp.activate(ignoringOtherApps: true)
-        guard alert.runModal() == .alertFirstButtonReturn,
-              routes.indices.contains(selector.indexOfSelectedItem) else {
-            return nil
-        }
-        return routes[selector.indexOfSelectedItem]
     }
 
     static func providerMenuItem(
@@ -317,25 +287,6 @@ enum ModelRelayPrompts {
         if response == .alertSecondButtonReturn,
            confirm(title: "删除本地 Key“\(name)”？", detail: "删除后无法恢复，使用此 Key 的客户端将立即失去访问权限。") {
             return .delete
-        }
-        return nil
-    }
-
-    static func alias(current: String, upstreamModelID: String) -> String? {
-        let field = NSTextField(string: current)
-        field.placeholderString = "全局唯一别名"
-        let alert = formAlert(
-            title: "修改模型别名",
-            information: "上游模型：\(upstreamModelID)",
-            fields: [("本地别名", field)],
-            primary: "保存"
-        )
-        while alert.runModalFocusingFirstTextField() == .alertFirstButtonReturn {
-            do {
-                return try ModelRelayValidation.normalizedName(field.stringValue)
-            } catch {
-                alert.informativeText = error.localizedDescription
-            }
         }
         return nil
     }
@@ -493,6 +444,7 @@ private final class ModelRelayProviderFormBridge: NSObject, NSTextFieldDelegate 
     private let initial: ModelRelayPrompts.ProviderDraft
     private let tested: ModelRelayProviderConnectionTest?
     private let presetCount: Int
+    private let allowsRefreshAndDelete: Bool
 
     init(
         alert: NSAlert,
@@ -503,7 +455,8 @@ private final class ModelRelayProviderFormBridge: NSObject, NSTextFieldDelegate 
         secret: NSSecureTextField,
         initial: ModelRelayPrompts.ProviderDraft,
         tested: ModelRelayProviderConnectionTest?,
-        presetCount: Int
+        presetCount: Int,
+        allowsRefreshAndDelete: Bool
     ) {
         self.alert = alert
         self.accessory = accessory
@@ -514,6 +467,7 @@ private final class ModelRelayProviderFormBridge: NSObject, NSTextFieldDelegate 
         self.initial = initial
         self.tested = tested
         self.presetCount = presetCount
+        self.allowsRefreshAndDelete = allowsRefreshAndDelete
         super.init()
         name.delegate = self
         customURL.delegate = self
@@ -550,6 +504,10 @@ private final class ModelRelayProviderFormBridge: NSObject, NSTextFieldDelegate 
         alert.buttons[1].title = draft.canSave(using: tested) && draft.requiresConnectionTest()
             ? "重新测试"
             : "测试连接"
+        if allowsRefreshAndDelete {
+            alert.buttons[2].isEnabled = initial.hasStoredKey && !draft.requiresConnectionTest()
+            alert.buttons[3].isEnabled = true
+        }
         alert.layout()
     }
 
