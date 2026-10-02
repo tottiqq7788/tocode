@@ -5,14 +5,20 @@ final class ModelRelayHTTPServer {
     private static let networkQueue = DispatchQueue(label: "com.tocode.model-relay.listener")
     private let router: ModelRelayRouter
     private let upstream: ModelRelayUpstreamClient
+    private let metrics: ModelRelayCallMetricsRecording?
     private let lock = NSLock()
     private var listener: NWListener?
     private var handlers: [UUID: ModelRelayHTTPConnection] = [:]
     var stateDidChange: ((ModelRelayRunState) -> Void)?
 
-    init(router: ModelRelayRouter, upstream: ModelRelayUpstreamClient) {
+    init(
+        router: ModelRelayRouter,
+        upstream: ModelRelayUpstreamClient,
+        metrics: ModelRelayCallMetricsRecording? = nil
+    ) {
         self.router = router
         self.upstream = upstream
+        self.metrics = metrics
     }
 
     func start(
@@ -93,7 +99,8 @@ final class ModelRelayHTTPServer {
         let handler = ModelRelayHTTPConnection(
             connection: connection,
             router: router,
-            upstream: upstream
+            upstream: upstream,
+            metrics: metrics
         ) { [weak self] in
             self?.lock.lock()
             self?.handlers.removeValue(forKey: id)
@@ -132,6 +139,7 @@ private final class ModelRelayHTTPConnection {
     private let connection: NWConnection
     private let router: ModelRelayRouter
     private let upstream: ModelRelayUpstreamClient
+    private let metrics: ModelRelayCallMetricsRecording?
     private let onFinish: () -> Void
     private let lock = NSLock()
     private var buffer = Data()
@@ -147,11 +155,13 @@ private final class ModelRelayHTTPConnection {
         connection: NWConnection,
         router: ModelRelayRouter,
         upstream: ModelRelayUpstreamClient,
+        metrics: ModelRelayCallMetricsRecording?,
         onFinish: @escaping () -> Void
     ) {
         self.connection = connection
         self.router = router
         self.upstream = upstream
+        self.metrics = metrics
         self.onFinish = onFinish
     }
 
@@ -289,9 +299,11 @@ private final class ModelRelayHTTPConnection {
             ))
             return
         }
+        let routeName = path == "/v1/responses" ? "responses" : "chat/completions"
         guard let json = try? JSONSerialization.jsonObject(with: request.body) as? [String: Any],
               let alias = json["model"] as? String,
               !alias.isEmpty else {
+            recordEarlyFailure(route: routeName, publishedModel: "-", status: 400)
             sendAndFinish(ModelRelayHTTPResponse.error(
                 status: 400,
                 reason: "Bad Request",
@@ -305,6 +317,7 @@ private final class ModelRelayHTTPConnection {
                 request: request,
                 route: route,
                 router: router,
+                metrics: metrics,
                 send: { [weak self] data in self?.sendUpstreamChunkWithBackpressure(data) },
                 completion: { [weak self] in self?.requestFinishAfterSending() }
             )
@@ -316,12 +329,27 @@ private final class ModelRelayHTTPConnection {
             }
         } catch {
             let status = (error as? ModelRelayError) == .modelNotFound ? 404 : 503
+            recordEarlyFailure(route: routeName, publishedModel: alias, status: status)
             sendAndFinish(ModelRelayHTTPResponse.error(
                 status: status,
                 reason: status == 404 ? "Not Found" : "Service Unavailable",
                 message: error.localizedDescription
             ))
         }
+    }
+
+    private func recordEarlyFailure(route: String, publishedModel: String, status: Int) {
+        metrics?.record(ModelRelayCallEvent(
+            timestamp: Date(),
+            route: route,
+            providerID: nil,
+            providerName: nil,
+            publishedModel: publishedModel,
+            upstreamModel: nil,
+            status: status,
+            durationMs: 0,
+            ok: false
+        ))
     }
 
     private func sendAndFinish(_ data: Data) {

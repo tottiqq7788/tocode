@@ -958,6 +958,7 @@ func testModelRelayUpstreamProxy() async {
     let route = ModelRelayResolvedRoute(alias: "local-model", candidates: [
         ModelRelayUpstreamCandidate(
             providerID: UUID(),
+            providerName: "厂家",
             keyID: firstID,
             baseURL: "https://proxy.example/v1",
             upstreamModelID: "upstream-model",
@@ -965,6 +966,7 @@ func testModelRelayUpstreamProxy() async {
         ),
         ModelRelayUpstreamCandidate(
             providerID: UUID(),
+            providerName: "厂家",
             keyID: secondID,
             baseURL: "https://proxy.example/v1",
             upstreamModelID: "upstream-model",
@@ -998,6 +1000,7 @@ func testModelRelayUpstreamProxy() async {
         let statusRoute = ModelRelayResolvedRoute(alias: "local-model", candidates: [
             ModelRelayUpstreamCandidate(
                 providerID: UUID(),
+                providerName: "厂家",
                 keyID: UUID(),
                 baseURL: "https://proxy.example/v1",
                 upstreamModelID: "upstream-model",
@@ -1005,6 +1008,7 @@ func testModelRelayUpstreamProxy() async {
             ),
             ModelRelayUpstreamCandidate(
                 providerID: UUID(),
+                providerName: "厂家",
                 keyID: UUID(),
                 baseURL: "https://proxy.example/v1",
                 upstreamModelID: "upstream-model",
@@ -1037,6 +1041,7 @@ func testModelRelayUpstreamProxy() async {
     let networkRoute = ModelRelayResolvedRoute(alias: "local-model", candidates: [
         ModelRelayUpstreamCandidate(
             providerID: UUID(),
+            providerName: "厂家",
             keyID: UUID(),
             baseURL: "https://proxy.example/v1",
             upstreamModelID: "upstream-model",
@@ -1044,6 +1049,7 @@ func testModelRelayUpstreamProxy() async {
         ),
         ModelRelayUpstreamCandidate(
             providerID: UUID(),
+            providerName: "厂家",
             keyID: UUID(),
             baseURL: "https://proxy.example/v1",
             upstreamModelID: "upstream-model",
@@ -1355,10 +1361,142 @@ func testModelRelayPortRollback() async {
 func testModelRelayManualAndLegacyAKContract() {
     let manual = UserManual.pages.map { $0.title + "\n" + $0.body }.joined(separator: "\n")
     expect(manual.contains("顶层「模型」"), "说明书标明独立顶层模型中转站")
+    expect(manual.contains("「状态」「端口」「厂家」「密钥」"), "说明书标明四项菜单文案")
+    expect(manual.contains("打开当日调用明细日志文件"), "说明书标明状态窗打开日志文件")
+    expect(manual.contains("不统计 token"), "说明书标明按调用次数而非 token")
     expect(manual.contains("直接打开与新增相同的编辑弹窗"), "说明书写明厂家点击直达编辑弹窗")
     expect(manual.contains("不提供人工别名"), "说明书明确无模型别名配置")
     expect(!manual.contains("模型别名"), "说明书不再出现模型别名入口")
     expect(manual.contains("AK → AK-模型"), "说明书保留既有 AK 模型入口")
     expect(ExtendedSettingsStore.topLevelFolderTitle == "AK", "既有 AK 顶层夹名称保持不变")
     expect(ExtendedSettingsStore.modelMenuTitle == "AK-模型", "既有 AK-模型名称保持不变")
+}
+
+func testModelRelayCallMetricsStore() {
+    do {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tocode-metrics-home-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+
+        let store = ModelRelayCallMetricsStore(home: home.path)
+        let providerA = UUID()
+        let providerB = UUID()
+        let now = Date()
+
+        store.record(ModelRelayCallEvent(
+            timestamp: now,
+            route: "chat/completions",
+            providerID: providerA,
+            providerName: "A",
+            publishedModel: "model-a",
+            upstreamModel: "upstream-a",
+            status: 200,
+            durationMs: 12,
+            ok: true
+        ))
+        store.record(ModelRelayCallEvent(
+            timestamp: now.addingTimeInterval(1),
+            route: "responses",
+            providerID: providerA,
+            providerName: "A",
+            publishedModel: "model-a",
+            upstreamModel: "upstream-a",
+            status: 200,
+            durationMs: 8,
+            ok: true
+        ))
+        store.record(ModelRelayCallEvent(
+            timestamp: now.addingTimeInterval(2),
+            route: "chat/completions",
+            providerID: providerB,
+            providerName: "B",
+            publishedModel: "model-b",
+            upstreamModel: "upstream-b",
+            status: 502,
+            durationMs: 3,
+            ok: false
+        ))
+
+        expect(store.lastUsedProviderID == providerB, "lastUsed 记录最近一次厂家")
+        let sixHour = store.series(providerID: providerA, range: .sixHours, now: now)
+        expect(sixHour.count == 36, "近六小时固定 36 个十分钟桶")
+        expect(sixHour.map(\.count).reduce(0, +) == 2, "同厂家两次入站各记一次")
+        let week = store.series(providerID: providerA, range: .week, now: now)
+        expect(week.count == 7 && week.last?.count == 2, "近一周按自然日聚合当日两次")
+        let month = store.series(providerID: providerA, range: .month, now: now)
+        expect(month.count == 5 && month.last?.count == 2, "近一月按自然周聚合")
+
+        let logURL = try store.ensureTodayLogFile()
+        let attrs = try FileManager.default.attributesOfItem(atPath: logURL.path)
+        let mode = (attrs[.posixPermissions] as? NSNumber)?.uint16Value ?? 0
+        expect(mode == 0o600, "调用日志权限为 0600")
+        let content = try String(contentsOf: logURL, encoding: .utf8)
+        expect(content.contains("route=chat/completions"), "日志含 route 元数据")
+        expect(content.contains("providerName=A"), "日志含厂家名")
+        expect(!content.contains("Authorization"), "日志不含 Authorization")
+        expect(!content.contains("Bearer"), "日志不含 Bearer")
+        expect(!content.lowercased().contains("token"), "日志不统计 token")
+        expect(!content.contains("messages"), "日志不含请求正文字段")
+
+        let tomorrow = Calendar.current.date(byAdding: .day, value: 1, to: now) ?? now.addingTimeInterval(86400)
+        store.record(ModelRelayCallEvent(
+            timestamp: tomorrow,
+            route: "chat/completions",
+            providerID: providerA,
+            providerName: "A",
+            publishedModel: "model-a",
+            upstreamModel: "upstream-a",
+            status: 200,
+            durationMs: 1,
+            ok: true
+        ))
+        let rolled = try String(contentsOf: logURL, encoding: .utf8)
+        expect(rolled.contains("durationMs=1"), "换日后写入新明细")
+        expect(!rolled.contains("durationMs=12"), "换日覆盖旧明细")
+    } catch {
+        expect(false, "调用观测存储测试不应抛错：\(error)")
+    }
+}
+
+func testModelRelayProxyRecordsOneCallEvenOnUpstreamRetryExhaustion() async {
+    let config = URLSessionConfiguration.ephemeral
+    config.protocolClasses = [ModelRelayURLProtocol.self]
+    let client = ModelRelayUpstreamClient(sessionConfiguration: config)
+    let metrics = MemoryModelRelayCallMetricsStore()
+    let providerID = UUID()
+    let router = ModelRelayRouter(
+        configuration: ModelRelayConfiguration(),
+        keyStore: MemoryModelRelayKeyStore(),
+        vault: ModelRelayLocalKeyVault()
+    )
+    let route = ModelRelayResolvedRoute(alias: "local-model", candidates: [
+        ModelRelayUpstreamCandidate(
+            providerID: providerID,
+            providerName: "厂家",
+            keyID: UUID(),
+            baseURL: "https://proxy.example/v1",
+            upstreamModelID: "upstream-model",
+            secret: "bad-key"
+        )
+    ])
+    ModelRelayURLProtocol.reset { _ in
+        ModelRelayStubResponse(status: 500, chunks: [Data("bad".utf8)])
+    }
+    do {
+        let output = try await runModelRelayProxy(
+            client: client,
+            request: modelRelayRequest(),
+            route: route,
+            router: router,
+            metrics: metrics
+        )
+        expect(String(data: output, encoding: .utf8)?.contains("HTTP/1.1 502") == true, "上游失败返回 502")
+        expect(metrics.events.count == 1, "入站一次只记一次，即使上游失败")
+        expect(metrics.events.first?.providerID == providerID, "调用记录绑定厂家")
+        expect(metrics.events.first?.ok == false, "失败调用 ok=false")
+        expect(metrics.lastUsedProviderID == providerID, "失败调用仍更新 lastUsed")
+    } catch {
+        expect(false, "应返回明确失败响应：\(error)")
+    }
 }

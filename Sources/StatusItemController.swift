@@ -664,9 +664,14 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         menu.autoenablesItems = false
         let snapshot = modelRelay.snapshot()
 
-        let status = menu.addItem(withTitle: modelRelayStatusTitle(), action: nil, keyEquivalent: "")
-        status.isEnabled = false
-        status.toolTip = "http://127.0.0.1:\(snapshot.port)/v1"
+        let status = menu.addItem(
+            withTitle: "状态",
+            action: #selector(showModelRelayStatus),
+            keyEquivalent: ""
+        )
+        status.target = self
+        status.image = NSImage(systemSymbolName: "waveform.path.ecg", accessibilityDescription: nil)
+        status.toolTip = "\(modelRelayStatusTitle()) · http://127.0.0.1:\(snapshot.port)/v1"
         liveModelRelayStatusItem = status
 
         let port = menu.addItem(
@@ -688,7 +693,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
 
         menu.addItem(.separator())
-        let providersItem = menu.addItem(withTitle: "厂商", action: nil, keyEquivalent: "")
+        let providersItem = menu.addItem(withTitle: "厂家", action: nil, keyEquivalent: "")
         providersItem.image = NSImage(systemSymbolName: "building.2", accessibilityDescription: nil)
         let providersMenu = NSMenu()
         providersMenu.autoenablesItems = false
@@ -715,7 +720,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
         providersItem.submenu = providersMenu
 
-        let keysItem = menu.addItem(withTitle: "Key", action: nil, keyEquivalent: "")
+        let keysItem = menu.addItem(withTitle: "密钥", action: nil, keyEquivalent: "")
         keysItem.image = NSImage(systemSymbolName: "key", accessibilityDescription: nil)
         let keysMenu = NSMenu()
         keysMenu.autoenablesItems = false
@@ -752,7 +757,21 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     private func refreshModelRelayStatus() {
-        liveModelRelayStatusItem?.title = modelRelayStatusTitle()
+        liveModelRelayStatusItem?.title = "状态"
+        if let snapshotPort = Optional(modelRelay.snapshot().port) {
+            liveModelRelayStatusItem?.toolTip =
+                "\(modelRelayStatusTitle()) · http://127.0.0.1:\(snapshotPort)/v1"
+        }
+    }
+
+    @objc private func showModelRelayStatus() {
+        let snapshot = modelRelay.snapshot()
+        ModelRelayStatusPanel.present(
+            port: snapshot.port,
+            runState: modelRelay.runState,
+            providers: snapshot.providers,
+            metrics: modelRelay.callMetrics
+        )
     }
 
     @objc private func restartModelRelay() {

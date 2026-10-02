@@ -306,7 +306,8 @@ func runModelRelayProxy(
     client: ModelRelayUpstreamClient,
     request: ModelRelayHTTPRequest,
     route: ModelRelayResolvedRoute,
-    router: ModelRelayRouter
+    router: ModelRelayRouter,
+    metrics: ModelRelayCallMetricsRecording? = nil
 ) async throws -> Data {
     try await withCheckedThrowingContinuation { continuation in
         let lock = NSLock()
@@ -316,6 +317,7 @@ func runModelRelayProxy(
                 request: request,
                 route: route,
                 router: router,
+                metrics: metrics,
                 send: { chunk in
                     lock.lock()
                     output.append(chunk)

@@ -6250,6 +6250,8 @@ struct TestRunnerMain {
         await testModelRelayHTTPServerRuntime()
         await testModelRelayPortRollback()
         testModelRelayManualAndLegacyAKContract()
+        testModelRelayCallMetricsStore()
+        await testModelRelayProxyRecordsOneCallEvenOnUpstreamRetryExhaustion()
         testAnkerCredentialPromptCopyHasNoAnkerWord()
         testRootPathStore()
         testClipboardService()

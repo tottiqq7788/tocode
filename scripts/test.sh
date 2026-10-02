@@ -8,6 +8,7 @@ swiftc Tests/TestRunner.swift \
   Tests/TocodeCommandTestSupport.swift \
   Tests/AnkerCredentialTests.swift \
   Tests/ModelRelayTestSupport.swift \
+  Tests/ModelRelayCallMetricsTestSupport.swift \
   Tests/ModelRelayTests.swift \
   Sources/FileSystemService.swift \
   Sources/ClipboardService.swift \
@@ -72,12 +73,14 @@ swiftc Tests/TestRunner.swift \
   Sources/ModelRelayConfigStore.swift \
   Sources/ModelRelayKeychainStore.swift \
   Sources/ModelRelayLocalKeyVault.swift \
+  Sources/ModelRelayCallMetricsStore.swift \
   Sources/ModelRelayHTTPParser.swift \
   Sources/ModelRelayRouter.swift \
   Sources/ModelRelayUpstreamClient.swift \
   Sources/ModelRelayHTTPServer.swift \
   Sources/ModelRelayService.swift \
   Sources/ModelRelayPrompts.swift \
+  Sources/ModelRelayStatusPanel.swift \
   -o build/tests \
   -framework AppKit \
   -framework ApplicationServices \

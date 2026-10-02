@@ -60,6 +60,7 @@ final class ModelRelayUpstreamClient: ModelRelayCatalogFetching {
         request: ModelRelayHTTPRequest,
         route: ModelRelayResolvedRoute,
         router: ModelRelayRouter,
+        metrics: ModelRelayCallMetricsRecording?,
         send: @escaping (Data) -> Void,
         completion: @escaping () -> Void
     ) throws -> ModelRelayProxyOperation {
@@ -80,9 +81,11 @@ final class ModelRelayUpstreamClient: ModelRelayCatalogFetching {
         return ModelRelayProxyOperation(
             candidates: route.candidates,
             endpoint: endpoint,
+            publishedModel: route.alias,
             body: body,
             inboundHeaders: request.headers,
             router: router,
+            metrics: metrics,
             configuration: sessionConfiguration,
             send: send,
             completion: completion
@@ -93,12 +96,15 @@ final class ModelRelayUpstreamClient: ModelRelayCatalogFetching {
 final class ModelRelayProxyOperation: NSObject, URLSessionDataDelegate, URLSessionTaskDelegate, @unchecked Sendable {
     private let candidates: [ModelRelayUpstreamCandidate]
     private let endpoint: String
+    private let publishedModel: String
     private let body: Data
     private let inboundHeaders: [String: String]
     private let router: ModelRelayRouter
+    private weak var metrics: ModelRelayCallMetricsRecording?
     private let configuration: URLSessionConfiguration
     private let send: (Data) -> Void
     private let completion: () -> Void
+    private let startedAt: Date
     private let lock = NSLock()
     private var candidateIndex = 0
     private var currentCandidate: ModelRelayUpstreamCandidate?
@@ -107,25 +113,33 @@ final class ModelRelayProxyOperation: NSObject, URLSessionDataDelegate, URLSessi
     private var responseStarted = false
     private var finished = false
     private var originURL: URL?
+    private var finalStatus: Int?
+    private var finalOK = false
 
     init(
         candidates: [ModelRelayUpstreamCandidate],
         endpoint: String,
+        publishedModel: String,
         body: Data,
         inboundHeaders: [String: String],
         router: ModelRelayRouter,
+        metrics: ModelRelayCallMetricsRecording?,
         configuration: URLSessionConfiguration,
         send: @escaping (Data) -> Void,
-        completion: @escaping () -> Void
+        completion: @escaping () -> Void,
+        startedAt: Date = Date()
     ) {
         self.candidates = Array(candidates.prefix(1))
         self.endpoint = endpoint
+        self.publishedModel = publishedModel
         self.body = body
         self.inboundHeaders = inboundHeaders
         self.router = router
+        self.metrics = metrics
         self.configuration = configuration
         self.send = send
         self.completion = completion
+        self.startedAt = startedAt
     }
 
     func start() {
@@ -133,18 +147,12 @@ final class ModelRelayProxyOperation: NSObject, URLSessionDataDelegate, URLSessi
     }
 
     func cancel() {
-        lock.lock()
-        guard !finished else {
-            lock.unlock()
-            return
+        finishOnce(status: finalStatus, ok: false) {
+            let activeTask = self.task
+            let activeSession = self.session
+            activeTask?.cancel()
+            activeSession?.invalidateAndCancel()
         }
-        finished = true
-        let activeTask = task
-        let activeSession = session
-        lock.unlock()
-        activeTask?.cancel()
-        activeSession?.invalidateAndCancel()
-        completion()
     }
 
     private func attemptNext(lastMessage: String) {
@@ -154,14 +162,13 @@ final class ModelRelayProxyOperation: NSObject, URLSessionDataDelegate, URLSessi
             return
         }
         guard candidateIndex < candidates.count else {
-            finished = true
             lock.unlock()
             send(ModelRelayHTTPResponse.error(
                 status: 502,
                 reason: "Bad Gateway",
                 message: lastMessage
             ))
-            completion()
+            finishOnce(status: 502, ok: false)
             return
         }
         let candidate = candidates[candidateIndex]
@@ -238,6 +245,8 @@ final class ModelRelayProxyOperation: NSObject, URLSessionDataDelegate, URLSessi
             return
         }
         responseStarted = true
+        finalStatus = status
+        finalOK = (200...299).contains(status)
         lock.unlock()
         router.recordSuccess(keyID: candidate.keyID)
         send(ModelRelayHTTPResponse.chunkedHeader(
@@ -269,9 +278,8 @@ final class ModelRelayProxyOperation: NSObject, URLSessionDataDelegate, URLSessi
         }
         let started = responseStarted
         let candidate = currentCandidate
-        if started {
-            finished = true
-        }
+        let status = finalStatus
+        let ok = finalOK
         lock.unlock()
 
         if started {
@@ -279,7 +287,7 @@ final class ModelRelayProxyOperation: NSObject, URLSessionDataDelegate, URLSessi
                 send(ModelRelayHTTPResponse.finalChunk)
             }
             session.finishTasksAndInvalidate()
-            completion()
+            finishOnce(status: status, ok: ok && error == nil)
             return
         }
         if let candidate {
@@ -330,6 +338,31 @@ final class ModelRelayProxyOperation: NSObject, URLSessionDataDelegate, URLSessi
         attemptNext(lastMessage: message)
     }
 
+    private func finishOnce(status: Int?, ok: Bool, beforeCompletion: (() -> Void)? = nil) {
+        lock.lock()
+        guard !finished else {
+            lock.unlock()
+            return
+        }
+        finished = true
+        let candidate = currentCandidate ?? candidates.first
+        let duration = max(0, Int(Date().timeIntervalSince(startedAt) * 1000))
+        lock.unlock()
+        beforeCompletion?()
+        metrics?.record(ModelRelayCallEvent(
+            timestamp: Date(),
+            route: endpoint,
+            providerID: candidate?.providerID,
+            providerName: candidate?.providerName,
+            publishedModel: publishedModel,
+            upstreamModel: candidate?.upstreamModelID,
+            status: status,
+            durationMs: duration,
+            ok: ok
+        ))
+        completion()
+    }
+
     private static func sameOrigin(_ lhs: URL, _ rhs: URL) -> Bool {
         lhs.scheme?.lowercased() == rhs.scheme?.lowercased()
             && lhs.host?.lowercased() == rhs.host?.lowercased()
@@ -351,7 +384,7 @@ final class ModelRelayProxyOperation: NSObject, URLSessionDataDelegate, URLSessi
         case 500: return "Internal Server Error"
         case 502: return "Bad Gateway"
         case 503: return "Service Unavailable"
-        default: return "Upstream"
+        default: return "HTTP"
         }
     }
 }
@@ -372,9 +405,11 @@ private final class ModelRelayRedirectDelegate: NSObject, URLSessionTaskDelegate
         newRequest: URLRequest,
         completionHandler: @escaping (URLRequest?) -> Void
     ) {
-        guard origin.scheme?.lowercased() == newRequest.url?.scheme?.lowercased(),
-              origin.host?.lowercased() == newRequest.url?.host?.lowercased(),
-              origin.port == newRequest.url?.port else {
+        guard response.statusCode == 307 || response.statusCode == 308,
+              let target = newRequest.url,
+              origin.scheme?.lowercased() == target.scheme?.lowercased(),
+              origin.host?.lowercased() == target.host?.lowercased(),
+              origin.port == target.port else {
             completionHandler(nil)
             return
         }

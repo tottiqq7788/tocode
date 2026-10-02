@@ -14,6 +14,7 @@ final class ModelRelayService {
     private var wantsRunning = false
     let router: ModelRelayRouter
     let server: ModelRelayHTTPServer
+    let callMetrics: ModelRelayCallMetricsRecording
 
     var didChange: (() -> Void)?
 
@@ -27,12 +28,14 @@ final class ModelRelayService {
         configStore: ModelRelayConfigStoring = FileModelRelayConfigStore(),
         upstreamKeyStore: ModelRelayUpstreamKeyStoring = KeychainModelRelayUpstreamKeyStore(),
         localKeyVault: ModelRelayLocalKeyVault = ModelRelayLocalKeyVault(),
-        upstreamClient: ModelRelayUpstreamClient = ModelRelayUpstreamClient()
+        upstreamClient: ModelRelayUpstreamClient = ModelRelayUpstreamClient(),
+        callMetrics: ModelRelayCallMetricsRecording = ModelRelayCallMetricsStore()
     ) {
         self.configStore = configStore
         self.upstreamKeyStore = upstreamKeyStore
         self.localKeyVault = localKeyVault
         self.upstreamClient = upstreamClient
+        self.callMetrics = callMetrics
         let loaded: ModelRelayConfiguration
         do {
             let stored = try configStore.load()
@@ -51,7 +54,7 @@ final class ModelRelayService {
         }
         configuration = loaded
         router = ModelRelayRouter(configuration: loaded, keyStore: upstreamKeyStore, vault: localKeyVault)
-        server = ModelRelayHTTPServer(router: router, upstream: upstreamClient)
+        server = ModelRelayHTTPServer(router: router, upstream: upstreamClient, metrics: callMetrics)
         server.stateDidChange = { [weak self] state in
             self?.setRunState(state)
         }

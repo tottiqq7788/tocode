@@ -2,6 +2,7 @@ import Foundation
 
 struct ModelRelayUpstreamCandidate: Equatable {
     let providerID: UUID
+    let providerName: String
     let keyID: UUID
     let baseURL: String
     let upstreamModelID: String
@@ -103,6 +104,7 @@ final class ModelRelayRouter: @unchecked Sendable {
         return ModelRelayResolvedRoute(alias: alias, candidates: [
             ModelRelayUpstreamCandidate(
                 providerID: provider.id,
+                providerName: provider.name,
                 keyID: reference.id,
                 baseURL: provider.baseURL,
                 upstreamModelID: model.upstreamModelID,
