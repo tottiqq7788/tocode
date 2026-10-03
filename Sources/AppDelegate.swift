@@ -67,6 +67,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSLog("Tocode IPC server 启动失败: %@", error.localizedDescription)
         }
 
+        // 必须先于模型 Relay 初始化执行；Relay 读取钥匙串时首次授权可能阻塞主线程。
+        do {
+            let migrated = try WeChatArchiveMigration().runIfNeeded()
+            NSLog(
+                "Tocode 旧微信归档迁移检查完成: %@",
+                migrated ? "已执行" : "已完成，无需重复执行"
+            )
+        } catch {
+            NSLog("Tocode 旧微信归档删除失败: %@", error.localizedDescription)
+            UserNotificationWeChatNotifier().notify(
+                title: "旧微信归档删除失败",
+                body: error.localizedDescription
+            )
+        }
+
         let modelRelay = ModelRelayService()
         self.modelRelay = modelRelay
         do {
@@ -89,21 +104,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 modelRelay.router.availableTogentModels()
             },
             relayFingerprint: { [modelRelay] in
-                let access = modelRelay.togentRelayAccess()
-                let models = access.models.map(\.publishedModelID).sorted()
-                return ([access.baseURL] + models).joined(separator: "\n")
+                modelRelay.togentRelayFingerprint()
             }
         )
         self.togent = togent
-        if togent.startupError == nil {
-            do {
-                try WeChatArchiveMigration().runIfNeeded()
-            } catch {
-                UserNotificationWeChatNotifier().notify(
-                    title: "旧微信归档删除失败",
-                    body: error.localizedDescription
-                )
-            }
+        if let startupError = togent.startupError {
+            NSLog("Tocode Togent 启动失败: %@", startupError.localizedDescription)
         }
         modelRelay.didChange = { [weak togent] in
             togent?.relayDidChange()

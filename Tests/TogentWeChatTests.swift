@@ -220,13 +220,37 @@ func testTogentDefaultRoleModelGateAndRoleArchiveRouting() async {
     secondDraft.name = "角色B"
     secondDraft.publishedModelID = model.publishedModelID
     let secondRole = try! routingTogent.createRole(from: secondDraft)
-    let sharedArchiver = MockWeChatArchiver()
+    let archiveTransport = MockWeChatTransport()
+    archiveTransport.mediaResult = .success(Data("角色隔离附件".utf8))
+    let sharedArchiver = WeChatArchiveService(
+        transport: archiveTransport,
+        calendarProvider: makeArchiveCalendar
+    )
+    let archiveCalendar = makeArchiveCalendar()
+    let receivedAt = archiveCalendar.date(from: DateComponents(
+        year: 2026,
+        month: 9,
+        day: 7,
+        hour: 8,
+        minute: 9,
+        second: 10
+    ))!
+    let media = WeChatMedia(
+        encryptQueryParameter: "role-archive-media",
+        aesKey: Data(repeating: 1, count: 16).base64EncodedString()
+    )
 
     let firstMessage = WeChatMessage(
         fromUserID: "route-user",
         contextToken: "route-context-a",
         messageID: "route-a",
-        items: [WeChatItem(type: 1, textItem: WeChatTextItem(text: "A 任务"))]
+        items: [
+            WeChatItem(type: 1, textItem: WeChatTextItem(text: "A 任务")),
+            WeChatItem(
+                type: 4,
+                fileItem: WeChatFileItem(fileName: "角色A.txt", media: media)
+            )
+        ]
     )
     let firstTransport = MockWeChatTransport()
     firstTransport.updates = [
@@ -244,6 +268,7 @@ func testTogentDefaultRoleModelGateAndRoleArchiveRouting() async {
         opener: MockWeChatOpener(),
         notifier: MockWeChatNotifier(),
         sleeper: MockWeChatSleeper(),
+        now: { receivedAt },
         togent: routingTogent
     )
     firstWeChat.startBoundListener()
@@ -259,7 +284,13 @@ func testTogentDefaultRoleModelGateAndRoleArchiveRouting() async {
         fromUserID: "route-user",
         contextToken: "route-context-b",
         messageID: "route-b",
-        items: [WeChatItem(type: 1, textItem: WeChatTextItem(text: "B 任务"))]
+        items: [
+            WeChatItem(type: 1, textItem: WeChatTextItem(text: "B 任务")),
+            WeChatItem(
+                type: 4,
+                fileItem: WeChatFileItem(fileName: "角色B.txt", media: media)
+            )
+        ]
     )
     let secondTransport = MockWeChatTransport()
     secondTransport.updates = [
@@ -277,6 +308,7 @@ func testTogentDefaultRoleModelGateAndRoleArchiveRouting() async {
         opener: MockWeChatOpener(),
         notifier: MockWeChatNotifier(),
         sleeper: MockWeChatSleeper(),
+        now: { receivedAt },
         togent: routingTogent
     )
     secondWeChat.startBoundListener()
@@ -288,7 +320,33 @@ func testTogentDefaultRoleModelGateAndRoleArchiveRouting() async {
         URL(fileURLWithPath: $0.workspacePath, isDirectory: true)
             .appendingPathComponent("wechat", isDirectory: true)
     }
-    expect(sharedArchiver.roots == expectedRoots, "角色 A/B 消息只进入各自归档根")
+    let archiveDays = expectedRoots.map {
+        $0.appendingPathComponent("260907", isDirectory: true)
+    }
+    let archiveMarkdown = archiveDays.map {
+        try? String(
+            contentsOf: $0.appendingPathComponent("wechat260907.md"),
+            encoding: .utf8
+        )
+    }
+    let archiveFiles = archiveDays.map {
+        (try? FileManager.default.contentsOfDirectory(atPath: $0.path)) ?? []
+    }
+    expect(
+        archiveMarkdown[0]?.contains("A 任务") == true
+            && archiveMarkdown[0]?.contains("B 任务") == false
+            && archiveFiles[0].contains(where: { $0.contains("角色A.txt") })
+            && !archiveFiles[0].contains(where: { $0.contains("角色B.txt") }),
+        "角色 A 的日志和附件只落到角色 A 工作区"
+    )
+    expect(
+        archiveMarkdown[1]?.contains("B 任务") == true
+            && archiveMarkdown[1]?.contains("A 任务") == false
+            && archiveFiles[1].contains(where: { $0.contains("角色B.txt") })
+            && !archiveFiles[1].contains(where: { $0.contains("角色A.txt") }),
+        "角色 B 的日志和附件只落到角色 B 工作区"
+    )
+    expect(archiveTransport.mediaDescriptors.count == 2, "角色 A/B 附件均通过真实归档器下载")
     expect(
         routingRuntime.executions.map { $0.0.id } == [firstRole.id, secondRole.id],
         "归档与任务执行始终使用同一个收到时角色"

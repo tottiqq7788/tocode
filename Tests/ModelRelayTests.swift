@@ -289,6 +289,21 @@ func testModelRelayRouterAndControlPlane() {
         "429 Key 冷却后自动恢复"
     )
 
+    let deniedObservationRouter = ModelRelayRouter(
+        configuration: configuration,
+        keyStore: DeniedModelRelayKeyStore(),
+        vault: vault
+    )
+    expect(
+        deniedObservationRouter.togentModelIDsForHealthObservation() == ["local-a"],
+        "Togent 健康指纹不读取被拒绝的 Keychain"
+    )
+    deniedObservationRouter.recordFailure(keyID: firstKey.id, statusCode: 401)
+    expect(
+        deniedObservationRouter.togentModelIDsForHealthObservation().isEmpty,
+        "Togent 健康指纹仍反映鉴权失败"
+    )
+
     let deniedRouter = ModelRelayRouter(
         configuration: configuration,
         keyStore: DeniedModelRelayKeyStore(),

@@ -239,6 +239,14 @@ final class ModelRelayService: @unchecked Sendable {
         )
     }
 
+    /// 健康状态回调专用；不能读取钥匙串，否则首次授权会阻塞菜单主线程。
+    func togentRelayFingerprint() -> String {
+        let snapshot = configurationSnapshot()
+        let models = router.togentModelIDsForHealthObservation()
+        return (["http://127.0.0.1:\(snapshot.port)/v1"] + models)
+            .joined(separator: "\n")
+    }
+
     func updatePort(
         _ value: Int,
         completion: @escaping (Result<Void, Error>) -> Void

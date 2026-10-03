@@ -237,11 +237,20 @@ func testTogentDefaultRoleBootstrap() async {
     let store = TogentStore(databaseURL: root.appendingPathComponent("togent.sqlite"))
     let workspace = TogentWorkspaceService(homeDirectory: root)
     let runtime = StubTogentRuntime()
+    var relayFingerprintRead = false
     let service = TogentService(
         store: store,
         workspace: workspace,
         runtime: runtime,
-        availableModelOptions: { [] }
+        availableModelOptions: { [] },
+        relayFingerprint: {
+            relayFingerprintRead = true
+            return ""
+        }
+    )
+    expect(
+        !relayFingerprintRead,
+        "默认角色启动不读取可能阻塞的 Relay 钥匙串"
     )
     let roles = service.roles
     expect(roles.count == 1, "空角色库首启只创建一个默认角色")

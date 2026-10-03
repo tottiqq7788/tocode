@@ -102,6 +102,23 @@ final class ModelRelayRouter: @unchecked Sendable {
         return aliases.sorted()
     }
 
+    /// 仅用于观察 Relay 路由边界变化，不触碰可能要求用户授权的钥匙串。
+    func togentModelIDsForHealthObservation() -> [String] {
+        lock.lock()
+        let date = now()
+        let providers = configuration.providers
+        let healthSnapshot = health
+        lock.unlock()
+
+        return providers.flatMap { provider -> [String] in
+            guard let reference = provider.upstreamKey,
+                  healthSnapshot[reference.id, default: KeyHealth()].isAvailable(at: date) else {
+                return []
+            }
+            return provider.models.map(\.alias)
+        }.sorted()
+    }
+
     func availableTogentModels() -> [TogentModelOption] {
         lock.lock()
         let date = now()

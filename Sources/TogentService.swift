@@ -9,7 +9,7 @@ final class TogentService {
     private let runtime: TogentRuntimeExecuting
     private let availableModelOptions: () -> [TogentModelOption]
     private let relayFingerprint: () -> String
-    private var observedRelayFingerprint: String
+    private var observedRelayFingerprint: String?
     private var workerTask: Task<Void, Never>?
     private var inboundLeaseRoles: [UUID: TogentRole] = [:]
     private(set) var startupError: Error?
@@ -30,7 +30,7 @@ final class TogentService {
         self.runtime = runtime
         self.availableModelOptions = availableModelOptions
         self.relayFingerprint = relayFingerprint
-        observedRelayFingerprint = relayFingerprint()
+        observedRelayFingerprint = nil
         do {
             try store.recoverInterruptedJobs()
             if bootstrapDefaultRole {
@@ -224,8 +224,12 @@ final class TogentService {
 
     func relayDidChange() {
         let next = relayFingerprint()
+        guard let observedRelayFingerprint else {
+            self.observedRelayFingerprint = next
+            return
+        }
         guard next != observedRelayFingerprint else { return }
-        observedRelayFingerprint = next
+        self.observedRelayFingerprint = next
         Task { [runtime] in
             await runtime.stopAll()
         }
@@ -272,6 +276,9 @@ final class TogentService {
                 $0.publishedModelID == role.publishedModelID
             }) else {
                 throw TogentError.modelUnavailable
+            }
+            if observedRelayFingerprint == nil {
+                observedRelayFingerprint = relayFingerprint()
             }
             let answer = try await runtime.execute(
                 role: role,
