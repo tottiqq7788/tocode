@@ -76,6 +76,12 @@ struct TogentRoleDraft: Equatable {
     }
 }
 
+struct TogentInboundLease: Equatable {
+    let id: UUID
+    let roleID: UUID
+    let archiveRoot: URL
+}
+
 enum TogentJobState: String, Codable {
     case staged
     case queued
@@ -107,6 +113,7 @@ enum TogentError: Error, Equatable, LocalizedError {
     case duplicateWorkspacePath
     case overlappingWorkspacePath
     case workspaceOutsideBoundary
+    case modelNotConfigured
     case modelUnavailable
     case roleNotFound
     case busy
@@ -138,12 +145,14 @@ enum TogentError: Error, Equatable, LocalizedError {
             return "角色项目路径不能与其他角色目录互相包含。"
         case .workspaceOutsideBoundary:
             return "路径解析后超出允许的角色项目边界。"
+        case .modelNotConfigured:
+            return "当前角色尚未配置模型，请在 Tocode 的“微信 → togent”中编辑角色并选择健康模型。"
         case .modelUnavailable:
             return "所选模型当前不可用，请在角色设置中重新选择健康模型。"
         case .roleNotFound:
             return "角色不存在。"
         case .busy:
-            return "当前仍有 Togent 任务排队或运行，请等待完成后再修改角色。"
+            return "当前仍有微信消息归档、Togent 任务排队或运行，请等待完成后再修改角色。"
         case .database(let message):
             return "Togent 数据库失败：\(message)"
         case .workspace(let message):

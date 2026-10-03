@@ -6,7 +6,6 @@ protocol WeChatAssociationControlling: AnyObject {
     var isBound: Bool { get }
     func startBinding()
     func startBoundListener()
-    func openArchiveLocation()
     func stop()
     func sendOutbound(_ payload: TocodeWechatSendPayload) async -> TocodeCommandResult
 }
@@ -63,7 +62,6 @@ final class WeChatAssociationService: WeChatAssociationControlling {
     var quickInput: WeChatQuickInputPerforming
     private let sleeper: WeChatSleeping
     private let now: () -> Date
-    private let archiveRoot: URL
     private let bindingPollInterval: TimeInterval
     private let bindingTimeout: TimeInterval
 
@@ -83,7 +81,6 @@ final class WeChatAssociationService: WeChatAssociationControlling {
         quickInput: WeChatQuickInputPerforming = WeChatQuickInputService(),
         sleeper: WeChatSleeping = SystemWeChatSleeper(),
         now: @escaping () -> Date = Date.init,
-        archiveRoot: URL = WeChatArchiveService.defaultRoot,
         bindingPollInterval: TimeInterval = 2,
         bindingTimeout: TimeInterval = 300,
         togent: TogentService? = nil
@@ -99,7 +96,6 @@ final class WeChatAssociationService: WeChatAssociationControlling {
         self.quickInput = quickInput
         self.sleeper = sleeper
         self.now = now
-        self.archiveRoot = archiveRoot
         self.bindingPollInterval = bindingPollInterval
         self.bindingTimeout = bindingTimeout
         self.togent = togent
@@ -140,18 +136,6 @@ final class WeChatAssociationService: WeChatAssociationControlling {
                 throw TogentError.unavailable("微信服务已停止")
             }
             try await self.sendTogentReply(job: job, text: text)
-        }
-    }
-
-    func openArchiveLocation() {
-        do {
-            try FileManager.default.createDirectory(at: archiveRoot, withIntermediateDirectories: true)
-            guard opener.open(archiveRoot) else {
-                notifier.notify(title: "无法打开微信文件位置", body: archiveRoot.path)
-                return
-            }
-        } catch {
-            notifier.notify(title: "无法创建微信归档目录", body: archiveRoot.path)
         }
     }
 
@@ -213,7 +197,10 @@ final class WeChatAssociationService: WeChatAssociationControlling {
                 case .confirmed:
                     try await acceptBinding(status)
                     try? pageWriter.update(.success)
-                    notifier.notify(title: "微信绑定成功", body: "新消息将归档到 \(archiveRoot.path)")
+                    notifier.notify(
+                        title: "微信绑定成功",
+                        body: "普通消息将归档到收到时角色的工作区。"
+                    )
                     bindingTask = nil
                     return
                 case .scanned:
@@ -354,22 +341,59 @@ final class WeChatAssociationService: WeChatAssociationControlling {
         known: inout Set<String>
     ) async throws {
         let receivedAt = now()
-        try await archiver.archive(message, receivedAt: receivedAt)
+        guard let togent else {
+            try await consumeWithoutRoleArchive(
+                message: message,
+                key: key,
+                error: TogentError.unavailable("Agent 服务未就绪"),
+                state: &state,
+                known: &known
+            )
+            return
+        }
+
+        let lease: TogentInboundLease
+        do {
+            guard let activeLease = try togent.beginInbound() else {
+                try await consumeWithoutRoleArchive(
+                    message: message,
+                    key: key,
+                    error: TogentError.noActiveRole,
+                    state: &state,
+                    known: &known
+                )
+                return
+            }
+            lease = activeLease
+        } catch {
+            try await consumeWithoutRoleArchive(
+                message: message,
+                key: key,
+                error: error,
+                state: &state,
+                known: &known
+            )
+            return
+        }
+        defer { togent.endInbound(lease) }
+
+        try await archiver.archive(
+            message,
+            receivedAt: receivedAt,
+            root: lease.archiveRoot
+        )
         try Task.checkCancellation()
 
         var stagingError: Error?
-        if let togent {
-            do {
-                try togent.stageInbound(
-                    message: message,
-                    deduplicationKey: key,
-                    receivedAt: receivedAt
-                )
-            } catch {
-                stagingError = error
-            }
-        } else {
-            stagingError = TogentError.unavailable("Agent 服务未就绪")
+        do {
+            try togent.stageInbound(
+                message: message,
+                deduplicationKey: key,
+                receivedAt: receivedAt,
+                lease: lease
+            )
+        } catch {
+            stagingError = error
         }
 
         var committed = state
@@ -381,7 +405,7 @@ final class WeChatAssociationService: WeChatAssociationControlling {
         do {
             try stateStore.save(committed)
         } catch {
-            togent?.discardStagedInbound(deduplicationKey: key)
+            togent.discardStagedInbound(deduplicationKey: key)
             throw error
         }
         state = committed
@@ -392,11 +416,30 @@ final class WeChatAssociationService: WeChatAssociationControlling {
             return
         }
         do {
-            try togent?.commitStagedInbound(deduplicationKey: key)
+            try togent.commitStagedInbound(deduplicationKey: key)
         } catch {
-            togent?.discardStagedInbound(deduplicationKey: key)
+            togent.discardStagedInbound(deduplicationKey: key)
             await sendImmediateTogentError(error, for: message)
         }
+    }
+
+    private func consumeWithoutRoleArchive(
+        message: WeChatMessage,
+        key: String,
+        error: Error,
+        state: inout WeChatReceiveState,
+        known: inout Set<String>
+    ) async throws {
+        var committed = state
+        committed.recentKeys.append(key)
+        committed.recentKeys = Array(
+            committed.recentKeys.suffix(WeChatDeduplication.maximumKeys)
+        )
+        committed.rememberInbound(message)
+        try stateStore.save(committed)
+        state = committed
+        known.insert(key)
+        await sendImmediateTogentError(error, for: message)
     }
 
     /// 点号命令与快捷输入共用消费语义：执行前先写入去重 key 并推进游标；不归档、不保存附件。

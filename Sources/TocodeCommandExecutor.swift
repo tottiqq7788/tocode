@@ -388,9 +388,6 @@ final class TocodeCommandExecutor {
         case .bind:
             weChat.startBinding()
             return .success(TocodeCommandOutput("已触发微信扫码绑定"))
-        case .location:
-            weChat.openArchiveLocation()
-            return .success(TocodeCommandOutput("已在访达打开微信归档目录"))
         case .send:
             return .failure(.operationFailed("wechat send 需要通过 CLI 异步执行"))
         }

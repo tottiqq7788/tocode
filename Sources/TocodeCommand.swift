@@ -50,7 +50,6 @@ struct TocodeWechatSendPayload: Equatable {
 enum TocodeWechatCommand: Equatable {
     case status
     case bind
-    case location
     case send(TocodeWechatSendPayload)
 }
 
@@ -169,7 +168,6 @@ enum TocodeCommandParser {
       微信
         wechat status                       是否已绑定
         wechat bind                         触发扫码绑定
-        wechat location                     创建并在访达打开归档目录
         wechat send [--to <id>] [--text <文字>] [文件...]
                                             向最近会话发送文字、图片或附件
 
@@ -204,7 +202,6 @@ enum TocodeCommandParser {
         ("codex model set <id>", "切换模型并强制重启 Codex"),
         ("wechat status", "是否已绑定"),
         ("wechat bind", "触发扫码绑定"),
-        ("wechat location", "创建并在访达打开归档目录"),
         ("wechat send [--to <id>] [--text <文字>] [文件...]", "向最近会话发送文字、图片或附件"),
         ("blackout", "工具 → 临时黑屏（别名 .lshp）"),
         ("login on|off|toggle", "开机自启"),
@@ -402,9 +399,6 @@ enum TocodeCommandParser {
         case "bind":
             guard tokens.count == 1 else { return .failure(.invalidArguments("wechat bind")) }
             return .success(.wechat(.bind))
-        case "location":
-            guard tokens.count == 1 else { return .failure(.invalidArguments("wechat location")) }
-            return .success(.wechat(.location))
         case "send":
             return parseWechatSend(Array(tokens.dropFirst()))
         default:

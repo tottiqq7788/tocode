@@ -3,6 +3,7 @@ import Foundation
 enum WeChatArchiveError: Error, Equatable {
     case createDirectory
     case appendLog
+    case missingArchiveRoot
 }
 
 protocol WeChatFileSystem {
@@ -12,13 +13,18 @@ protocol WeChatFileSystem {
     func write(_ data: Data, to url: URL) throws
     func moveItem(at source: URL, to destination: URL) throws
     func removeItemIfPresent(at url: URL)
+    func setPermissions(_ permissions: Int, at url: URL) throws
 }
 
 struct SystemWeChatFileSystem: WeChatFileSystem {
     private let manager = FileManager.default
 
     func createDirectory(at url: URL) throws {
-        try manager.createDirectory(at: url, withIntermediateDirectories: true)
+        try manager.createDirectory(
+            at: url,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: NSNumber(value: 0o700)]
+        )
     }
 
     func fileExists(at url: URL) -> Bool {
@@ -27,7 +33,11 @@ struct SystemWeChatFileSystem: WeChatFileSystem {
 
     func append(_ data: Data, to url: URL) throws {
         if !manager.fileExists(atPath: url.path) {
-            guard manager.createFile(atPath: url.path, contents: nil) else {
+            guard manager.createFile(
+                atPath: url.path,
+                contents: nil,
+                attributes: [.posixPermissions: NSNumber(value: 0o600)]
+            ) else {
                 throw WeChatArchiveError.appendLog
             }
         }
@@ -49,36 +59,53 @@ struct SystemWeChatFileSystem: WeChatFileSystem {
     func removeItemIfPresent(at url: URL) {
         try? manager.removeItem(at: url)
     }
+
+    func setPermissions(_ permissions: Int, at url: URL) throws {
+        try manager.setAttributes(
+            [.posixPermissions: NSNumber(value: permissions)],
+            ofItemAtPath: url.path
+        )
+    }
 }
 
 protocol WeChatArchiving: AnyObject {
-    func archive(_ message: WeChatMessage, receivedAt: Date) async throws
+    func archive(
+        _ message: WeChatMessage,
+        receivedAt: Date,
+        root: URL
+    ) async throws
 }
 
 actor WeChatArchiveService: WeChatArchiving {
-    static var defaultRoot: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Documents/wechat", isDirectory: true)
-    }
-
-    private let root: URL
+    private let fixedRoot: URL?
     private let transport: WeChatILinkTransporting
     private let fileSystem: WeChatFileSystem
     private let calendarProvider: () -> Calendar
 
     init(
-        root: URL = defaultRoot,
+        root: URL? = nil,
         transport: WeChatILinkTransporting,
         fileSystem: WeChatFileSystem = SystemWeChatFileSystem(),
         calendarProvider: @escaping () -> Calendar = { Calendar.autoupdatingCurrent }
     ) {
-        self.root = root
+        fixedRoot = root
         self.transport = transport
         self.fileSystem = fileSystem
         self.calendarProvider = calendarProvider
     }
 
     func archive(_ message: WeChatMessage, receivedAt: Date) async throws {
+        guard let fixedRoot else {
+            throw WeChatArchiveError.missingArchiveRoot
+        }
+        try await archive(message, receivedAt: receivedAt, root: fixedRoot)
+    }
+
+    func archive(
+        _ message: WeChatMessage,
+        receivedAt: Date,
+        root: URL
+    ) async throws {
         let calendar = calendarProvider()
         let dateName = format(receivedAt, pattern: "yyMMdd", calendar: calendar)
         let timeName = format(receivedAt, pattern: "HHmmss_SSS", calendar: calendar)
@@ -87,6 +114,8 @@ actor WeChatArchiveService: WeChatArchiving {
 
         do {
             try fileSystem.createDirectory(at: dateDirectory)
+            try fileSystem.setPermissions(0o700, at: root)
+            try fileSystem.setPermissions(0o700, at: dateDirectory)
         } catch {
             throw WeChatArchiveError.createDirectory
         }
@@ -111,7 +140,9 @@ actor WeChatArchiveService: WeChatArchiving {
                     )
                     defer { fileSystem.removeItemIfPresent(at: partURL) }
                     try fileSystem.write(data, to: partURL)
+                    try fileSystem.setPermissions(0o600, at: partURL)
                     try fileSystem.moveItem(at: partURL, to: finalURL)
+                    try fileSystem.setPermissions(0o600, at: finalURL)
                     savedAttachments.append(finalURL)
                     attachmentLines.append(
                         "- \(result.plan.label)：[\(escapeLinkText(finalURL.lastPathComponent))](\(encodeLink(finalURL.lastPathComponent)))"
@@ -135,6 +166,7 @@ actor WeChatArchiveService: WeChatArchiving {
         let logURL = dateDirectory.appendingPathComponent("wechat\(dateName).md")
         do {
             try fileSystem.append(Data(markdown.utf8), to: logURL)
+            try fileSystem.setPermissions(0o600, at: logURL)
         } catch {
             for url in savedAttachments {
                 fileSystem.removeItemIfPresent(at: url)

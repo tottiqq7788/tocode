@@ -69,7 +69,17 @@ struct TrackpadShortcutStore {
 
     func binding(for gesture: TrackpadTapGesture) -> KeyboardShortcutMappingTarget? {
         guard let data = defaults.data(forKey: key(for: gesture)) else { return nil }
-        return try? JSONDecoder().decode(KeyboardShortcutMappingTarget.self, from: data)
+        guard let target = try? JSONDecoder().decode(
+            KeyboardShortcutMappingTarget.self,
+            from: data
+        ) else {
+            return nil
+        }
+        if case .action(let action) = target, action.isRetired {
+            defaults.removeObject(forKey: key(for: gesture))
+            return nil
+        }
+        return target
     }
 
     func shortcut(for gesture: TrackpadTapGesture) -> RecordedShortcut? {
@@ -96,6 +106,10 @@ struct TrackpadShortcutStore {
     }
 
     func setBinding(_ target: KeyboardShortcutMappingTarget, for gesture: TrackpadTapGesture) {
+        if case .action(let action) = target, action.isRetired {
+            removeBinding(for: gesture)
+            return
+        }
         guard let data = try? JSONEncoder().encode(target) else { return }
         defaults.set(data, forKey: key(for: gesture))
     }

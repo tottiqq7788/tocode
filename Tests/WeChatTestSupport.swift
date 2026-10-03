@@ -213,12 +213,18 @@ final class MemoryWeChatStateStore: WeChatReceiveStateStoring {
 final class MockWeChatArchiver: WeChatArchiving {
     var messages: [WeChatMessage] = []
     var receivedDates: [Date] = []
+    var roots: [URL] = []
     var error: Error?
 
-    func archive(_ message: WeChatMessage, receivedAt: Date) async throws {
+    func archive(
+        _ message: WeChatMessage,
+        receivedAt: Date,
+        root: URL
+    ) async throws {
         if let error { throw error }
         messages.append(message)
         receivedDates.append(receivedAt)
+        roots.append(root)
     }
 }
 
@@ -301,6 +307,10 @@ final class FailingWeChatFileSystem: WeChatFileSystem {
 
     func removeItemIfPresent(at url: URL) {
         base.removeItemIfPresent(at: url)
+    }
+
+    func setPermissions(_ permissions: Int, at url: URL) throws {
+        try base.setPermissions(permissions, at: url)
     }
 }
 

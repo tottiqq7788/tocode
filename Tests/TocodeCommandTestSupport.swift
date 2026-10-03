@@ -79,7 +79,6 @@ final class MockTocodeLaunchAtLogin: LaunchAtLoginControlling {
 final class MockTocodeWeChat: WeChatAssociationControlling {
     var bound = false
     var bindCalls = 0
-    var locationCalls = 0
 
     var isBound: Bool { bound }
     var sendPayloads: [TocodeWechatSendPayload] = []
@@ -87,7 +86,6 @@ final class MockTocodeWeChat: WeChatAssociationControlling {
 
     func startBinding() { bindCalls += 1 }
     func startBoundListener() {}
-    func openArchiveLocation() { locationCalls += 1 }
     func stop() {}
     func sendOutbound(_ payload: TocodeWechatSendPayload) async -> TocodeCommandResult {
         sendPayloads.append(payload)

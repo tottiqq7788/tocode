@@ -1,5 +1,15 @@
 import Foundation
 
+private final class MockTogentWorkspaceOpener: TogentWorkspaceOpening {
+    var result = true
+    private(set) var urls: [URL] = []
+
+    func open(_ url: URL) -> Bool {
+        urls.append(url)
+        return result
+    }
+}
+
 func testTogentStoreAndUniqueActivation() {
     let root = makeTogentTemporaryDirectory("store")
     defer { try? FileManager.default.removeItem(at: root) }
@@ -77,6 +87,30 @@ func testTogentStoreAndUniqueActivation() {
     }, "Togent SQLite sidecar 文件权限为 0600")
 }
 
+func testTogentPersistedWorkspaceOpening() {
+    let root = makeTogentTemporaryDirectory("workspace-opening")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let persisted = root.appendingPathComponent("persisted", isDirectory: true)
+    try! FileManager.default.createDirectory(
+        at: persisted,
+        withIntermediateDirectories: true
+    )
+    let opener = MockTogentWorkspaceOpener()
+    expect(
+        openTogentWorkspace(at: persisted.path, opener: opener),
+        "角色编辑弹窗可打开已保存工作区"
+    )
+    expect(opener.urls == [persisted], "工作区按钮使用持久化角色路径")
+    expect(
+        !openTogentWorkspace(
+            at: root.appendingPathComponent("unsaved-missing").path,
+            opener: opener
+        ),
+        "不存在的未保存表单路径不会被误打开"
+    )
+    expect(opener.urls == [persisted], "无效路径不会调用系统打开器")
+}
+
 func testTogentWorkspaceNumberingAndManagedAgents() {
     let home = makeTogentTemporaryDirectory("workspace")
     defer { try? FileManager.default.removeItem(at: home) }
@@ -102,11 +136,20 @@ func testTogentWorkspaceNumberingAndManagedAgents() {
     let receipt = try! service.provision(role: role)
     expect(FileManager.default.fileExists(atPath: workspace.appendingPathComponent("project").path),
            "角色保存创建 project 文件夹")
+    let archiveURL = workspace.appendingPathComponent("wechat", isDirectory: true)
+    expect(FileManager.default.fileExists(atPath: archiveURL.path),
+           "角色保存创建独立 wechat 归档文件夹")
+    let archivePermissions = (try? FileManager.default.attributesOfItem(
+        atPath: archiveURL.path
+    )[.posixPermissions] as? NSNumber)?.intValue
+    expect(archivePermissions == 0o700, "角色 wechat 归档目录权限为 0700")
     let agentsURL = workspace.appendingPathComponent("AGENTS.md")
     var agents = try! String(contentsOf: agentsURL, encoding: .utf8)
     expect(agents.contains(TogentWorkspaceService.managedBegin), "AGENTS 含 Tocode 托管区块")
     expect(agents.contains("微信是唯一任务入口"), "AGENTS 声明微信唯一任务入口")
     expect(agents.contains(TogentWorkspaceService.memoryHeading), "AGENTS 预留角色记忆区")
+    expect(agents.contains(archiveURL.path), "AGENTS 只记录当前角色归档路径")
+    expect(!agents.contains("/Documents/wechat"), "AGENTS 不再引用全局微信归档")
     expect(receipt.createdRoot, "默认工作区首次由 Tocode 创建")
 
     agents += "\n用户保留内容\n"
@@ -152,6 +195,109 @@ func testTogentWorkspaceCanonicalIsolation() {
     } catch {
         expect(false, "Togent symlink 冲突返回明确错误")
     }
+
+    let archiveRole = makeTogentRole(
+        name: "归档",
+        workspace: root.appendingPathComponent("archive-role")
+    )
+    _ = try! workspace.provision(role: archiveRole)
+    let outside = root.appendingPathComponent("outside")
+    try! FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+    let archive = URL(fileURLWithPath: archiveRole.workspacePath)
+        .appendingPathComponent("wechat")
+    try! FileManager.default.removeItem(at: archive)
+    try! FileManager.default.createSymbolicLink(at: archive, withDestinationURL: outside)
+    do {
+        _ = try workspace.archiveDirectory(for: archiveRole)
+        expect(false, "角色归档拒绝 symlink 越界")
+    } catch TogentError.workspaceOutsideBoundary {
+        expect(true, "角色归档拒绝 symlink 越界")
+    } catch {
+        expect(false, "角色归档 symlink 返回明确边界错误")
+    }
+    do {
+        _ = try workspace.provision(role: archiveRole)
+        expect(false, "角色工作区补齐拒绝既有 wechat symlink")
+    } catch TogentError.workspaceOutsideBoundary {
+        expect(
+            (try? FileManager.default.destinationOfSymbolicLink(
+                atPath: archive.path
+            )) != nil,
+            "拒绝归档 symlink 时保留既有链接且不跟随删除目标"
+        )
+    } catch {
+        expect(false, "工作区补齐 symlink 返回明确边界错误")
+    }
+}
+
+@MainActor
+func testTogentDefaultRoleBootstrap() async {
+    let root = makeTogentTemporaryDirectory("default-role")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = TogentStore(databaseURL: root.appendingPathComponent("togent.sqlite"))
+    let workspace = TogentWorkspaceService(homeDirectory: root)
+    let runtime = StubTogentRuntime()
+    let service = TogentService(
+        store: store,
+        workspace: workspace,
+        runtime: runtime,
+        availableModelOptions: { [] }
+    )
+    let roles = service.roles
+    expect(roles.count == 1, "空角色库首启只创建一个默认角色")
+    let role = roles[0]
+    expect(role.name == "默认角色" && role.isActive, "默认角色命名并自动激活")
+    expect(role.publishedModelID.isEmpty, "默认角色模型初始为未配置")
+    expect(role.workspacePath.hasSuffix("/Documents/togent/角色1"),
+           "默认角色使用最小未占用角色编号")
+    expect(FileManager.default.fileExists(
+        atPath: URL(fileURLWithPath: role.workspacePath)
+            .appendingPathComponent("project")
+            .path
+    ), "默认角色自动创建 project")
+    expect(FileManager.default.fileExists(
+        atPath: URL(fileURLWithPath: role.workspacePath)
+            .appendingPathComponent("wechat")
+            .path
+    ), "默认角色自动创建私有 wechat")
+
+    var edit = TogentRoleDraft(role: role)
+    edit.prompt = "无模型时仍可维护默认角色"
+    do {
+        _ = try service.updateRole(id: role.id, from: edit)
+        expect(true, "未配置模型的默认角色可保存其他字段")
+    } catch {
+        expect(false, "未配置模型默认角色保存失败：\(error)")
+    }
+
+    let restarted = TogentService(
+        store: store,
+        workspace: workspace,
+        runtime: StubTogentRuntime(),
+        availableModelOptions: { [] }
+    )
+    expect(restarted.roles.count == 1, "重复启动不会重复创建默认角色")
+    service.stop()
+    restarted.stop()
+
+    let failureHome = makeTogentTemporaryDirectory("default-role-failure")
+    defer { try? FileManager.default.removeItem(at: failureHome) }
+    _ = FileManager.default.createFile(
+        atPath: failureHome.appendingPathComponent("Documents").path,
+        contents: Data()
+    )
+    let failureStore = TogentStore(
+        databaseURL: failureHome.appendingPathComponent("state/togent.sqlite")
+    )
+    let failed = TogentService(
+        store: failureStore,
+        workspace: TogentWorkspaceService(homeDirectory: failureHome),
+        runtime: StubTogentRuntime(),
+        availableModelOptions: { [] }
+    )
+    expect(failed.startupError != nil, "默认角色工作区初始化失败会明确阻断启动")
+    expect(failed.roles.isEmpty, "默认角色工作区失败不留下半成品 registry")
+    failed.stop()
 }
 
 @MainActor
@@ -166,7 +312,8 @@ func testTogentRoleServiceModelGate() async {
         store: store,
         workspace: workspace,
         runtime: runtime,
-        availableModelOptions: { options }
+        availableModelOptions: { options },
+        bootstrapDefaultRole: false
     )
     var draft = service.newRoleDraft()
     draft.name = "主角色"
@@ -203,7 +350,8 @@ func testTogentBusyRoleAndRelayBoundary() async {
         workspace: workspace,
         runtime: runtime,
         availableModelOptions: { options },
-        relayFingerprint: { relayFingerprint }
+        relayFingerprint: { relayFingerprint },
+        bootstrapDefaultRole: false
     )
     var draft = service.newRoleDraft()
     draft.name = "忙碌角色"

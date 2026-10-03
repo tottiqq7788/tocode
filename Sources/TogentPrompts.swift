@@ -3,7 +3,32 @@ import Foundation
 
 enum TogentRolePromptResult {
     case save(TogentRoleDraft)
+    case openWorkspace(TogentRoleDraft)
     case cancel
+}
+
+protocol TogentWorkspaceOpening {
+    func open(_ url: URL) -> Bool
+}
+
+struct SystemTogentWorkspaceOpener: TogentWorkspaceOpening {
+    func open(_ url: URL) -> Bool {
+        NSWorkspace.shared.open(url)
+    }
+}
+
+func openTogentWorkspace(
+    at persistedPath: String,
+    fileManager: FileManager = .default,
+    opener: TogentWorkspaceOpening
+) -> Bool {
+    let url = URL(fileURLWithPath: persistedPath, isDirectory: true)
+    var isDirectory: ObjCBool = false
+    guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory),
+          isDirectory.boolValue else {
+        return false
+    }
+    return opener.open(url)
 }
 
 enum TogentPrompts {
@@ -20,6 +45,9 @@ enum TogentPrompts {
             : "微信普通消息只会发送给当前勾选的一个角色。"
         alert.addButton(withTitle: "保存")
         alert.addButton(withTitle: "取消")
+        if isEditing {
+            alert.addButton(withTitle: "打开文件位置")
+        }
 
         let width: CGFloat = 560
         let view = NSView(frame: NSRect(x: 0, y: 0, width: width, height: 330))
@@ -65,6 +93,12 @@ enum TogentPrompts {
             pullsDown: false
         )
         var hasCurrentModel = false
+        if draft.publishedModelID.isEmpty {
+            modelPopup.addItem(withTitle: "未配置")
+            modelPopup.lastItem?.representedObject = ""
+            modelPopup.select(modelPopup.lastItem)
+            hasCurrentModel = true
+        }
         for model in models {
             modelPopup.addItem(withTitle: model.displayName)
             modelPopup.lastItem?.representedObject = model.publishedModelID
@@ -96,20 +130,26 @@ enum TogentPrompts {
 
         alert.accessoryView = view
         alert.buttons.first?.isEnabled = !models.isEmpty
+            || (isEditing && draft.publishedModelID.isEmpty)
         let response = withExtendedLifetime(chooser) {
             alert.runModalFocusingFirstTextField()
         }
-        guard response == .alertFirstButtonReturn else {
+        guard response == .alertFirstButtonReturn
+                || response == .alertThirdButtonReturn else {
             return .cancel
         }
         let selectedModel = modelPopup.selectedItem?.representedObject as? String ?? ""
-        return .save(TogentRoleDraft(
+        let candidate = TogentRoleDraft(
             name: nameField.stringValue,
             workspacePath: pathField.stringValue,
             prompt: promptView.string,
             publishedModelID: selectedModel,
             isActive: active.state == .on
-        ))
+        )
+        if response == .alertThirdButtonReturn {
+            return .openWorkspace(candidate)
+        }
+        return .save(candidate)
     }
 
     static func showError(_ error: Error, title: String = "Togent 设置未保存") {

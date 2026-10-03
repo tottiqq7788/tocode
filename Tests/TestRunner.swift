@@ -390,6 +390,34 @@ func testTocodePortableSettingsTransfer() {
     expect(other.string(forKey: RootPathStore.key) == "/Users/keep-root", "导入不改根目录")
     expect(other.bool(forKey: ExtendedSettingsStore.akEnabledKey), "导入不改 AK 开关")
     expect(other.bool(forKey: CodexSyncSettingsStore.syncEnabledKey), "导入不改 codex跟随")
+
+    var legacyLocationSettings = decoded
+    legacyLocationSettings.keyboardMappings.append(
+        KeyboardShortcutMapping(
+            id: UUID(),
+            name: "已退役微信位置",
+            source: RecordedShortcut(
+                keyCode: 9,
+                modifiers: [.command, .option],
+                keyLabel: "V"
+            ),
+            target: .action(.openWeChatLocation)
+        )
+    )
+    legacyLocationSettings.trackpad["4"] = .action(.openWeChatLocation)
+    legacyLocationSettings.trackpad["5"] = .action(.blackout)
+    TocodePortableSettingsTransfer.apply(legacyLocationSettings, to: other)
+    expect(
+        KeyboardShortcutMappingStore(defaults: other).allMappings().map(\.name) == ["黑屏"],
+        "导入旧 .tocode 时只丢弃退役微信位置键盘映射"
+    )
+    let migratedTrackpad = TrackpadShortcutStore(defaults: other)
+    expect(
+        migratedTrackpad.binding(for: .fourFingerTap) == nil
+            && migratedTrackpad.binding(for: .threeFingerTap) == .action(.switchDesktopLeft)
+            && migratedTrackpad.binding(for: .fiveFingerTap) == .action(.blackout),
+        "导入旧 .tocode 时只丢弃退役微信位置触控板绑定"
+    )
 }
 
 func testUserManualPages() {
@@ -423,8 +451,10 @@ func testUserManualPages() {
     expect(joined.contains("密钥 → AI"), "说明书覆盖密钥夹")
     expect(joined.contains("AK → 密钥 → AI"), "说明书覆盖 AK 下密钥路径")
     expect(!joined.contains("设置 → 密钥"), "说明书不再写设置下密钥")
-    expect(joined.contains("文稿/wechat"), "说明书写明归档在本机文稿/wechat")
-    expect(!joined.contains("/Users/admin/Documents/wechat"), "说明书不写死 admin 用户路径")
+    expect(joined.contains("工作区内的 wechat"), "说明书写明归档按角色工作区隔离")
+    expect(joined.contains("打开文件位置"), "说明书覆盖角色编辑弹窗打开工作区")
+    expect(!joined.contains("文稿/wechat"), "说明书不再描述全局微信归档")
+    expect(!joined.contains("wechat location"), "说明书不再暴露全局归档命令")
     expect(joined.contains("wechat send") || joined.contains("快捷输入"), "说明书覆盖微信命令或快捷输入")
     expect(joined.contains("tocode help"), "说明书覆盖 CLI")
     expect(joined.contains("root clipboard"), "说明书覆盖 root clipboard")
@@ -1765,6 +1795,22 @@ func testTrackpadShortcutStoreAndRecognizer() {
     store.setBinding(.action(.toggleHidden), for: .threeFingerTap)
     expect(store.hasAnyShortcut, "纯功能绑定 hasAnyShortcut 为 true")
     store.removeBinding(for: .threeFingerTap)
+    store.setBinding(.action(.blackout), for: .fiveFingerTap)
+    defaults.set(
+        try! JSONEncoder().encode(
+            KeyboardShortcutMappingTarget.action(.openWeChatLocation)
+        ),
+        forKey: TrackpadShortcutStore.defaultsKey(for: .threeFingerTap)
+    )
+    expect(
+        store.binding(for: .threeFingerTap) == nil,
+        "触控板旧微信文件位置绑定被定向移除"
+    )
+    expect(
+        store.binding(for: .fiveFingerTap) == .action(.blackout),
+        "触控板旧绑定迁移保留其他手势"
+    )
+    store.removeBinding(for: .fiveFingerTap)
 
     func recognize(
         count: Int,
@@ -2219,6 +2265,33 @@ func testKeyboardShortcutMappingStoreAndEngine() {
     expect(!engine.claims(synthesized), "键盘映射不声明内部合成事件")
     expect(engine.process(synthesized) == .pass, "带内部标记的合成事件不递归映射")
 
+    let retired = KeyboardShortcutMapping(
+        id: UUID(),
+        name: "旧微信文件位置",
+        source: sourceA,
+        target: .action(.openWeChatLocation)
+    )
+    defaults.set(
+        try! JSONEncoder().encode([edited, retired]),
+        forKey: KeyboardShortcutMappingStore.defaultsKey
+    )
+    expect(store.allMappings() == [edited], "兼容迁移只移除旧微信文件位置映射")
+    let migratedData = defaults.data(
+        forKey: KeyboardShortcutMappingStore.defaultsKey
+    )!
+    expect(
+        (try! JSONDecoder().decode(
+            [KeyboardShortcutMapping].self,
+            from: migratedData
+        )) == [edited],
+        "旧微信映射迁移后保留并持久化其他规则"
+    )
+    expect(
+        !KeyboardMappingAction.allCases.contains(.openWeChatLocation)
+            && KeyboardMappingActionGroup.wechat.actions.isEmpty,
+        "快捷键 UI 不再提供全局微信文件位置"
+    )
+
     store.delete(id: first.id)
     expect(store.allMappings().isEmpty, "删除只移除指定键盘映射")
 }
@@ -2310,7 +2383,11 @@ func testKeyboardShortcutMappingActionTargets() {
 
     let left = KeyboardMappingAction.switchDesktopLeft
     let right = KeyboardMappingAction.switchDesktopRight
-    expect(KeyboardMappingAction.allCases.count == 18, "本期提供桌面切换与 Tocode 一次性动作/开关")
+    expect(
+        KeyboardMappingAction.allCases.count == 17
+            && !KeyboardMappingAction.allCases.contains(.openWeChatLocation),
+        "映射功能保留有效动作并移除全局微信文件位置"
+    )
     expect(
         KeyboardMappingAction.allCases.contains(.blackout)
             && KeyboardMappingAction.allCases.contains(.quit)
@@ -4319,86 +4396,107 @@ func testWeChatArchiveNaming() {
     )
 }
 
-@MainActor
-func testWeChatArchiveLocation() {
-    let expected = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Documents/wechat", isDirectory: true)
-    expect(
-        WeChatArchiveService.defaultRoot.standardizedFileURL.path == expected.standardizedFileURL.path,
-        "默认归档目录为当前用户文稿/wechat"
-    )
-    expect(
-        WeChatArchiveService.defaultRoot.path.hasSuffix("/Documents/wechat"),
-        "归档目录固定为 Documents/wechat"
-    )
+private final class MockLegacyArchiveFileManager: WeChatLegacyArchiveFileManaging {
+    var type: FileAttributeType?
+    var removalError: Error?
+    private(set) var removals: [URL] = []
 
+    init(type: FileAttributeType?) {
+        self.type = type
+    }
+
+    func itemType(at url: URL) throws -> FileAttributeType? {
+        _ = url
+        return type
+    }
+
+    func removeItem(at url: URL) throws {
+        if let removalError { throw removalError }
+        removals.append(url)
+        type = nil
+    }
+}
+
+func testWeChatArchiveMigration() {
     let fm = FileManager.default
     let root = fm.temporaryDirectory.appendingPathComponent(
-        "tocode-wechat-location-\(UUID().uuidString)",
+        "tocode-wechat-migration-\(UUID().uuidString)",
         isDirectory: true
     )
     defer { try? fm.removeItem(at: root) }
-    let opener = MockWeChatOpener()
-    let notifier = MockWeChatNotifier()
-    let service = WeChatAssociationService(
-        transport: MockWeChatTransport(),
-        credentialStore: MemoryWeChatCredentialStore(nil),
-        stateStore: MemoryWeChatStateStore(),
-        archiver: MockWeChatArchiver(),
-        opener: opener,
-        notifier: notifier,
-        archiveRoot: root
-    )
-    service.openArchiveLocation()
-    var isDirectory: ObjCBool = false
-    expect(fm.fileExists(atPath: root.path, isDirectory: &isDirectory) && isDirectory.boolValue, "文件位置会创建归档目录")
-    expect(opener.urls == [root], "文件位置用访达打开归档目录")
-    expect(notifier.notifications.isEmpty, "创建并打开成功时不通知失败")
+    let documents = root.appendingPathComponent("Documents", isDirectory: true)
+    let legacy = documents.appendingPathComponent("wechat", isDirectory: true)
+    try! fm.createDirectory(at: legacy, withIntermediateDirectories: true)
+    try! Data("旧数据".utf8).write(to: legacy.appendingPathComponent("old.md"))
 
-    let blocker = fm.temporaryDirectory.appendingPathComponent("tocode-wechat-blocked-\(UUID().uuidString)")
-    fm.createFile(atPath: blocker.path, contents: Data())
-    defer { try? fm.removeItem(at: blocker) }
-    let unwritable = blocker.appendingPathComponent("wechat", isDirectory: true)
-    let failOpener = MockWeChatOpener()
-    let failNotifier = MockWeChatNotifier()
-    let failService = WeChatAssociationService(
-        transport: MockWeChatTransport(),
-        credentialStore: MemoryWeChatCredentialStore(nil),
-        stateStore: MemoryWeChatStateStore(),
-        archiver: MockWeChatArchiver(),
-        opener: failOpener,
-        notifier: failNotifier,
-        archiveRoot: unwritable
-    )
-    failService.openArchiveLocation()
-    expect(failOpener.urls.isEmpty, "无法创建时不打开访达")
-    expect(
-        failNotifier.notifications.contains { $0.0 == "无法创建微信归档目录" && $0.1 == unwritable.path },
-        "无法创建时通知归档路径"
-    )
+    let suite = "tocode.wechat.migration.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let migration = WeChatArchiveMigration(homeDirectory: root, defaults: defaults)
+    expect((try? migration.runIfNeeded()) == true, "旧全局微信归档首次启动会删除")
+    expect(!fm.fileExists(atPath: legacy.path), "只删除精确的 Documents/wechat")
+    expect(defaults.bool(forKey: WeChatArchiveMigration.completionKey), "删除成功写入迁移标记")
+    expect((try? migration.runIfNeeded()) == false, "迁移完成后幂等跳过")
 
-    let openFail = MockWeChatOpener()
-    openFail.shouldOpen = false
-    let openNotifier = MockWeChatNotifier()
-    let openRoot = fm.temporaryDirectory.appendingPathComponent(
-        "tocode-wechat-openfail-\(UUID().uuidString)",
-        isDirectory: true
-    )
-    defer { try? fm.removeItem(at: openRoot) }
-    let openService = WeChatAssociationService(
-        transport: MockWeChatTransport(),
-        credentialStore: MemoryWeChatCredentialStore(nil),
-        stateStore: MemoryWeChatStateStore(),
-        archiver: MockWeChatArchiver(),
-        opener: openFail,
-        notifier: openNotifier,
-        archiveRoot: openRoot
-    )
-    openService.openArchiveLocation()
+    let symlinkHome = root.appendingPathComponent("symlink-home", isDirectory: true)
+    let symlinkDocuments = symlinkHome.appendingPathComponent("Documents", isDirectory: true)
+    let target = root.appendingPathComponent("symlink-target", isDirectory: true)
+    try! fm.createDirectory(at: symlinkDocuments, withIntermediateDirectories: true)
+    try! fm.createDirectory(at: target, withIntermediateDirectories: true)
+    try! Data("保留".utf8).write(to: target.appendingPathComponent("keep.md"))
+    let link = symlinkDocuments.appendingPathComponent("wechat")
+    try! fm.createSymbolicLink(at: link, withDestinationURL: target)
+    let symlinkSuite = "tocode.wechat.migration.symlink.\(UUID().uuidString)"
+    let symlinkDefaults = UserDefaults(suiteName: symlinkSuite)!
+    defer { symlinkDefaults.removePersistentDomain(forName: symlinkSuite) }
     expect(
-        openNotifier.notifications.contains { $0.0 == "无法打开微信文件位置" && $0.1 == openRoot.path },
-        "目录已创建但访达打开失败时通知"
+        (try? WeChatArchiveMigration(
+            homeDirectory: symlinkHome,
+            defaults: symlinkDefaults
+        ).runIfNeeded()) == true,
+        "旧归档 symlink 可安全删除"
     )
+    expect(!fm.fileExists(atPath: link.path), "迁移只删除 symlink 本身")
+    expect(fm.fileExists(atPath: target.appendingPathComponent("keep.md").path),
+           "迁移不跟随 symlink 删除目标")
+
+    let failureSuite = "tocode.wechat.migration.failure.\(UUID().uuidString)"
+    let failureDefaults = UserDefaults(suiteName: failureSuite)!
+    defer { failureDefaults.removePersistentDomain(forName: failureSuite) }
+    let failureFS = MockLegacyArchiveFileManager(type: .typeDirectory)
+    failureFS.removalError = TestWeChatError.forced
+    do {
+        _ = try WeChatArchiveMigration(
+            fileSystem: failureFS,
+            homeDirectory: root,
+            defaults: failureDefaults
+        ).runIfNeeded()
+        expect(false, "旧归档删除失败应抛错")
+    } catch {
+        expect(true, "旧归档删除失败保留重试机会")
+    }
+    expect(!failureDefaults.bool(forKey: WeChatArchiveMigration.completionKey),
+           "删除失败不写迁移标记")
+
+    let fileSuite = "tocode.wechat.migration.file.\(UUID().uuidString)"
+    let fileDefaults = UserDefaults(suiteName: fileSuite)!
+    defer { fileDefaults.removePersistentDomain(forName: fileSuite) }
+    let fileFS = MockLegacyArchiveFileManager(type: .typeRegular)
+    do {
+        _ = try WeChatArchiveMigration(
+            fileSystem: fileFS,
+            homeDirectory: root,
+            defaults: fileDefaults
+        ).runIfNeeded()
+        expect(false, "旧归档路径为普通文件时拒绝删除")
+    } catch WeChatArchiveMigrationError.unexpectedLegacyItem {
+        expect(true, "旧归档普通文件得到明确错误")
+    } catch {
+        expect(false, "旧归档普通文件错误类型正确")
+    }
+    expect(fileFS.removals.isEmpty, "普通文件绝不删除")
+    expect(!fileDefaults.bool(forKey: WeChatArchiveMigration.completionKey),
+           "普通文件拒绝后不写迁移标记")
 }
 
 func testWeChatBindingPage() {
@@ -4512,6 +4610,24 @@ func testWeChatArchive() async {
     expect(names.contains { $0.contains("_2.") }, "同名附件冲突时追加递增序号且不覆盖")
     let mediaFiles = names.filter { $0 != "wechat260907.md" }
     expect(mediaFiles.count == 6, "两次归档的三类媒体均保留")
+    let dayPermissions = (try? fm.attributesOfItem(atPath: day.path)[
+        .posixPermissions
+    ] as? NSNumber)?.intValue
+    let logPermissions = (try? fm.attributesOfItem(atPath: log.path)[
+        .posixPermissions
+    ] as? NSNumber)?.intValue
+    let mediaPermissions = mediaFiles.compactMap {
+        (try? fm.attributesOfItem(atPath: day.appendingPathComponent($0).path)[
+            .posixPermissions
+        ] as? NSNumber)?.intValue
+    }
+    expect(dayPermissions == 0o700, "微信日期归档目录权限固定为 0700")
+    expect(logPermissions == 0o600, "微信 Markdown 日志权限固定为 0600")
+    expect(
+        mediaPermissions.count == mediaFiles.count
+            && mediaPermissions.allSatisfy { $0 == 0o600 },
+        "微信归档附件权限固定为 0600"
+    )
     expect(transport.mediaDescriptors.count == 6, "同条消息媒体全部下载")
     expect(
         transport.mediaDescriptors.contains { $0.aesKey == "00112233445566778899aabbccddeeff" },
@@ -4827,6 +4943,25 @@ func testWeChatAssociationAndFaults() async {
         token: "old-token",
         baseURL: WeChatILinkClient.officialBaseURL
     )
+    func makeArchiveTogent(_ label: String) -> (TogentService, URL) {
+        let root = makeTogentTemporaryDirectory(label)
+        let model = TogentModelOption(
+            publishedModelID: "association-model",
+            providerName: "关联测试厂家"
+        )
+        let togent = TogentService(
+            store: TogentStore(databaseURL: root.appendingPathComponent("togent.sqlite")),
+            workspace: TogentWorkspaceService(homeDirectory: root),
+            runtime: StubTogentRuntime(),
+            availableModelOptions: { [model] },
+            bootstrapDefaultRole: false
+        )
+        var draft = togent.newRoleDraft()
+        draft.name = "关联测试角色"
+        draft.publishedModelID = model.publishedModelID
+        _ = try! togent.createRole(from: draft)
+        return (togent, root)
+    }
 
     do {
         let transport = MockWeChatTransport()
@@ -5021,6 +5156,8 @@ func testWeChatAssociationAndFaults() async {
         ]
         let states = MemoryWeChatStateStore()
         let archiver = MockWeChatArchiver()
+        let (togent, root) = makeArchiveTogent("association-dedupe")
+        defer { try? FileManager.default.removeItem(at: root) }
         let service = WeChatAssociationService(
             transport: transport,
             credentialStore: MemoryWeChatCredentialStore(old),
@@ -5029,7 +5166,8 @@ func testWeChatAssociationAndFaults() async {
             pageWriter: MockWeChatBindingPage(),
             opener: MockWeChatOpener(),
             notifier: MockWeChatNotifier(),
-            sleeper: MockWeChatSleeper()
+            sleeper: MockWeChatSleeper(),
+            togent: togent
         )
         service.startBoundListener()
         _ = await waitUntil { states.state.cursor == "cursor-new" }
@@ -5037,6 +5175,7 @@ func testWeChatAssociationAndFaults() async {
         expect(states.state.recentKeys.count == 1, "成功归档后持久化去重键")
         expect(states.state.cursor == "cursor-new", "全部消息成功后推进游标")
         service.stop()
+        togent.stop()
     }
 
     do {
@@ -5053,6 +5192,8 @@ func testWeChatAssociationAndFaults() async {
         let states = MemoryWeChatStateStore(WeChatReceiveState(cursor: "cursor-old", recentKeys: []))
         let archiver = MockWeChatArchiver()
         archiver.error = WeChatArchiveError.appendLog
+        let (togent, root) = makeArchiveTogent("association-disk-failure")
+        defer { try? FileManager.default.removeItem(at: root) }
         let service = WeChatAssociationService(
             transport: transport,
             credentialStore: MemoryWeChatCredentialStore(old),
@@ -5061,7 +5202,8 @@ func testWeChatAssociationAndFaults() async {
             pageWriter: MockWeChatBindingPage(),
             opener: MockWeChatOpener(),
             notifier: MockWeChatNotifier(),
-            sleeper: MockWeChatSleeper()
+            sleeper: MockWeChatSleeper(),
+            togent: togent
         )
         service.startBoundListener()
         _ = await waitUntil { transport.updateCursors.count >= 2 }
@@ -5069,6 +5211,7 @@ func testWeChatAssociationAndFaults() async {
         expect(states.state.recentKeys.isEmpty, "磁盘写入失败不把消息标为已处理")
         expect(transport.updateCursors.first == "cursor-old", "监听启动时从持久化游标恢复")
         service.stop()
+        togent.stop()
     }
 
     do {
@@ -5085,6 +5228,8 @@ func testWeChatAssociationAndFaults() async {
         let states = MemoryWeChatStateStore(WeChatReceiveState(cursor: "state-old", recentKeys: []))
         states.saveError = TestWeChatError.forced
         let archiver = MockWeChatArchiver()
+        let (togent, root) = makeArchiveTogent("association-state-failure")
+        defer { try? FileManager.default.removeItem(at: root) }
         let service = WeChatAssociationService(
             transport: transport,
             credentialStore: MemoryWeChatCredentialStore(old),
@@ -5093,7 +5238,8 @@ func testWeChatAssociationAndFaults() async {
             pageWriter: MockWeChatBindingPage(),
             opener: MockWeChatOpener(),
             notifier: MockWeChatNotifier(),
-            sleeper: MockWeChatSleeper()
+            sleeper: MockWeChatSleeper(),
+            togent: togent
         )
         service.startBoundListener()
         _ = await waitUntil { transport.updateCursors.count >= 2 }
@@ -5101,6 +5247,7 @@ func testWeChatAssociationAndFaults() async {
         expect(states.state.cursor == "state-old", "状态文件保存失败不推进内存或磁盘游标")
         expect(states.state.recentKeys.isEmpty, "状态文件保存失败不推进内存或磁盘去重集合")
         service.stop()
+        togent.stop()
     }
 
     do {
@@ -5166,11 +5313,29 @@ func testWeChatBindingToArchiveIntegration() async {
     let page = MockWeChatBindingPage()
     let opener = MockWeChatOpener()
     let notifier = MockWeChatNotifier()
+    let roleWorkspace = root.appendingPathComponent("role", isDirectory: true)
     let archive = WeChatArchiveService(
-        root: root,
+        root: roleWorkspace.appendingPathComponent("wechat", isDirectory: true),
         transport: transport,
         calendarProvider: makeArchiveCalendar
     )
+    let togent = TogentService(
+        store: TogentStore(databaseURL: root.appendingPathComponent("state/togent.sqlite")),
+        workspace: TogentWorkspaceService(homeDirectory: root),
+        runtime: StubTogentRuntime(),
+        availableModelOptions: {
+            [TogentModelOption(
+                publishedModelID: "integration-model",
+                providerName: "集成厂家"
+            )]
+        },
+        bootstrapDefaultRole: false
+    )
+    var roleDraft = togent.newRoleDraft()
+    roleDraft.name = "归档集成角色"
+    roleDraft.workspacePath = roleWorkspace.path
+    roleDraft.publishedModelID = "integration-model"
+    _ = try! togent.createRole(from: roleDraft)
     let fixedDate = makeArchiveCalendar().date(from: DateComponents(
         year: 2026, month: 9, day: 7, hour: 12, minute: 34, second: 56
     ))!
@@ -5184,12 +5349,13 @@ func testWeChatBindingToArchiveIntegration() async {
         notifier: notifier,
         sleeper: MockWeChatSleeper(),
         now: { fixedDate },
-        archiveRoot: root
+        togent: togent
     )
 
     await service.performBinding()
     _ = await waitUntil { states.state.cursor == "integration-cursor" }
     service.stop()
+    togent.stop()
 
     expect(credentials.credential?.token == "integration-token", "集成：扫码 confirmed 后写入 Keychain 边界")
     expect(states.resetCount == 1, "集成：新绑定重置旧游标")
@@ -5198,7 +5364,9 @@ func testWeChatBindingToArchiveIntegration() async {
     expect(opener.urls.first == page.url, "集成：使用默认浏览器打开绑定页面")
     expect(notifier.notifications.contains { $0.0 == "微信绑定成功" }, "集成：绑定成功发送本地通知")
 
-    let day = root.appendingPathComponent("260907")
+    let day = roleWorkspace
+        .appendingPathComponent("wechat", isDirectory: true)
+        .appendingPathComponent("260907", isDirectory: true)
     let markdown = try? String(
         contentsOf: day.appendingPathComponent("wechat260907.md"),
         encoding: .utf8
@@ -5252,7 +5420,12 @@ func testTocodeCommandParser() {
     expect(TocodeCommandParser.parse("wechat") == .success(.wechat(.status)), "wechat 默认 status")
     expect(TocodeCommandParser.parse("wechat status") == .success(.wechat(.status)), "wechat status")
     expect(TocodeCommandParser.parse("wechat bind") == .success(.wechat(.bind)), "wechat bind")
-    expect(TocodeCommandParser.parse("wechat location") == .success(.wechat(.location)), "wechat location")
+    expect(TocodeCommandParser.parse("wechat location").isFailure, "wechat location 已删除")
+    expect(!TocodeCommandParser.helpText.contains("wechat location"), "CLI help 不再暴露全局归档入口")
+    expect(
+        !TocodeCommandParser.weChatHelpCommands.contains { $0.command == "wechat location" },
+        "微信 help 不再暴露全局归档入口"
+    )
     expect(
         TocodeCommandParser.parse("wechat send --text 你好")
             == .success(.wechat(.send(TocodeWechatSendPayload(toUserID: nil, text: "你好", files: [])))),
@@ -5709,8 +5882,7 @@ func testTocodeCommandExecutorMapping() {
     expect(executor.execute("wechat status").isSuccess, "wechat status")
     executor.execute("wechat bind")
     expect(wechat.bindCalls == 1, "wechat bind 触发扫码")
-    executor.execute("wechat location")
-    expect(wechat.locationCalls == 1, "wechat location 打开归档目录")
+    expect(executor.execute("wechat location").isFailure, "执行器拒绝已删除的微信全局文件位置")
 
     // blackout
     expect(executor.execute("blackout").isSuccess, "blackout 成功")
@@ -6049,7 +6221,7 @@ func testWeChatCommandConsumption() async {
         )
         service.startBoundListener()
         _ = await waitUntil { states.state.cursor == "cursor-plain" }
-        expect(archiver.messages.count == 1, "未包裹组合按普通消息归档")
+        expect(archiver.messages.isEmpty, "Togent 未就绪时普通消息不写回退归档")
         expect(injector.segmentsLog.isEmpty, "未包裹组合不走快捷输入")
         expect(
             transport.sentTexts.first?.text.contains("Agent 服务未就绪") == true,
@@ -6257,8 +6429,10 @@ struct TestRunnerMain {
         testModelRelayCallMetricsStore()
         await testModelRelayProxyRecordsOneCallEvenOnUpstreamRetryExhaustion()
         testTogentStoreAndUniqueActivation()
+        testTogentPersistedWorkspaceOpening()
         testTogentWorkspaceNumberingAndManagedAgents()
         testTogentWorkspaceCanonicalIsolation()
+        await testTogentDefaultRoleBootstrap()
         await testTogentRoleServiceModelGate()
         await testTogentBusyRoleAndRelayBoundary()
         testTogentJSONLFramingAndReplyChunks()
@@ -6313,7 +6487,7 @@ struct TestRunnerMain {
         testScreenBlackoutService()
         testWeChatModelsCryptoAndState()
         testWeChatArchiveNaming()
-        testWeChatArchiveLocation()
+        testWeChatArchiveMigration()
         testWeChatBindingPage()
         await testWeChatArchive()
         await testWeChatProtocolContract()
@@ -6325,6 +6499,7 @@ struct TestRunnerMain {
         testWeChatHelpFormatting()
         await testTogentWeChatArchiveQueueReplyIntegration()
         await testTogentWeChatNoRoleAndDuplicateFaults()
+        await testTogentDefaultRoleModelGateAndRoleArchiveRouting()
         await testTogentTwoPhaseRecoveryAndStateFailure()
         await testTogentArchiveReplyModelAndCrashFaults()
         await testTogentWeChatRealPiEndToEnd()

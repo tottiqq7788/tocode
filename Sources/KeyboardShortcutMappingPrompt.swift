@@ -244,10 +244,12 @@ final class KeyboardMappingTargetEditor: NSObject {
         // 扁平列表：分组标题禁用，选项一级可选。
         // NSPopUpButton 的子菜单选中项不会成为 selectedItem，保存时会悄悄落回默认的「向左切换桌面」。
         for group in KeyboardMappingActionGroup.allCases {
+            let actions = group.actions
+            guard !actions.isEmpty else { continue }
             let header = NSMenuItem(title: group.title, action: nil, keyEquivalent: "")
             header.isEnabled = false
             menu.addItem(header)
-            for action in group.actions {
+            for action in actions {
                 let item = NSMenuItem(
                     title: action.title,
                     action: nil,

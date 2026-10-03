@@ -5,7 +5,6 @@ private final class UnboundWeChat: WeChatAssociationControlling {
     var isBound: Bool { false }
     func startBinding() {}
     func startBoundListener() {}
-    func openArchiveLocation() {}
     func stop() {}
 }
 
@@ -96,6 +95,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         )
         self.togent = togent
+        if togent.startupError == nil {
+            do {
+                try WeChatArchiveMigration().runIfNeeded()
+            } catch {
+                UserNotificationWeChatNotifier().notify(
+                    title: "旧微信归档删除失败",
+                    body: error.localizedDescription
+                )
+            }
+        }
         modelRelay.didChange = { [weak togent] in
             togent?.relayDidChange()
         }

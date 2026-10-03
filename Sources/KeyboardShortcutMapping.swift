@@ -132,6 +132,30 @@ enum KeyboardMappingAction: String, Codable, CaseIterable, Equatable, Hashable {
     case toggleLaunchAtLogin
     case quit
 
+    static let allCases: [KeyboardMappingAction] = [
+        .switchDesktopLeft,
+        .switchDesktopRight,
+        .openFinderAtRoot,
+        .copyFinderSelectedPath,
+        .initRootFromFinder,
+        .toggleHidden,
+        .toggleFinderMove,
+        .toggleFinderCommandQ,
+        .readClipboardRoot,
+        .resetRoot,
+        .toggleCodexSync,
+        .blackout,
+        .toggleVerticalWheel,
+        .toggleHorizontalWheel,
+        .toggleDoubleCommandQ,
+        .toggleLaunchAtLogin,
+        .quit
+    ]
+
+    var isRetired: Bool {
+        self == .openWeChatLocation
+    }
+
     var title: String {
         switch self {
         case .switchDesktopLeft:
@@ -269,7 +293,7 @@ enum KeyboardMappingAction: String, Codable, CaseIterable, Equatable, Hashable {
         case .toggleCodexSync:
             return .codex(.sync(.toggle))
         case .openWeChatLocation:
-            return .wechat(.location)
+            return nil
         case .blackout:
             return .blackout
         case .toggleVerticalWheel:
@@ -396,7 +420,22 @@ struct KeyboardShortcutMappingStore {
 
     func allMappings() -> [KeyboardShortcutMapping] {
         guard let data = defaults.data(forKey: Self.defaultsKey) else { return [] }
-        return (try? JSONDecoder().decode([KeyboardShortcutMapping].self, from: data)) ?? []
+        guard let decoded = try? JSONDecoder().decode(
+            [KeyboardShortcutMapping].self,
+            from: data
+        ) else {
+            return []
+        }
+        let active = decoded.filter {
+            if case .action(let action) = $0.target {
+                return !action.isRetired
+            }
+            return true
+        }
+        if active.count != decoded.count {
+            persist(active)
+        }
+        return active
     }
 
     func save(
@@ -463,7 +502,12 @@ struct KeyboardShortcutMappingStore {
     }
 
     func replaceAll(_ mappings: [KeyboardShortcutMapping]) {
-        persist(mappings)
+        persist(mappings.filter {
+            if case .action(let action) = $0.target {
+                return !action.isRetired
+            }
+            return true
+        })
     }
 
     private func persist(_ mappings: [KeyboardShortcutMapping]) {

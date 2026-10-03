@@ -64,6 +64,7 @@ swiftc Tests/TestRunner.swift \
   Sources/TogentGitService.swift \
   Sources/TogentRuntimeService.swift \
   Sources/TogentService.swift \
+  Sources/TogentPrompts.swift \
   Sources/WeChatModels.swift \
   Sources/WeChatCrypto.swift \
   Sources/WeChatILinkClient.swift \
@@ -71,6 +72,7 @@ swiftc Tests/TestRunner.swift \
   Sources/WeChatFileCredentialStore.swift \
   Sources/WeChatStateStore.swift \
   Sources/WeChatArchiveService.swift \
+  Sources/WeChatArchiveMigration.swift \
   Sources/WeChatBindingPage.swift \
   Sources/WeChatAssociationService.swift \
   Sources/WeChatQuickInput.swift \

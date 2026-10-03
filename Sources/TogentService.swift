@@ -11,6 +11,7 @@ final class TogentService {
     private let relayFingerprint: () -> String
     private var observedRelayFingerprint: String
     private var workerTask: Task<Void, Never>?
+    private var inboundLeaseRoles: [UUID: TogentRole] = [:]
     private(set) var startupError: Error?
 
     var replyHandler: ReplyHandler?
@@ -21,7 +22,8 @@ final class TogentService {
         workspace: TogentWorkspaceService = TogentWorkspaceService(),
         runtime: TogentRuntimeExecuting,
         availableModelOptions: @escaping () -> [TogentModelOption],
-        relayFingerprint: @escaping () -> String = { "" }
+        relayFingerprint: @escaping () -> String = { "" },
+        bootstrapDefaultRole: Bool = true
     ) {
         self.store = store
         self.workspace = workspace
@@ -31,6 +33,9 @@ final class TogentService {
         observedRelayFingerprint = relayFingerprint()
         do {
             try store.recoverInterruptedJobs()
+            if bootstrapDefaultRole {
+                try bootstrapRoleWorkspaces()
+            }
         } catch {
             startupError = error
         }
@@ -45,7 +50,7 @@ final class TogentService {
     }
 
     var isBusy: Bool {
-        if workerTask != nil {
+        if workerTask != nil || !inboundLeaseRoles.isEmpty {
             return true
         }
         return (try? store.hasPendingWork()) ?? true
@@ -67,10 +72,14 @@ final class TogentService {
     @discardableResult
     func createRole(from draft: TogentRoleDraft) throws -> TogentRole {
         try checkStartup()
-        if (draft.isActive || roles.isEmpty), isBusy {
+        if isBusy {
             throw TogentError.busy
         }
-        let normalized = try normalizedDraft(draft, excluding: nil)
+        let normalized = try normalizedDraft(
+            draft,
+            excluding: nil,
+            allowUnconfiguredModel: false
+        )
         let now = Date()
         let role = TogentRole(
             name: normalized.name,
@@ -98,7 +107,11 @@ final class TogentService {
         guard let existing = try store.role(id: id) else {
             throw TogentError.roleNotFound
         }
-        let normalized = try normalizedDraft(draft, excluding: id)
+        let normalized = try normalizedDraft(
+            draft,
+            excluding: id,
+            allowUnconfiguredModel: existing.publishedModelID.isEmpty
+        )
         let changesRuntimeBoundary =
             existing.name != normalized.name
             || existing.workspacePath != normalized.workspacePath
@@ -134,16 +147,39 @@ final class TogentService {
         }
     }
 
+    func beginInbound() throws -> TogentInboundLease? {
+        try checkStartup()
+        guard let role = try store.activeRole() else {
+            return nil
+        }
+        let archiveRoot = try workspace.archiveDirectory(for: role)
+        let lease = TogentInboundLease(
+            id: UUID(),
+            roleID: role.id,
+            archiveRoot: archiveRoot
+        )
+        inboundLeaseRoles[lease.id] = role
+        return lease
+    }
+
+    func endInbound(_ lease: TogentInboundLease) {
+        inboundLeaseRoles.removeValue(forKey: lease.id)
+    }
+
     func stageInbound(
         message: WeChatMessage,
         deduplicationKey: String,
-        receivedAt: Date
+        receivedAt: Date,
+        lease: TogentInboundLease
     ) throws {
         try checkStartup()
-        let activeRole = try store.activeRole()
+        guard let leasedRole = inboundLeaseRoles[lease.id],
+              leasedRole.id == lease.roleID else {
+            throw TogentError.unavailable("微信入站角色租约已失效")
+        }
         _ = try store.stageJob(
             deduplicationKey: deduplicationKey,
-            roleID: activeRole?.id,
+            roleID: leasedRole.id,
             fromUserID: message.fromUserID,
             contextToken: message.contextToken,
             messageText: Self.normalizedMessage(message),
@@ -229,6 +265,9 @@ final class TogentService {
             guard let role = try store.role(id: roleID) else {
                 throw TogentError.roleNotFound
             }
+            guard !role.publishedModelID.isEmpty else {
+                throw TogentError.modelNotConfigured
+            }
             guard models.contains(where: {
                 $0.publishedModelID == role.publishedModelID
             }) else {
@@ -266,7 +305,8 @@ final class TogentService {
 
     private func normalizedDraft(
         _ draft: TogentRoleDraft,
-        excluding roleID: UUID?
+        excluding roleID: UUID?,
+        allowUnconfiguredModel: Bool
     ) throws -> TogentRoleDraft {
         let name = draft.name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty, name.count <= 80 else {
@@ -292,10 +332,16 @@ final class TogentService {
             existingRoles: currentRoles,
             excluding: roleID
         )
-        guard models.contains(where: {
-            $0.publishedModelID == draft.publishedModelID
-        }) else {
-            throw TogentError.modelUnavailable
+        if draft.publishedModelID.isEmpty {
+            guard allowUnconfiguredModel else {
+                throw TogentError.modelNotConfigured
+            }
+        } else {
+            guard models.contains(where: {
+                $0.publishedModelID == draft.publishedModelID
+            }) else {
+                throw TogentError.modelUnavailable
+            }
         }
         return TogentRoleDraft(
             name: name,
@@ -304,6 +350,36 @@ final class TogentService {
             publishedModelID: draft.publishedModelID,
             isActive: draft.isActive
         )
+    }
+
+    private func bootstrapRoleWorkspaces() throws {
+        let existingRoles = try store.roles()
+        if !existingRoles.isEmpty {
+            for role in existingRoles {
+                _ = try workspace.provision(role: role)
+            }
+            return
+        }
+
+        let now = Date()
+        let role = TogentRole(
+            name: "默认角色",
+            workspacePath: try workspace.canonicalPath(
+                workspace.defaultWorkspacePath(registeredPaths: [])
+            ),
+            prompt: "",
+            publishedModelID: "",
+            isActive: true,
+            createdAt: now,
+            updatedAt: now
+        )
+        let receipt = try workspace.provision(role: role)
+        do {
+            _ = try store.insertRole(role)
+        } catch {
+            workspace.rollback(receipt)
+            throw error
+        }
     }
 
     private func checkStartup() throws {

@@ -32,6 +32,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private let commandExecutor: TocodeCommandExecutor
     private let modelRelay: ModelRelayService
     private let togent: TogentService
+    private let togentWorkspaceOpener: TogentWorkspaceOpening
     private let actionDispatcher = KeyboardMappingActionDispatcher()
     private var activeModelMenu: NSMenu?
     private var activeModelParentItem: NSMenuItem?
@@ -74,6 +75,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         screenBlackout: ScreenBlackoutService? = nil,
         modelRelay: ModelRelayService,
         togent: TogentService,
+        togentWorkspaceOpener: TogentWorkspaceOpening = SystemTogentWorkspaceOpener(),
         commandExecutor: TocodeCommandExecutor
     ) {
         self.shortcuts = shortcuts
@@ -95,6 +97,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         self.screenBlackout = screenBlackout ?? ScreenBlackoutService(overlay: ScreenBlackoutOverlay())
         self.modelRelay = modelRelay
         self.togent = togent
+        self.togentWorkspaceOpener = togentWorkspaceOpener
         self.commandExecutor = commandExecutor
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         super.init()
@@ -553,17 +556,13 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             item.target = self
             item.representedObject = role.id.uuidString
             item.state = role.isActive ? .on : .off
-            item.toolTip = "\(role.workspacePath)\n模型：\(role.publishedModelID)"
+            let modelText = role.publishedModelID.isEmpty
+                ? "未配置"
+                : role.publishedModelID
+            item.toolTip = "\(role.workspacePath)\n模型：\(modelText)"
         }
         togentItem.submenu = togentMenu
 
-        let openWeChatLocation = weChatMenu.addItem(
-            withTitle: "文件位置",
-            action: #selector(openWeChatLocation),
-            keyEquivalent: ""
-        )
-        openWeChatLocation.target = self
-        openWeChatLocation.image = NSImage(systemSymbolName: "folder", accessibilityDescription: nil)
         weChatItem.submenu = weChatMenu
 
         // 设置
@@ -1290,14 +1289,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         weChat.startBinding()
     }
 
-    @objc private func openWeChatLocation() {
-        weChat.openArchiveLocation()
-    }
-
     @objc private func createTogentRole() {
         presentTogentRoleEditor(
             draft: togent.newRoleDraft(),
-            roleID: nil
+            roleID: nil,
+            workspacePathToOpen: nil
         )
     }
 
@@ -1310,13 +1306,15 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
         presentTogentRoleEditor(
             draft: TogentRoleDraft(role: role),
-            roleID: id
+            roleID: id,
+            workspacePathToOpen: role.workspacePath
         )
     }
 
     private func presentTogentRoleEditor(
         draft initialDraft: TogentRoleDraft,
-        roleID: UUID?
+        roleID: UUID?,
+        workspacePathToOpen: String?
     ) {
         var draft = initialDraft
         while true {
@@ -1327,6 +1325,23 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             ) {
             case .cancel:
                 return
+            case .openWorkspace(let candidate):
+                guard let workspacePathToOpen else {
+                    draft = candidate
+                    continue
+                }
+                guard openTogentWorkspace(
+                    at: workspacePathToOpen,
+                    opener: togentWorkspaceOpener
+                ) else {
+                    TogentPrompts.showError(
+                        TogentError.workspace("无法打开已保存的角色工作区"),
+                        title: "无法打开文件位置"
+                    )
+                    draft = candidate
+                    continue
+                }
+                draft = candidate
             case .save(let candidate):
                 do {
                     if let roleID {

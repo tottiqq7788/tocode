@@ -12,12 +12,13 @@ func testTogentWeChatArchiveQueueReplyIntegration() async {
         store: store,
         workspace: TogentWorkspaceService(homeDirectory: root),
         runtime: runtime,
-        availableModelOptions: { models }
+        availableModelOptions: { models },
+        bootstrapDefaultRole: false
     )
     var roleDraft = togent.newRoleDraft()
     roleDraft.name = "微信角色"
     roleDraft.publishedModelID = "model-a"
-    _ = try! togent.createRole(from: roleDraft)
+    let role = try! togent.createRole(from: roleDraft)
 
     let first = WeChatMessage(
         fromUserID: "user",
@@ -67,6 +68,9 @@ func testTogentWeChatArchiveQueueReplyIntegration() async {
 
     expect(completed, "两条普通微信消息都收到 Agent 最终回复")
     expect(archiver.messages == [first, second], "普通微信消息按顺序先归档")
+    let roleArchive = URL(fileURLWithPath: role.workspacePath, isDirectory: true)
+        .appendingPathComponent("wechat", isDirectory: true)
+    expect(archiver.roots == [roleArchive, roleArchive], "同一角色消息只进入自己的归档根")
     expect(archiveWasCompleteAtExecution, "每次 Togent 执行都发生在入站归档之后")
     expect(runtime.executions.count == 2, "普通消息调用几次就执行几次且不合并")
     expect(runtime.executions[0].1.contains("第一条任务"), "第一条微信任务先进入 Pi")
@@ -93,7 +97,8 @@ func testTogentWeChatNoRoleAndDuplicateFaults() async {
         store: store,
         workspace: TogentWorkspaceService(homeDirectory: root),
         runtime: runtime,
-        availableModelOptions: { models }
+        availableModelOptions: { models },
+        bootstrapDefaultRole: false
     )
     let message = WeChatMessage(
         fromUserID: "user",
@@ -107,12 +112,13 @@ func testTogentWeChatNoRoleAndDuplicateFaults() async {
         .failure(CancellationError())
     ]
     let archiver = MockWeChatArchiver()
+    let state = MemoryWeChatStateStore()
     let weChat = WeChatAssociationService(
         transport: transport,
         credentialStore: MemoryWeChatCredentialStore(
             WeChatCredential(token: "bound", baseURL: WeChatILinkClient.officialBaseURL)
         ),
-        stateStore: MemoryWeChatStateStore(),
+        stateStore: state,
         archiver: archiver,
         pageWriter: MockWeChatBindingPage(),
         opener: MockWeChatOpener(),
@@ -125,12 +131,182 @@ func testTogentWeChatNoRoleAndDuplicateFaults() async {
     weChat.stop()
     togent.stop()
 
-    expect(archiver.messages.count == 1, "重复微信消息只归档一次")
+    expect(archiver.messages.isEmpty, "无激活角色时不创建任何全局或角色归档")
     expect(runtime.executions.isEmpty, "无激活角色时不启动 Pi")
     expect(transport.sentTexts.count == 1, "重复微信消息只回复一次错误")
     expect(transport.sentTexts.first?.text.contains("尚未激活") == true,
            "无激活角色向原会话明确回复")
-    expect((try! store.jobs()).count == 1, "消息 dedupe key 在 Togent job 表唯一")
+    expect((try! store.jobs()).isEmpty, "无激活角色时不创建 Togent job")
+    expect(state.state.recentKeys.count == 1, "无激活角色仍持久去重并推进消费状态")
+}
+
+@MainActor
+func testTogentDefaultRoleModelGateAndRoleArchiveRouting() async {
+    let modelGateRoot = makeTogentTemporaryDirectory("default-model-gate")
+    defer { try? FileManager.default.removeItem(at: modelGateRoot) }
+    let modelGateStore = TogentStore(
+        databaseURL: modelGateRoot.appendingPathComponent("togent.sqlite")
+    )
+    let modelGateRuntime = StubTogentRuntime()
+    let defaultTogent = TogentService(
+        store: modelGateStore,
+        workspace: TogentWorkspaceService(homeDirectory: modelGateRoot),
+        runtime: modelGateRuntime,
+        availableModelOptions: { [] }
+    )
+    let defaultRole = defaultTogent.roles.first!
+    let defaultMessage = WeChatMessage(
+        fromUserID: "default-user",
+        contextToken: "default-context",
+        messageID: "default-message",
+        items: [WeChatItem(type: 1, textItem: WeChatTextItem(text: "执行默认任务"))]
+    )
+    let defaultTransport = MockWeChatTransport()
+    defaultTransport.updates = [
+        .success(WeChatUpdates(messages: [defaultMessage], cursor: "default-cursor")),
+        .failure(CancellationError())
+    ]
+    let defaultArchiver = MockWeChatArchiver()
+    let defaultWeChat = WeChatAssociationService(
+        transport: defaultTransport,
+        credentialStore: MemoryWeChatCredentialStore(
+            WeChatCredential(token: "bound", baseURL: WeChatILinkClient.officialBaseURL)
+        ),
+        stateStore: MemoryWeChatStateStore(),
+        archiver: defaultArchiver,
+        pageWriter: MockWeChatBindingPage(),
+        opener: MockWeChatOpener(),
+        notifier: MockWeChatNotifier(),
+        sleeper: MockWeChatSleeper(),
+        togent: defaultTogent
+    )
+    defaultWeChat.startBoundListener()
+    let modelGateCompleted = await waitForTogentCondition {
+        defaultTransport.sentTexts.count == 1
+    }
+    defaultWeChat.stop()
+    defaultTogent.stop()
+    expect(modelGateCompleted, "默认角色未配置模型时仍消费普通消息")
+    expect(defaultArchiver.roots == [
+        URL(fileURLWithPath: defaultRole.workspacePath, isDirectory: true)
+            .appendingPathComponent("wechat", isDirectory: true)
+    ], "默认角色先归档到自身工作区")
+    expect(modelGateRuntime.executions.isEmpty, "默认角色模型未配置时绝不启动 Pi")
+    expect(
+        defaultTransport.sentTexts.first?.text.contains("尚未配置模型") == true,
+        "模型未配置使用独立于模型失效的明确文案"
+    )
+    expect(
+        (try! modelGateStore.jobs()).first?.state == .failed,
+        "模型未配置任务有界收口为 failed"
+    )
+
+    let routingRoot = makeTogentTemporaryDirectory("role-routing")
+    defer { try? FileManager.default.removeItem(at: routingRoot) }
+    let routingRuntime = StubTogentRuntime()
+    let model = TogentModelOption(publishedModelID: "route-model", providerName: "厂家")
+    let routingTogent = TogentService(
+        store: TogentStore(databaseURL: routingRoot.appendingPathComponent("togent.sqlite")),
+        workspace: TogentWorkspaceService(homeDirectory: routingRoot),
+        runtime: routingRuntime,
+        availableModelOptions: { [model] },
+        bootstrapDefaultRole: false
+    )
+    var firstDraft = routingTogent.newRoleDraft()
+    firstDraft.name = "角色A"
+    firstDraft.publishedModelID = model.publishedModelID
+    let firstRole = try! routingTogent.createRole(from: firstDraft)
+    var secondDraft = routingTogent.newRoleDraft()
+    secondDraft.name = "角色B"
+    secondDraft.publishedModelID = model.publishedModelID
+    let secondRole = try! routingTogent.createRole(from: secondDraft)
+    let sharedArchiver = MockWeChatArchiver()
+
+    let firstMessage = WeChatMessage(
+        fromUserID: "route-user",
+        contextToken: "route-context-a",
+        messageID: "route-a",
+        items: [WeChatItem(type: 1, textItem: WeChatTextItem(text: "A 任务"))]
+    )
+    let firstTransport = MockWeChatTransport()
+    firstTransport.updates = [
+        .success(WeChatUpdates(messages: [firstMessage], cursor: "route-cursor-a")),
+        .failure(CancellationError())
+    ]
+    let firstWeChat = WeChatAssociationService(
+        transport: firstTransport,
+        credentialStore: MemoryWeChatCredentialStore(
+            WeChatCredential(token: "bound", baseURL: WeChatILinkClient.officialBaseURL)
+        ),
+        stateStore: MemoryWeChatStateStore(),
+        archiver: sharedArchiver,
+        pageWriter: MockWeChatBindingPage(),
+        opener: MockWeChatOpener(),
+        notifier: MockWeChatNotifier(),
+        sleeper: MockWeChatSleeper(),
+        togent: routingTogent
+    )
+    firstWeChat.startBoundListener()
+    _ = await waitForTogentCondition { firstTransport.sentTexts.count == 1 }
+    firstWeChat.stop()
+    _ = await waitForTogentCondition { !routingTogent.isBusy }
+
+    var activateSecond = TogentRoleDraft(role: secondRole)
+    activateSecond.isActive = true
+    _ = try! routingTogent.updateRole(id: secondRole.id, from: activateSecond)
+
+    let secondMessage = WeChatMessage(
+        fromUserID: "route-user",
+        contextToken: "route-context-b",
+        messageID: "route-b",
+        items: [WeChatItem(type: 1, textItem: WeChatTextItem(text: "B 任务"))]
+    )
+    let secondTransport = MockWeChatTransport()
+    secondTransport.updates = [
+        .success(WeChatUpdates(messages: [secondMessage], cursor: "route-cursor-b")),
+        .failure(CancellationError())
+    ]
+    let secondWeChat = WeChatAssociationService(
+        transport: secondTransport,
+        credentialStore: MemoryWeChatCredentialStore(
+            WeChatCredential(token: "bound", baseURL: WeChatILinkClient.officialBaseURL)
+        ),
+        stateStore: MemoryWeChatStateStore(),
+        archiver: sharedArchiver,
+        pageWriter: MockWeChatBindingPage(),
+        opener: MockWeChatOpener(),
+        notifier: MockWeChatNotifier(),
+        sleeper: MockWeChatSleeper(),
+        togent: routingTogent
+    )
+    secondWeChat.startBoundListener()
+    _ = await waitForTogentCondition { secondTransport.sentTexts.count == 1 }
+    secondWeChat.stop()
+    _ = await waitForTogentCondition { !routingTogent.isBusy }
+
+    let expectedRoots = [firstRole, secondRole].map {
+        URL(fileURLWithPath: $0.workspacePath, isDirectory: true)
+            .appendingPathComponent("wechat", isDirectory: true)
+    }
+    expect(sharedArchiver.roots == expectedRoots, "角色 A/B 消息只进入各自归档根")
+    expect(
+        routingRuntime.executions.map { $0.0.id } == [firstRole.id, secondRole.id],
+        "归档与任务执行始终使用同一个收到时角色"
+    )
+
+    let lease = try! routingTogent.beginInbound()!
+    var switchDuringArchive = TogentRoleDraft(role: firstRole)
+    switchDuringArchive.isActive = true
+    do {
+        _ = try routingTogent.updateRole(id: firstRole.id, from: switchDuringArchive)
+        expect(false, "归档租约期间不得切换角色")
+    } catch TogentError.busy {
+        expect(true, "归档租约期间角色边界修改返回 busy")
+    } catch {
+        expect(false, "归档租约期间返回明确 busy：\(error)")
+    }
+    routingTogent.endInbound(lease)
+    routingTogent.stop()
 }
 
 @MainActor
@@ -145,7 +321,8 @@ func testTogentTwoPhaseRecoveryAndStateFailure() async {
         store: store,
         workspace: workspace,
         runtime: runtime,
-        availableModelOptions: { models }
+        availableModelOptions: { models },
+        bootstrapDefaultRole: false
     )
     var draft = togent.newRoleDraft()
     draft.name = "恢复角色"
@@ -188,7 +365,8 @@ func testTogentTwoPhaseRecoveryAndStateFailure() async {
         store: failureStore,
         workspace: TogentWorkspaceService(homeDirectory: failureRoot),
         runtime: failureRuntime,
-        availableModelOptions: { models }
+        availableModelOptions: { models },
+        bootstrapDefaultRole: false
     )
     var failureDraft = failureService.newRoleDraft()
     failureDraft.name = "失败角色"
@@ -250,7 +428,8 @@ func testTogentArchiveReplyModelAndCrashFaults() async {
         store: archiveStore,
         workspace: TogentWorkspaceService(homeDirectory: archiveRoot),
         runtime: archiveRuntime,
-        availableModelOptions: { models }
+        availableModelOptions: { models },
+        bootstrapDefaultRole: false
     )
     var archiveDraft = archiveTogent.newRoleDraft()
     archiveDraft.name = "归档故障"
@@ -293,7 +472,8 @@ func testTogentArchiveReplyModelAndCrashFaults() async {
         store: replyStore,
         workspace: TogentWorkspaceService(homeDirectory: replyRoot),
         runtime: replyRuntime,
-        availableModelOptions: { models }
+        availableModelOptions: { models },
+        bootstrapDefaultRole: false
     )
     var replyDraft = replyTogent.newRoleDraft()
     replyDraft.name = "回复故障"
@@ -304,11 +484,14 @@ func testTogentArchiveReplyModelAndCrashFaults() async {
         replyAttempts += 1
         throw TestWeChatError.forced
     }
+    let replyLease = try! replyTogent.beginInbound()!
     try! replyTogent.stageInbound(
         message: message,
         deduplicationKey: "reply-fault",
-        receivedAt: Date()
+        receivedAt: Date(),
+        lease: replyLease
     )
+    replyTogent.endInbound(replyLease)
     try! replyTogent.commitStagedInbound(deduplicationKey: "reply-fault")
     let replyFailed = await waitForTogentCondition {
         (try? replyStore.jobs())?.first?.state == .failed
@@ -330,7 +513,8 @@ func testTogentArchiveReplyModelAndCrashFaults() async {
         store: modelStore,
         workspace: TogentWorkspaceService(homeDirectory: modelRoot),
         runtime: modelRuntime,
-        availableModelOptions: { currentModels }
+        availableModelOptions: { currentModels },
+        bootstrapDefaultRole: false
     )
     var modelDraft = modelTogent.newRoleDraft()
     modelDraft.name = "模型故障"
@@ -338,11 +522,14 @@ func testTogentArchiveReplyModelAndCrashFaults() async {
     _ = try! modelTogent.createRole(from: modelDraft)
     var modelReplies: [String] = []
     modelTogent.replyHandler = { _, text in modelReplies.append(text) }
+    let modelLease = try! modelTogent.beginInbound()!
     try! modelTogent.stageInbound(
         message: message,
         deduplicationKey: "model-fault",
-        receivedAt: Date()
+        receivedAt: Date(),
+        lease: modelLease
     )
+    modelTogent.endInbound(modelLease)
     currentModels = []
     try! modelTogent.commitStagedInbound(deduplicationKey: "model-fault")
     let modelFailed = await waitForTogentCondition {
@@ -363,7 +550,8 @@ func testTogentArchiveReplyModelAndCrashFaults() async {
         store: crashStore,
         workspace: TogentWorkspaceService(homeDirectory: crashRoot),
         runtime: crashRuntime,
-        availableModelOptions: { models }
+        availableModelOptions: { models },
+        bootstrapDefaultRole: false
     )
     var crashDraft = crashTogent.newRoleDraft()
     crashDraft.name = "崩溃故障"
@@ -371,11 +559,14 @@ func testTogentArchiveReplyModelAndCrashFaults() async {
     _ = try! crashTogent.createRole(from: crashDraft)
     var crashReplies: [String] = []
     crashTogent.replyHandler = { _, text in crashReplies.append(text) }
+    let crashLease = try! crashTogent.beginInbound()!
     try! crashTogent.stageInbound(
         message: message,
         deduplicationKey: "crash-fault",
-        receivedAt: Date()
+        receivedAt: Date(),
+        lease: crashLease
     )
+    crashTogent.endInbound(crashLease)
     try! crashTogent.commitStagedInbound(deduplicationKey: "crash-fault")
     let crashFailed = await waitForTogentCondition {
         (try? crashStore.jobs())?.first?.state == .failed
@@ -397,18 +588,22 @@ func testTogentArchiveReplyModelAndCrashFaults() async {
         store: shutdownStore,
         workspace: TogentWorkspaceService(homeDirectory: shutdownRoot),
         runtime: shutdownRuntime,
-        availableModelOptions: { models }
+        availableModelOptions: { models },
+        bootstrapDefaultRole: false
     )
     var shutdownDraft = shutdownTogent.newRoleDraft()
     shutdownDraft.name = "退出恢复"
     shutdownDraft.publishedModelID = "model-a"
     _ = try! shutdownTogent.createRole(from: shutdownDraft)
     shutdownTogent.replyHandler = { _, _ in }
+    let shutdownLease = try! shutdownTogent.beginInbound()!
     try! shutdownTogent.stageInbound(
         message: message,
         deduplicationKey: "shutdown-recovery",
-        receivedAt: Date()
+        receivedAt: Date(),
+        lease: shutdownLease
     )
+    shutdownTogent.endInbound(shutdownLease)
     try! shutdownTogent.commitStagedInbound(deduplicationKey: "shutdown-recovery")
     let becameRunning = await waitForTogentCondition {
         (try? shutdownStore.jobs())?.first?.state == .running
@@ -421,7 +616,8 @@ func testTogentArchiveReplyModelAndCrashFaults() async {
         store: shutdownStore,
         workspace: TogentWorkspaceService(homeDirectory: shutdownRoot),
         runtime: StubTogentRuntime(),
-        availableModelOptions: { models }
+        availableModelOptions: { models },
+        bootstrapDefaultRole: false
     )
     expect((try! shutdownStore.jobs()).first?.state == .queued,
            "下次启动把退出中断任务恢复为 queued")
@@ -505,8 +701,7 @@ func testTogentWeChatRealPiEndToEnd() async {
         relayAccess: { access },
         runtimeDirectory: runtimeDirectory,
         sandbox: TogentSandbox(
-            applicationSupportRoot: root.appendingPathComponent("runtime", isDirectory: true),
-            weChatArchiveRoot: root.appendingPathComponent("wechat", isDirectory: true)
+            applicationSupportRoot: root.appendingPathComponent("runtime", isDirectory: true)
         )
     )
     let store = TogentStore(databaseURL: root.appendingPathComponent("togent.sqlite"))
@@ -514,7 +709,8 @@ func testTogentWeChatRealPiEndToEnd() async {
         store: store,
         workspace: TogentWorkspaceService(homeDirectory: root),
         runtime: runtime,
-        availableModelOptions: { [model] }
+        availableModelOptions: { [model] },
+        bootstrapDefaultRole: false
     )
     var roleDraft = togent.newRoleDraft()
     roleDraft.name = "微信真 Pi 角色"

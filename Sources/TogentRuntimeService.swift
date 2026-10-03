@@ -53,6 +53,10 @@ actor TogentRuntimeService: TogentRuntimeExecuting {
     }
 
     func execute(role: TogentRole, prompt: String) async throws -> String {
+        guard !role.publishedModelID.isEmpty else {
+            await stop(roleID: role.id)
+            throw TogentError.modelNotConfigured
+        }
         let access = relayAccess()
         guard access.models.contains(where: {
             $0.publishedModelID == role.publishedModelID

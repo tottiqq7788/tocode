@@ -81,24 +81,47 @@ func testTogentSandboxProfileAndEnvironment() {
     defer { try? FileManager.default.removeItem(at: root) }
     let canonicalRoot = root.resolvingSymlinksInPath()
     let workspace = canonicalRoot.appendingPathComponent("workspace", isDirectory: true)
-    let runtime = canonicalRoot.appendingPathComponent("runtime", isDirectory: true)
-    let archive = canonicalRoot.appendingPathComponent("wechat", isDirectory: true)
+    let runtimeParent = canonicalRoot.appendingPathComponent("runtime", isDirectory: true)
+    let runtime = runtimeParent.appendingPathComponent("role-a", isDirectory: true)
+    let otherRuntime = runtimeParent.appendingPathComponent("role-b", isDirectory: true)
+    let otherSession = otherRuntime.appendingPathComponent(
+        "sessions/session.json"
+    )
+    let archive = workspace.appendingPathComponent("wechat", isDirectory: true)
+    let otherWorkspace = canonicalRoot.appendingPathComponent("other-workspace", isDirectory: true)
+    let otherArchive = otherWorkspace.appendingPathComponent("wechat", isDirectory: true)
     let bundle = canonicalRoot.appendingPathComponent("bundle", isDirectory: true)
-    for directory in [workspace, runtime, archive, bundle] {
+    for directory in [workspace, runtime, archive, otherArchive, otherRuntime, bundle] {
         try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     }
-    let sandbox = TogentSandbox(
-        applicationSupportRoot: runtime,
-        weChatArchiveRoot: archive
+    try! "本角色历史".write(
+        to: archive.appendingPathComponent("own.md"),
+        atomically: true,
+        encoding: .utf8
     )
+    try! "其他角色历史".write(
+        to: otherArchive.appendingPathComponent("other.md"),
+        atomically: true,
+        encoding: .utf8
+    )
+    try! FileManager.default.createDirectory(
+        at: otherSession.deletingLastPathComponent(),
+        withIntermediateDirectories: true
+    )
+    try! "其他角色会话".write(
+        to: otherSession,
+        atomically: true,
+        encoding: .utf8
+    )
+    let sandbox = TogentSandbox(applicationSupportRoot: runtimeParent)
     let profile = sandbox.profileText(
         workspace: workspace,
         runtimeRoot: runtime,
-        bundledRuntime: bundle,
-        archiveRoot: archive
+        bundledRuntime: bundle
     )
     expect(profile.contains("/workspace"), "沙箱只显式放行角色工作区")
-    expect(profile.contains("/wechat"), "沙箱把微信归档作为只读路径")
+    expect(profile.contains("/workspace/wechat"), "沙箱把本角色微信归档设为只读")
+    expect(!profile.contains("/other-workspace"), "沙箱不暴露其他角色工作区")
     expect(profile.contains(#"(deny mach-lookup"#), "沙箱显式拒绝钥匙串与剪贴板服务")
 
     let role = makeTogentRole(workspace: workspace)
@@ -150,8 +173,20 @@ func testTogentSandboxProfileAndEnvironment() {
         "sandbox-exec 拒绝读取角色边界外用户文件"
     )
     expect(
+        sandboxResult("cat '\(archive.appendingPathComponent("own.md").path)' >/dev/null").0 == 0,
+        "sandbox-exec 允许只读查询本角色微信归档"
+    )
+    expect(
         sandboxResult("printf bad > '\(archive.appendingPathComponent("bad.txt").path)'").0 != 0,
-        "sandbox-exec 对微信归档保持只读"
+        "sandbox-exec 拒绝修改本角色微信归档"
+    )
+    expect(
+        sandboxResult("cat '\(otherArchive.appendingPathComponent("other.md").path)' >/dev/null").0 != 0,
+        "sandbox-exec 拒绝读取其他角色微信归档"
+    )
+    expect(
+        sandboxResult("cat '\(otherSession.path)' >/dev/null").0 != 0,
+        "sandbox-exec 拒绝读取其他角色 Pi 会话"
     )
 }
 
@@ -452,8 +487,7 @@ func testRealPiThroughSandboxAndRelay() async {
         relayAccess: { access },
         runtimeDirectory: runtimeDirectory,
         sandbox: TogentSandbox(
-            applicationSupportRoot: root.appendingPathComponent("runtime", isDirectory: true),
-            weChatArchiveRoot: root.appendingPathComponent("wechat", isDirectory: true)
+            applicationSupportRoot: root.appendingPathComponent("runtime", isDirectory: true)
         )
     )
     do {

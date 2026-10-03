@@ -15,12 +15,10 @@ struct TogentRuntimeLayout: Equatable {
 final class TogentSandbox {
     private let fileManager: FileManager
     private let applicationSupportRoot: URL
-    private let weChatArchiveRoot: URL
 
     init(
         fileManager: FileManager = .default,
-        applicationSupportRoot: URL? = nil,
-        weChatArchiveRoot: URL? = nil
+        applicationSupportRoot: URL? = nil
     ) {
         self.fileManager = fileManager
         let home = fileManager.homeDirectoryForCurrentUser
@@ -29,8 +27,6 @@ final class TogentSandbox {
                 "Library/Application Support/com.tocode.app/togent/roles",
                 isDirectory: true
             )
-        self.weChatArchiveRoot = weChatArchiveRoot ?? home
-            .appendingPathComponent("Documents/wechat", isDirectory: true)
     }
 
     func prepare(
@@ -100,8 +96,7 @@ final class TogentSandbox {
         let sandboxText = profileText(
             workspace: URL(fileURLWithPath: role.workspacePath, isDirectory: true),
             runtimeRoot: roleRoot,
-            bundledRuntime: bundledRuntime,
-            archiveRoot: weChatArchiveRoot
+            bundledRuntime: bundledRuntime
         )
         try Data(sandboxText.utf8).write(to: profile, options: .atomic)
         try fileManager.setAttributes(
@@ -124,8 +119,7 @@ final class TogentSandbox {
     func profileText(
         workspace: URL,
         runtimeRoot: URL,
-        bundledRuntime: URL,
-        archiveRoot: URL
+        bundledRuntime: URL
     ) -> String {
         let fixedReadOnlyRoots = [
             "/System",
@@ -140,7 +134,7 @@ final class TogentSandbox {
             "/Applications/Xcode.app",
             "/opt/homebrew"
         ]
-        let urlReadOnlyRoots = [bundledRuntime, workspace, runtimeRoot, archiveRoot]
+        let urlReadOnlyRoots = [bundledRuntime, workspace, runtimeRoot]
             .flatMap { [$0.standardizedFileURL.path, Self.canonicalPath($0)] }
         let readOnlyRoots = Array(Set(fixedReadOnlyRoots + urlReadOnlyRoots)).sorted()
         let readRules = readOnlyRoots.map {
@@ -157,6 +151,18 @@ final class TogentSandbox {
         )).sorted()
         let writeRules = writeRoots.map {
             "(allow file-write* (subpath \"\(Self.escape($0))\"))"
+        }.joined(separator: "\n")
+        let archive = workspace.appendingPathComponent("wechat", isDirectory: true)
+        let archiveRoots = Array(Set([
+            archive.standardizedFileURL.path,
+            Self.canonicalPath(archive)
+        ])).sorted()
+        let archiveWriteDenials = archiveRoots.map {
+            let escaped = Self.escape($0)
+            return """
+            (deny file-write* (literal "\(escaped)"))
+            (deny file-write* (subpath "\(escaped)"))
+            """
         }.joined(separator: "\n")
 
         return """
@@ -176,6 +182,7 @@ final class TogentSandbox {
         (allow file-read-metadata)
         \(readRules)
         \(writeRules)
+        \(archiveWriteDenials)
         (allow file-write* (literal "/dev/null"))
         """
     }

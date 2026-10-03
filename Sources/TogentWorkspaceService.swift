@@ -5,8 +5,10 @@ struct TogentWorkspaceReceipt {
     let root: URL
     let agentsURL: URL
     let projectURL: URL
+    let archiveURL: URL
     let createdRoot: Bool
     let createdProject: Bool
+    let createdArchive: Bool
     let previousAgentsData: Data?
     let createdAgents: Bool
 }
@@ -122,6 +124,7 @@ final class TogentWorkspaceService {
         let root = URL(fileURLWithPath: canonical, isDirectory: true)
         let agentsURL = root.appendingPathComponent("AGENTS.md")
         let projectURL = root.appendingPathComponent("project", isDirectory: true)
+        let archiveURL = root.appendingPathComponent("wechat", isDirectory: true)
 
         var rootIsDirectory: ObjCBool = false
         let rootExisted = fileManager.fileExists(
@@ -132,6 +135,10 @@ final class TogentWorkspaceService {
             throw TogentError.invalidWorkspacePath
         }
         let projectExisted = fileManager.fileExists(atPath: projectURL.path)
+        let archiveIsSymbolicLink =
+            (try? fileManager.destinationOfSymbolicLink(atPath: archiveURL.path)) != nil
+        let archiveExisted = fileManager.fileExists(atPath: archiveURL.path)
+            || archiveIsSymbolicLink
         let previousAgentsData = try? Data(contentsOf: agentsURL)
         let agentsExisted = previousAgentsData != nil
 
@@ -154,6 +161,26 @@ final class TogentWorkspaceService {
                     withIntermediateDirectories: false
                 )
             }
+            var archiveIsDirectory: ObjCBool = false
+            if archiveIsSymbolicLink {
+                throw TogentError.workspaceOutsideBoundary
+            }
+            if fileManager.fileExists(atPath: archiveURL.path, isDirectory: &archiveIsDirectory) {
+                guard archiveIsDirectory.boolValue else {
+                    throw TogentError.workspace("wechat 已存在但不是文件夹")
+                }
+                try validateArchiveDirectory(archiveURL, workspaceRoot: root)
+            } else {
+                try fileManager.createDirectory(
+                    at: archiveURL,
+                    withIntermediateDirectories: false,
+                    attributes: [.posixPermissions: NSNumber(value: 0o700)]
+                )
+            }
+            try fileManager.setAttributes(
+                [.posixPermissions: NSNumber(value: 0o700)],
+                ofItemAtPath: archiveURL.path
+            )
 
             let existingText: String
             if let previousAgentsData {
@@ -171,8 +198,10 @@ final class TogentWorkspaceService {
                 root: root,
                 agentsURL: agentsURL,
                 projectURL: projectURL,
+                archiveURL: archiveURL,
                 createdRoot: !rootExisted,
                 createdProject: !projectExisted,
+                createdArchive: !archiveExisted,
                 previousAgentsData: previousAgentsData,
                 createdAgents: !agentsExisted
             )
@@ -181,8 +210,10 @@ final class TogentWorkspaceService {
                 root: root,
                 agentsURL: agentsURL,
                 projectURL: projectURL,
+                archiveURL: archiveURL,
                 createdRoot: !rootExisted,
                 createdProject: !projectExisted,
+                createdArchive: !archiveExisted,
                 previousAgentsData: previousAgentsData,
                 createdAgents: !agentsExisted
             )
@@ -200,12 +231,31 @@ final class TogentWorkspaceService {
         } else if receipt.createdAgents {
             try? fileManager.removeItem(at: receipt.agentsURL)
         }
+        if receipt.createdArchive {
+            try? fileManager.removeItem(at: receipt.archiveURL)
+        }
         if receipt.createdProject {
             try? fileManager.removeItem(at: receipt.projectURL)
         }
         if receipt.createdRoot {
             try? fileManager.removeItem(at: receipt.root)
         }
+    }
+
+    func archiveDirectory(for role: TogentRole) throws -> URL {
+        let canonicalWorkspace = try canonicalPath(role.workspacePath)
+        guard canonicalWorkspace == role.workspacePath else {
+            throw TogentError.workspaceOutsideBoundary
+        }
+        let root = URL(fileURLWithPath: canonicalWorkspace, isDirectory: true)
+        let archive = root.appendingPathComponent("wechat", isDirectory: true)
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: archive.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            throw TogentError.workspace("角色 wechat 归档目录不存在")
+        }
+        try validateArchiveDirectory(archive, workspaceRoot: root)
+        return archive
     }
 
     func mergedAgents(existing: String, role: TogentRole) throws -> String {
@@ -237,8 +287,8 @@ final class TogentWorkspaceService {
     }
 
     private func managedBlock(role: TogentRole) -> String {
-        let archive = homeDirectory
-            .appendingPathComponent("Documents/wechat", isDirectory: true)
+        let archive = URL(fileURLWithPath: role.workspacePath, isDirectory: true)
+            .appendingPathComponent("wechat", isDirectory: true)
             .path
         let rolePrompt = role.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         return """
@@ -260,6 +310,21 @@ final class TogentWorkspaceService {
         \(rolePrompt.isEmpty ? "（未设置额外角色提示词）" : rolePrompt)
         \(Self.managedEnd)
         """
+    }
+
+    private func validateArchiveDirectory(
+        _ archive: URL,
+        workspaceRoot: URL
+    ) throws {
+        let values = try archive.resourceValues(forKeys: [.isSymbolicLinkKey])
+        guard values.isSymbolicLink != true else {
+            throw TogentError.workspaceOutsideBoundary
+        }
+        let canonicalArchive = try canonicalPath(archive.path)
+        guard canonicalArchive == archive.path,
+              Self.isDescendant(canonicalArchive, of: workspaceRoot.path) else {
+            throw TogentError.workspaceOutsideBoundary
+        }
     }
 
     private static func roleNumber(from name: String) -> Int? {
