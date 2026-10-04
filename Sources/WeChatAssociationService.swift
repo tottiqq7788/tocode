@@ -377,6 +377,19 @@ final class WeChatAssociationService: WeChatAssociationControlling {
         }
         defer { togent.endInbound(lease) }
 
+        let batchKey = WeChatDeduplication.batchKey(
+            for: message,
+            roleID: lease.roleID
+        )
+        let waitsForText = Self.isPureImageMessage(message)
+        togent.beginBatchIntake(batchKey: batchKey)
+        var batchWasRescheduled = false
+        defer {
+            if !batchWasRescheduled {
+                togent.resumeBatchAfterFailedIntake(batchKey: batchKey)
+            }
+        }
+
         let archiveReceipt = try await archiver.archive(
             message,
             receivedAt: receivedAt,
@@ -391,7 +404,9 @@ final class WeChatAssociationService: WeChatAssociationControlling {
                 deduplicationKey: key,
                 receivedAt: receivedAt,
                 lease: lease,
-                archiveReceipt: archiveReceipt
+                archiveReceipt: archiveReceipt,
+                batchKey: batchKey,
+                waitsForText: waitsForText
             )
         } catch {
             stagingError = error
@@ -417,10 +432,33 @@ final class WeChatAssociationService: WeChatAssociationControlling {
             return
         }
         do {
-            try togent.commitStagedInbound(deduplicationKey: key)
+            try togent.commitStagedInbound(
+                deduplicationKey: key,
+                deferForBatching: true
+            )
+            batchWasRescheduled = true
         } catch {
             togent.discardStagedInbound(deduplicationKey: key)
             await sendImmediateTogentError(error, for: message)
+        }
+    }
+
+    private static func isPureImageMessage(_ message: WeChatMessage) -> Bool {
+        !message.items.isEmpty && message.items.allSatisfy {
+            let directIsImageOnly = $0.imageItem != nil
+                && $0.textItem == nil
+                && $0.voiceItem == nil
+                && $0.fileItem == nil
+                && $0.videoItem == nil
+            guard directIsImageOnly,
+                  let quoted = $0.reference?.messageItem else {
+                return directIsImageOnly
+            }
+            return quoted.imageItem != nil
+                && quoted.textItem == nil
+                && quoted.voiceItem == nil
+                && quoted.fileItem == nil
+                && quoted.videoItem == nil
         }
     }
 

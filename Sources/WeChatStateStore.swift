@@ -149,6 +149,24 @@ enum WeChatDeduplication {
         return "content:\(sha256(fallback))"
     }
 
+    static func batchKey(for message: WeChatMessage, roleID: UUID) -> String {
+        let conversation: String
+        if message.groupID.isEmpty {
+            conversation = [
+                "direct",
+                message.fromUserID,
+                message.toUserID
+            ].joined(separator: "\u{1f}")
+        } else {
+            conversation = [
+                "group",
+                message.groupID,
+                message.fromUserID
+            ].joined(separator: "\u{1f}")
+        }
+        return "batch:\(sha256("\(roleID.uuidString)\u{1f}\(conversation)"))"
+    }
+
     private static func normalizedItem(_ item: WeChatItem) -> String {
         switch item.type {
         case 1:

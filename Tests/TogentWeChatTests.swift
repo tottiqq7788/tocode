@@ -1,6 +1,7 @@
 import Foundation
 import CoreGraphics
 import ImageIO
+import SQLite3
 import UniformTypeIdentifiers
 
 @MainActor
@@ -16,7 +17,9 @@ func testTogentWeChatArchiveQueueReplyIntegration() async {
         workspace: TogentWorkspaceService(homeDirectory: root),
         runtime: runtime,
         availableModelOptions: { models },
-        bootstrapDefaultRole: false
+        bootstrapDefaultRole: false,
+        messageBatchDebounce: 0.05,
+        imageCaptionTimeout: 0.2
     )
     var roleDraft = togent.newRoleDraft()
     roleDraft.name = "微信角色"
@@ -44,7 +47,7 @@ func testTogentWeChatArchiveQueueReplyIntegration() async {
     var archiveWasCompleteAtExecution = true
     runtime.onExecute = {
         archiveWasCompleteAtExecution = archiveWasCompleteAtExecution
-            && !archiver.messages.isEmpty
+            && archiver.messages.count == 2
     }
     let state = MemoryWeChatStateStore()
     let credential = WeChatCredential(
@@ -64,22 +67,28 @@ func testTogentWeChatArchiveQueueReplyIntegration() async {
     )
     weChat.startBoundListener()
     let completed = await waitForTogentCondition {
-        transport.sentTexts.count == 2
+        transport.sentTexts.count == 1
     }
     weChat.stop()
     togent.stop()
 
-    expect(completed, "两条普通微信消息都收到 Agent 最终回复")
+    expect(completed, "两条连续普通微信消息收到一次 Agent 最终回复")
     expect(archiver.messages == [first, second], "普通微信消息按顺序先归档")
     let roleArchive = URL(fileURLWithPath: role.workspacePath, isDirectory: true)
         .appendingPathComponent("wechat", isDirectory: true)
     expect(archiver.roots == [roleArchive, roleArchive], "同一角色消息只进入自己的归档根")
-    expect(archiveWasCompleteAtExecution, "每次 Togent 执行都发生在入站归档之后")
-    expect(runtime.executions.count == 2, "普通消息调用几次就执行几次且不合并")
-    expect(runtime.executions[0].1.contains("第一条任务"), "第一条微信任务先进入 Pi")
-    expect(runtime.executions[1].1.contains("第二条任务"), "第二条微信任务后进入 Pi")
-    expect(transport.sentTexts.map(\.text) == ["Agent 完成", "Agent 完成"],
-           "只发送 agent settled 后的最终文本")
+    expect(archiveWasCompleteAtExecution, "合并执行发生在全部成员消息归档之后")
+    expect(runtime.executions.count == 1, "静默窗口内连续消息只调用一次 Agent")
+    let mergedPrompt = runtime.executions[0].1
+    expect(
+        mergedPrompt.contains("第一条任务")
+            && mergedPrompt.contains("第二条任务")
+            && mergedPrompt.range(of: "第一条任务")!.lowerBound
+                < mergedPrompt.range(of: "第二条任务")!.lowerBound,
+        "连续消息按接收顺序合并进入同一 Pi prompt"
+    )
+    expect(transport.sentTexts.map(\.text) == ["Agent 完成"],
+           "合并批次只发送一次 agent settled 最终文本")
     let completedJobs = try! store.jobs()
     expect(completedJobs.allSatisfy { $0.state == .completed },
            "成功回复后持久任务全部收口 completed")
@@ -87,6 +96,162 @@ func testTogentWeChatArchiveQueueReplyIntegration() async {
         $0.fromUserID.isEmpty && $0.contextToken.isEmpty && $0.messageText.isEmpty
     }, "回复结果持久化后清除已完成任务载荷")
     expect(state.state.cursor == "cursor-2", "staged 后持久化微信 cursor")
+
+    let imageRoot = makeTogentTemporaryDirectory("wechat-image-batch")
+    defer { try? FileManager.default.removeItem(at: imageRoot) }
+    let imageStore = TogentStore(
+        databaseURL: imageRoot.appendingPathComponent("togent.sqlite")
+    )
+    let imageRuntime = StubTogentRuntime()
+    imageRuntime.result = .success("批次完成")
+    let imageTogent = TogentService(
+        store: imageStore,
+        workspace: TogentWorkspaceService(homeDirectory: imageRoot),
+        runtime: imageRuntime,
+        availableModelOptions: { models },
+        bootstrapDefaultRole: false,
+        messageBatchDebounce: 0.03,
+        imageCaptionTimeout: 0.5
+    )
+    var imageReplies: [String] = []
+    imageTogent.replyHandler = { _, text in imageReplies.append(text) }
+    var imageRoleDraft = imageTogent.newRoleDraft()
+    imageRoleDraft.name = "图片等待角色"
+    imageRoleDraft.publishedModelID = "model-a"
+    let imageRole = try! imageTogent.createRole(from: imageRoleDraft)
+
+    func stage(
+        _ message: WeChatMessage,
+        key: String,
+        waitsForText: Bool
+    ) throws {
+        let lease = try imageTogent.beginInbound()!
+        let batchKey = WeChatDeduplication.batchKey(
+            for: message,
+            roleID: imageRole.id
+        )
+        imageTogent.beginBatchIntake(batchKey: batchKey)
+        try imageTogent.stageInbound(
+            message: message,
+            deduplicationKey: key,
+            receivedAt: Date(),
+            lease: lease,
+            batchKey: batchKey,
+            waitsForText: waitsForText
+        )
+        imageTogent.endInbound(lease)
+        try imageTogent.commitStagedInbound(
+            deduplicationKey: key,
+            deferForBatching: true
+        )
+    }
+
+    let waitingImage = WeChatMessage(
+        fromUserID: "image-user",
+        contextToken: "image-context-1",
+        messageID: "image-only-1",
+        items: [WeChatItem(type: 2, imageItem: WeChatImageItem(url: "image-1"))]
+    )
+    let directBatchKey = WeChatDeduplication.batchKey(
+        for: waitingImage,
+        roleID: imageRole.id
+    )
+    let groupBatchKey = WeChatDeduplication.batchKey(
+        for: WeChatMessage(
+            fromUserID: "image-user",
+            contextToken: "group-context",
+            groupID: "group-a",
+            messageID: "group-message",
+            items: waitingImage.items
+        ),
+        roleID: imageRole.id
+    )
+    expect(
+        directBatchKey != groupBatchKey
+            && directBatchKey
+                != WeChatDeduplication.batchKey(
+                    for: waitingImage,
+                    roleID: UUID()
+                )
+            && !directBatchKey.contains("image-user"),
+        "批次键隔离会话和角色，且不持久化明文发送者"
+    )
+    try! stage(waitingImage, key: "image-only-1", waitsForText: true)
+    try? await Task.sleep(nanoseconds: 100_000_000)
+    expect(imageRuntime.executions.isEmpty, "纯图片超过普通静默窗口仍不调用 Agent")
+
+    let secondWaitingImage = WeChatMessage(
+        fromUserID: "image-user",
+        contextToken: "image-context-2",
+        messageID: "image-only-2",
+        items: [WeChatItem(type: 2, imageItem: WeChatImageItem(url: "image-2"))]
+    )
+    try! stage(secondWaitingImage, key: "image-only-2", waitsForText: true)
+    try? await Task.sleep(nanoseconds: 60_000_000)
+    expect(imageRuntime.executions.isEmpty, "连续多张纯图片仍等待同批次后续文字")
+
+    let otherUserText = WeChatMessage(
+        fromUserID: "other-user",
+        contextToken: "other-context",
+        messageID: "other-text",
+        items: [WeChatItem(
+            type: 1,
+            textItem: WeChatTextItem(text: "另一个用户的任务")
+        )]
+    )
+    try! stage(otherUserText, key: "other-text", waitsForText: false)
+    let otherCompleted = await waitForTogentCondition {
+        imageRuntime.executions.count == 1
+    }
+    expect(otherCompleted, "不同发送者的文字批次独立执行")
+    expect(
+        imageRuntime.executions[0].1.contains("另一个用户的任务")
+            && !imageRuntime.executions[0].1.contains("图片消息"),
+        "不同发送者不会与等待中的图片合并"
+    )
+
+    let imageCaption = WeChatMessage(
+        fromUserID: "image-user",
+        contextToken: "image-context-3",
+        messageID: "image-caption",
+        items: [WeChatItem(
+            type: 1,
+            textItem: WeChatTextItem(text: "请分析刚才的图片")
+        )]
+    )
+    try! stage(imageCaption, key: "image-caption", waitsForText: false)
+    let imageCompleted = await waitForTogentCondition {
+        imageRuntime.executions.count == 2
+    }
+    expect(imageCompleted, "图片收到同一用户后续文字后执行")
+    expect(
+        imageRuntime.executions[1].1
+            .components(separatedBy: "（图片消息，详情见微信归档）").count == 3
+            && imageRuntime.executions[1].1.contains("请分析刚才的图片"),
+        "多张图片与后续文字有序合并为一次 Agent prompt"
+    )
+
+    let expiringImage = WeChatMessage(
+        fromUserID: "expired-user",
+        contextToken: "expired-context",
+        messageID: "expired-image",
+        items: [WeChatItem(type: 2, imageItem: WeChatImageItem(url: "image-expired"))]
+    )
+    try! stage(expiringImage, key: "expired-image", waitsForText: true)
+    try? await Task.sleep(nanoseconds: 650_000_000)
+    expect(imageRuntime.executions.count == 2, "纯图片等待超时不调用 Agent")
+    expect(imageReplies.count == 2, "纯图片等待超时不发送微信回复")
+    let imageJobs = try! imageStore.jobs()
+    expect(
+        imageJobs.allSatisfy {
+            $0.state == .completed
+                && $0.fromUserID.isEmpty
+                && $0.contextToken.isEmpty
+                && $0.messageText.isEmpty
+        },
+        "合并成员与过期图片均保留 dedupe 记录并清除敏感载荷"
+    )
+    imageTogent.stop()
 }
 
 @MainActor
@@ -101,7 +266,9 @@ func testTogentWeChatNoRoleAndDuplicateFaults() async {
         workspace: TogentWorkspaceService(homeDirectory: root),
         runtime: runtime,
         availableModelOptions: { models },
-        bootstrapDefaultRole: false
+        bootstrapDefaultRole: false,
+        messageBatchDebounce: 0.03,
+        imageCaptionTimeout: 0.15
     )
     let message = WeChatMessage(
         fromUserID: "user",
@@ -405,6 +572,53 @@ func testTogentDefaultRoleModelGateAndRoleArchiveRouting() async {
 
 @MainActor
 func testTogentTwoPhaseRecoveryAndStateFailure() async {
+    let migrationRoot = makeTogentTemporaryDirectory("batch-migration")
+    defer { try? FileManager.default.removeItem(at: migrationRoot) }
+    let migrationURL = migrationRoot.appendingPathComponent("togent.sqlite")
+    var legacyDatabase: OpaquePointer?
+    let openedLegacy = sqlite3_open(migrationURL.path, &legacyDatabase) == SQLITE_OK
+    expect(openedLegacy, "可创建旧版 Togent 数据库迁移夹具")
+    if let legacyDatabase {
+        let legacyID = UUID().uuidString
+        let timestamp = Date().timeIntervalSince1970
+        let script = """
+        CREATE TABLE jobs (
+            id TEXT PRIMARY KEY,
+            dedupe_key TEXT NOT NULL UNIQUE,
+            role_id TEXT,
+            from_user_id TEXT NOT NULL,
+            context_token TEXT NOT NULL,
+            message_text TEXT NOT NULL,
+            received_at REAL NOT NULL,
+            state TEXT NOT NULL,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        );
+        INSERT INTO jobs
+        (id, dedupe_key, role_id, from_user_id, context_token, message_text,
+         received_at, state, attempt_count, last_error, created_at, updated_at)
+        VALUES
+        ('\(legacyID)', 'legacy-staged', NULL, 'legacy-user', 'legacy-context',
+         '旧版待恢复消息', \(timestamp), 'staged', 0, NULL, \(timestamp), \(timestamp));
+        """
+        expect(
+            sqlite3_exec(legacyDatabase, script, nil, nil, nil) == SQLITE_OK,
+            "旧版 jobs 表夹具写入成功"
+        )
+        sqlite3_close(legacyDatabase)
+    }
+    let migratedStore = TogentStore(databaseURL: migrationURL)
+    let migrationPending = try? migratedStore.reconcileStagedJobs(
+        committedKeys: ["legacy-staged"]
+    )
+    expect(
+        migrationPending?.isEmpty == true
+            && (try? migratedStore.nextQueuedJob())?.deduplicationKey == "legacy-staged",
+        "旧数据库自动补齐批次列且旧 staged job 独立恢复"
+    )
+
     let root = makeTogentTemporaryDirectory("recovery")
     defer { try? FileManager.default.removeItem(at: root) }
     let store = TogentStore(databaseURL: root.appendingPathComponent("togent.sqlite"))
@@ -416,7 +630,9 @@ func testTogentTwoPhaseRecoveryAndStateFailure() async {
         workspace: workspace,
         runtime: runtime,
         availableModelOptions: { models },
-        bootstrapDefaultRole: false
+        bootstrapDefaultRole: false,
+        messageBatchDebounce: 0.03,
+        imageCaptionTimeout: 0.15
     )
     var draft = togent.newRoleDraft()
     draft.name = "恢复角色"
@@ -427,9 +643,19 @@ func testTogentTwoPhaseRecoveryAndStateFailure() async {
         deduplicationKey: "committed",
         roleID: role.id,
         fromUserID: "user",
-        contextToken: "context",
-        messageText: "恢复我",
-        receivedAt: Date()
+        contextToken: "context-1",
+        messageText: "恢复第一条",
+        receivedAt: Date(),
+        batchKey: "recovery-batch"
+    )
+    _ = try! store.stageJob(
+        deduplicationKey: "committed-2",
+        roleID: role.id,
+        fromUserID: "user",
+        contextToken: "context-2",
+        messageText: "恢复第二条",
+        receivedAt: Date(),
+        batchKey: "recovery-batch"
     )
     _ = try! store.stageJob(
         deduplicationKey: "uncommitted",
@@ -437,16 +663,51 @@ func testTogentTwoPhaseRecoveryAndStateFailure() async {
         fromUserID: "user",
         contextToken: "context",
         messageText: "不要执行",
-        receivedAt: Date()
+        receivedAt: Date(),
+        batchKey: "recovery-batch"
+    )
+    _ = try! store.stageJob(
+        deduplicationKey: "committed-image",
+        roleID: role.id,
+        fromUserID: "image-user",
+        contextToken: "image-context",
+        messageText: "（图片消息，详情见微信归档）",
+        receivedAt: Date(),
+        batchKey: "recovery-image-batch",
+        waitsForText: true
     )
     var replies: [String] = []
     togent.replyHandler = { _, text in replies.append(text) }
-    togent.recover(committedDeduplicationKeys: ["committed"])
+    togent.recover(
+        committedDeduplicationKeys: [
+            "committed",
+            "committed-2",
+            "committed-image"
+        ]
+    )
     _ = await waitForTogentCondition { replies.count == 1 }
-    expect(runtime.executions.count == 1, "重启只恢复已提交微信去重状态的 staged job")
-    expect(runtime.executions.first?.1.contains("恢复我") == true, "恢复任务保留原消息")
+    expect(runtime.executions.count == 1, "重启把已提交的普通 staged 批次恢复为一次调用")
+    expect(
+        runtime.executions.first?.1.contains("恢复第一条") == true
+            && runtime.executions.first?.1.contains("恢复第二条") == true
+            && runtime.executions.first!.1.range(of: "恢复第一条")!.lowerBound
+                < runtime.executions.first!.1.range(of: "恢复第二条")!.lowerBound,
+        "恢复批次保留已提交成员及接收顺序"
+    )
     expect(!(try! store.jobs()).contains { $0.deduplicationKey == "uncommitted" },
            "未提交微信状态的 staged job 在恢复时删除")
+    try? await Task.sleep(nanoseconds: 250_000_000)
+    expect(runtime.executions.count == 1, "重启恢复的纯图片等待超时仍不调用 Agent")
+    let recoveredImage = (try! store.jobs()).first {
+        $0.deduplicationKey == "committed-image"
+    }
+    expect(
+        recoveredImage?.state == .completed
+            && recoveredImage?.fromUserID.isEmpty == true
+            && recoveredImage?.contextToken.isEmpty == true
+            && recoveredImage?.messageText.isEmpty == true,
+        "重启恢复的纯图片超时后保留去重记录并清除载荷"
+    )
     togent.stop()
 
     let failureRoot = makeTogentTemporaryDirectory("state-failure")
@@ -460,13 +721,45 @@ func testTogentTwoPhaseRecoveryAndStateFailure() async {
         workspace: TogentWorkspaceService(homeDirectory: failureRoot),
         runtime: failureRuntime,
         availableModelOptions: { models },
-        bootstrapDefaultRole: false
+        bootstrapDefaultRole: false,
+        messageBatchDebounce: 0.2,
+        imageCaptionTimeout: 0.2
     )
     var failureDraft = failureService.newRoleDraft()
     failureDraft.name = "失败角色"
     failureDraft.publishedModelID = "model-a"
-    _ = try! failureService.createRole(from: failureDraft)
-    let state = MemoryWeChatStateStore()
+    let failureRole = try! failureService.createRole(from: failureDraft)
+    let priorMessage = WeChatMessage(
+        fromUserID: "user",
+        contextToken: "prior-context",
+        messageID: "prior-message",
+        items: [WeChatItem(
+            type: 1,
+            textItem: WeChatTextItem(text: "状态失败前的已提交消息")
+        )]
+    )
+    let priorBatchKey = WeChatDeduplication.batchKey(
+        for: priorMessage,
+        roleID: failureRole.id
+    )
+    let priorLease = try! failureService.beginInbound()!
+    failureService.beginBatchIntake(batchKey: priorBatchKey)
+    try! failureService.stageInbound(
+        message: priorMessage,
+        deduplicationKey: "prior-message",
+        receivedAt: Date(),
+        lease: priorLease,
+        batchKey: priorBatchKey
+    )
+    failureService.endInbound(priorLease)
+    try! failureService.commitStagedInbound(
+        deduplicationKey: "prior-message",
+        deferForBatching: true
+    )
+    let state = MemoryWeChatStateStore(WeChatReceiveState(
+        cursor: "",
+        recentKeys: ["prior-message"]
+    ))
     state.saveError = TestWeChatError.forced
     let message = WeChatMessage(
         fromUserID: "user",
@@ -496,12 +789,30 @@ func testTogentTwoPhaseRecoveryAndStateFailure() async {
     weChat.startBoundListener()
     _ = await waitForTogentCondition {
         transport.updateCursors.count >= 2
+            && failureRuntime.executions.count == 1
+            && (try? failureStore.jobs())?.allSatisfy {
+                $0.state == .completed
+            } == true
     }
     weChat.stop()
     failureService.stop()
     expect(archiver.messages.count == 1, "微信状态失败前归档已完成")
-    expect(failureRuntime.executions.isEmpty, "微信状态保存失败不调用 Agent")
-    expect((try! failureStore.jobs()).isEmpty, "微信状态保存失败回滚 staged job")
+    let stateFailurePrompts = failureRuntime.executions.map(\.1)
+    let stateFailureJobs = try! failureStore.jobs()
+    expect(stateFailurePrompts.count == 1, "微信状态保存失败后旧批次只执行一次")
+    expect(
+        stateFailurePrompts.first?.contains("状态失败前的已提交消息") == true,
+        "微信状态保存失败后恢复旧批次正文"
+    )
+    expect(
+        stateFailurePrompts.allSatisfy { !$0.contains("不应执行") },
+        "微信状态保存失败的本次消息绝不污染 Agent prompt"
+    )
+    expect(stateFailureJobs.count == 1, "微信状态保存失败回滚本次 staged 成员")
+    expect(
+        stateFailureJobs.first?.deduplicationKey == "prior-message",
+        "微信状态保存失败保留旧批次去重记录"
+    )
 }
 
 @MainActor
@@ -523,18 +834,50 @@ func testTogentArchiveReplyModelAndCrashFaults() async {
         workspace: TogentWorkspaceService(homeDirectory: archiveRoot),
         runtime: archiveRuntime,
         availableModelOptions: { models },
-        bootstrapDefaultRole: false
+        bootstrapDefaultRole: false,
+        messageBatchDebounce: 0.2,
+        imageCaptionTimeout: 0.2
     )
     var archiveDraft = archiveTogent.newRoleDraft()
     archiveDraft.name = "归档故障"
     archiveDraft.publishedModelID = "model-a"
-    _ = try! archiveTogent.createRole(from: archiveDraft)
+    let archiveRole = try! archiveTogent.createRole(from: archiveDraft)
+    let archivePriorMessage = WeChatMessage(
+        fromUserID: "user",
+        contextToken: "archive-prior-context",
+        messageID: "archive-prior",
+        items: [WeChatItem(
+            type: 1,
+            textItem: WeChatTextItem(text: "归档失败前的已提交消息")
+        )]
+    )
+    let archiveBatchKey = WeChatDeduplication.batchKey(
+        for: archivePriorMessage,
+        roleID: archiveRole.id
+    )
+    let archivePriorLease = try! archiveTogent.beginInbound()!
+    archiveTogent.beginBatchIntake(batchKey: archiveBatchKey)
+    try! archiveTogent.stageInbound(
+        message: archivePriorMessage,
+        deduplicationKey: "archive-prior",
+        receivedAt: Date(),
+        lease: archivePriorLease,
+        batchKey: archiveBatchKey
+    )
+    archiveTogent.endInbound(archivePriorLease)
+    try! archiveTogent.commitStagedInbound(
+        deduplicationKey: "archive-prior",
+        deferForBatching: true
+    )
     let archiveTransport = MockWeChatTransport()
     archiveTransport.updates = [
         .success(WeChatUpdates(messages: [message], cursor: "must-not-advance")),
         .failure(CancellationError())
     ]
-    let archiveState = MemoryWeChatStateStore()
+    let archiveState = MemoryWeChatStateStore(WeChatReceiveState(
+        cursor: "",
+        recentKeys: ["archive-prior"]
+    ))
     let failingArchiver = MockWeChatArchiver()
     failingArchiver.error = WeChatArchiveError.appendLog
     let archiveWeChat = WeChatAssociationService(
@@ -551,12 +894,36 @@ func testTogentArchiveReplyModelAndCrashFaults() async {
         togent: archiveTogent
     )
     archiveWeChat.startBoundListener()
-    _ = await waitForTogentCondition { archiveTransport.updateCursors.count >= 2 }
+    _ = await waitForTogentCondition {
+        archiveTransport.updateCursors.count >= 2
+            && archiveRuntime.executions.count == 1
+            && (try? archiveStore.jobs())?.allSatisfy {
+                $0.state == .completed
+            } == true
+    }
     archiveWeChat.stop()
     archiveTogent.stop()
-    expect(archiveRuntime.executions.isEmpty, "归档失败绝不调用 Agent")
-    expect((try! archiveStore.jobs()).isEmpty, "归档失败不创建持久任务")
-    expect(archiveState.state.recentKeys.isEmpty, "归档失败不推进微信去重状态")
+    let archiveFailurePrompts = archiveRuntime.executions.map(\.1)
+    let archiveFailureJobs = try! archiveStore.jobs()
+    expect(archiveFailurePrompts.count == 1, "归档失败后旧批次只执行一次")
+    expect(
+        archiveFailurePrompts.first?.contains("归档失败前的已提交消息") == true,
+        "本次归档失败后恢复已提交旧批次正文"
+    )
+    expect(
+        archiveFailurePrompts.allSatisfy { !$0.contains("故障任务") },
+        "本次归档失败消息绝不进入 Agent prompt"
+    )
+    expect(archiveFailureJobs.count == 1, "归档失败不创建本次持久任务")
+    expect(
+        archiveFailureJobs.first?.deduplicationKey == "archive-prior",
+        "归档失败不破坏旧批次去重记录"
+    )
+    expect(
+        archiveState.state.cursor.isEmpty
+            && archiveState.state.recentKeys == ["archive-prior"],
+        "归档失败保留旧去重状态且不推进本次消息"
+    )
 
     let replyRoot = makeTogentTemporaryDirectory("reply-fault")
     defer { try? FileManager.default.removeItem(at: replyRoot) }
@@ -761,15 +1128,33 @@ func testTogentWeChatRealPiEndToEnd() async {
         vault: ModelRelayLocalKeyVault(iterations: 1),
         internalCredentialDigest: ModelRelayLocalKeyVault.digest(relayToken)
     )
-    let expectedAttachmentPath = "wechat/261005/101112_123_01_image.jpg"
+    let expectedAttachmentPaths = [
+        "wechat/261005/101112_123_01_image.jpg",
+        "wechat/261005/101112_123_01_image_2.jpg"
+    ]
+    let expectedAttachmentPath = expectedAttachmentPaths[0]
     let observationLock = NSLock()
     var initialPromptUsedExactPath = false
+    var initialPromptUsedBatchOrder = false
+    var initialPromptCount = 0
     var sawImageURL = false
     var textModelOmittedImage = false
-    func observationSnapshot() -> (promptPathOK: Bool, imageForwarded: Bool, textOmitted: Bool) {
+    func observationSnapshot() -> (
+        promptPathOK: Bool,
+        batchOrderOK: Bool,
+        initialCount: Int,
+        imageForwarded: Bool,
+        textOmitted: Bool
+    ) {
         observationLock.lock()
         defer { observationLock.unlock() }
-        return (initialPromptUsedExactPath, sawImageURL, textModelOmittedImage)
+        return (
+            initialPromptUsedExactPath,
+            initialPromptUsedBatchOrder,
+            initialPromptCount,
+            sawImageURL,
+            textModelOmittedImage
+        )
     }
     ModelRelayURLProtocol.reset { request in
         let bodyData = modelRelayURLRequestBody(request)
@@ -784,12 +1169,19 @@ func testTogentWeChatRealPiEndToEnd() async {
             sawImageURL = true
         } else if upstreamModel == "wechat-text-upstream" && containsToolResult {
             textModelOmittedImage = true
-        } else if !(upstreamModel == "wechat-upstream-model" && containsToolResult) {
+        } else if upstreamModel == "wechat-upstream-model" && !containsToolResult {
+            initialPromptCount += 1
+            let normalizedBody = bodyText.replacingOccurrences(of: "\\/", with: "/")
             initialPromptUsedExactPath = initialPromptUsedExactPath
-                || (bodyText
-                    .replacingOccurrences(of: "\\/", with: "/")
-                    .contains(expectedAttachmentPath)
+                || (expectedAttachmentPaths.allSatisfy { normalizedBody.contains($0) }
                     && !bodyText.contains("data:image"))
+            if let firstPath = normalizedBody.range(of: expectedAttachmentPaths[0]),
+               let secondPath = normalizedBody.range(of: expectedAttachmentPaths[1]),
+               let caption = normalizedBody.range(of: "请识别刚才的两张图片") {
+                initialPromptUsedBatchOrder = initialPromptUsedBatchOrder
+                    || (firstPath.lowerBound < secondPath.lowerBound
+                        && secondPath.lowerBound < caption.lowerBound)
+            }
         }
         observationLock.unlock()
 
@@ -918,7 +1310,10 @@ func testTogentWeChatRealPiEndToEnd() async {
         workspace: TogentWorkspaceService(homeDirectory: root),
         runtime: runtime,
         availableModelOptions: { [model] },
-        bootstrapDefaultRole: false
+        bootstrapDefaultRole: false,
+        now: { Date(timeIntervalSince1970: 0) },
+        messageBatchDebounce: 0.05,
+        imageCaptionTimeout: 5
     )
     var roleDraft = togent.newRoleDraft()
     roleDraft.name = "微信真 Pi 角色"
@@ -962,20 +1357,32 @@ func testTogentWeChatRealPiEndToEnd() async {
         encryptQueryParameter: "wechat-e2e-image",
         aesKey: Data(repeating: 1, count: 16).base64EncodedString()
     )
-    let message = WeChatMessage(
+    let firstImageMessage = WeChatMessage(
         fromUserID: "wechat-e2e-user",
-        contextToken: "wechat-e2e-context",
-        messageID: "wechat-e2e-message",
-        items: [
-            WeChatItem(
-                type: 1,
-                textItem: WeChatTextItem(text: "请识别这张图片")
-            ),
-            WeChatItem(
-                type: 2,
-                imageItem: WeChatImageItem(media: imageMedia)
-            )
-        ]
+        contextToken: "wechat-e2e-image-context-1",
+        messageID: "wechat-e2e-image-1",
+        items: [WeChatItem(
+            type: 2,
+            imageItem: WeChatImageItem(media: imageMedia)
+        )]
+    )
+    let secondImageMessage = WeChatMessage(
+        fromUserID: "wechat-e2e-user",
+        contextToken: "wechat-e2e-image-context-2",
+        messageID: "wechat-e2e-image-2",
+        items: [WeChatItem(
+            type: 2,
+            imageItem: WeChatImageItem(media: imageMedia)
+        )]
+    )
+    let captionMessage = WeChatMessage(
+        fromUserID: "wechat-e2e-user",
+        contextToken: "wechat-e2e-caption-context",
+        messageID: "wechat-e2e-caption",
+        items: [WeChatItem(
+            type: 1,
+            textItem: WeChatTextItem(text: "请识别刚才的两张图片")
+        )]
     )
     let transport = MockWeChatTransport()
     let imageData = NSMutableData()
@@ -1006,7 +1413,10 @@ func testTogentWeChatRealPiEndToEnd() async {
     expect(CGImageDestinationFinalize(imageDestination), "图片 E2E 生成有效 JPEG")
     transport.mediaResult = .success(imageData as Data)
     transport.updates = [
-        .success(WeChatUpdates(messages: [message], cursor: "wechat-e2e-cursor")),
+        .success(WeChatUpdates(
+            messages: [firstImageMessage, secondImageMessage, captionMessage],
+            cursor: "wechat-e2e-cursor"
+        )),
         .failure(CancellationError())
     ]
     let archiver = WeChatArchiveService(
@@ -1035,21 +1445,45 @@ func testTogentWeChatRealPiEndToEnd() async {
     await togent.stopAndWait()
 
     expect(completed, "假 iLink 图片经真实归档、真 Pi 与 Relay 收到最终回复")
-    let archivedImage = URL(
-        fileURLWithPath: role.workspacePath,
-        isDirectory: true
-    ).appendingPathComponent(expectedAttachmentPath)
+    let archivedImages = expectedAttachmentPaths.map { relativePath in
+        URL(
+            fileURLWithPath: role.workspacePath,
+            isDirectory: true
+        ).appendingPathComponent(relativePath)
+    }
     expect(
-        FileManager.default.fileExists(atPath: archivedImage.path),
-        "完整图片 E2E 在 Agent 执行前真实落盘到当前角色归档"
+        archivedImages.allSatisfy { FileManager.default.fileExists(atPath: $0.path) },
+        "完整图片 E2E 在 Agent 执行前把两张图片分别落盘到当前角色归档"
+    )
+    let archiveMarkdown = try? String(
+        contentsOf: URL(
+            fileURLWithPath: role.workspacePath,
+            isDirectory: true
+        ).appendingPathComponent("wechat/261005/wechat261005.md"),
+        encoding: .utf8
     )
     expect(
-        transport.sentTexts.first?.text == "微信图片识别链路完成",
-        "完整图片 E2E 只回复真 Pi 的 agent settled 最终文本"
+        archiveMarkdown?.contains("请识别刚才的两张图片") == true
+            && expectedAttachmentPaths.allSatisfy {
+                archiveMarkdown?.contains(URL(fileURLWithPath: $0).lastPathComponent) == true
+            },
+        "三条原始消息仍逐条写入真实微信归档"
     )
     expect(
-        (try? store.jobs().first?.state) == .completed,
-        "完整 E2E 持久任务收口 completed"
+        transport.sentTexts.first?.text == "微信图片识别链路完成"
+            && transport.sentTexts.first?.contextToken == "wechat-e2e-caption-context",
+        "连续图片与文字只向最后会话上下文回复一次真 Pi 最终文本"
+    )
+    let completedJobs = (try? store.jobs()) ?? []
+    expect(
+        completedJobs.count == 3
+            && completedJobs.allSatisfy {
+                $0.state == .completed
+                    && $0.fromUserID.isEmpty
+                    && $0.contextToken.isEmpty
+                    && $0.messageText.isEmpty
+            },
+        "完整 E2E 的三个独立去重成员收口并清除载荷"
     )
     let rewrittenModel = ModelRelayURLProtocol.requests.contains { request in
         guard let body = try? JSONSerialization.jsonObject(
@@ -1063,7 +1497,11 @@ func testTogentWeChatRealPiEndToEnd() async {
     let imageObservation = observationSnapshot()
     expect(
         imageObservation.promptPathOK,
-        "真 Pi 初始任务只收到精确相对附件路径，不含图片正文/base64"
+        "真 Pi 合并任务只收到两张图片的精确相对路径，不含图片正文/base64"
+    )
+    expect(
+        imageObservation.batchOrderOK && imageObservation.initialCount == 1,
+        "连续两图加文字按接收顺序形成一个真 Pi 初始 prompt"
     )
     expect(imageObservation.imageForwarded, "真 Pi 调用 read 后 Relay 透明转发 image_url")
 

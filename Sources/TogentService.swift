@@ -4,13 +4,34 @@ import Foundation
 final class TogentService {
     typealias ReplyHandler = @MainActor (TogentJob, String) async throws -> Void
 
+    private struct ScheduledBatchTask {
+        let id: UUID
+        let task: Task<Void, Never>
+    }
+
+    static let defaultRoleName = "default"
+    static let defaultRolePrompt = """
+    你是 default，一个运行在 Tocode / Togent 中的虚构 AI 角色。你的人格设定是一名 20 岁的中国女大学生，中文名“林知夏”，就读计算机科学相关专业。你不是现实人物；不得声称拥有真实学校、联系方式、住址、社交账号或线下经历。
+
+    - 默认使用简体中文，语气自然、友善、耐心、清晰，可以体现年轻大学生的亲和力，但不能为了角色扮演牺牲事实准确性和任务质量。
+    - 在合法、安全、尊重隐私且当前权限允许的范围内，以完成用户任务为最高优先级。先理解目标、约束与交付物；信息确实不足时再提出精简问题。
+    - 对可以直接执行的任务，应主动使用可用工具完成、检查并汇报结果，而不是只给步骤或泛泛建议。
+    - 创建软件或独立工作时，遵循当前工作区 AGENTS.md，把内容分类到 `project/` 下相互隔离的目录，并维护必要的本地 Git 与项目说明。
+    - 不确定时明确说明并先验证；不得编造已经执行、已经验证或现实世界中发生过的事情。
+    - 用户要求与系统安全、授权范围或工作区治理冲突时，说明具体限制，并在允许范围内提供最接近目标的可行方案。
+    """
+
     private let store: TogentStore
     private let workspace: TogentWorkspaceService
     private let runtime: TogentRuntimeExecuting
     private let availableModelOptions: () -> [TogentModelOption]
     private let relayFingerprint: () -> String
+    private let now: () -> Date
+    private let messageBatchDebounce: TimeInterval
+    private let imageCaptionTimeout: TimeInterval
     private var observedRelayFingerprint: String?
     private var workerTask: Task<Void, Never>?
+    private var scheduledBatchTasks: [String: ScheduledBatchTask] = [:]
     private var inboundLeaseRoles: [UUID: TogentRole] = [:]
     private(set) var startupError: Error?
 
@@ -23,13 +44,19 @@ final class TogentService {
         runtime: TogentRuntimeExecuting,
         availableModelOptions: @escaping () -> [TogentModelOption],
         relayFingerprint: @escaping () -> String = { "" },
-        bootstrapDefaultRole: Bool = true
+        bootstrapDefaultRole: Bool = true,
+        now: @escaping () -> Date = Date.init,
+        messageBatchDebounce: TimeInterval = 2,
+        imageCaptionTimeout: TimeInterval = 120
     ) {
         self.store = store
         self.workspace = workspace
         self.runtime = runtime
         self.availableModelOptions = availableModelOptions
         self.relayFingerprint = relayFingerprint
+        self.now = now
+        self.messageBatchDebounce = max(0, messageBatchDebounce)
+        self.imageCaptionTimeout = max(0, imageCaptionTimeout)
         observedRelayFingerprint = nil
         do {
             try store.recoverInterruptedJobs()
@@ -166,12 +193,28 @@ final class TogentService {
         inboundLeaseRoles.removeValue(forKey: lease.id)
     }
 
+    func beginBatchIntake(batchKey: String) {
+        scheduledBatchTasks.removeValue(forKey: batchKey)?.task.cancel()
+    }
+
+    func resumeBatchAfterFailedIntake(batchKey: String) {
+        do {
+            if let status = try store.stagedBatchStatus(batchKey: batchKey) {
+                scheduleBatch(status)
+            }
+        } catch {
+            startupError = error
+        }
+    }
+
     func stageInbound(
         message: WeChatMessage,
         deduplicationKey: String,
         receivedAt: Date,
         lease: TogentInboundLease,
-        archiveReceipt: WeChatArchiveReceipt = .empty
+        archiveReceipt: WeChatArchiveReceipt = .empty,
+        batchKey: String = "",
+        waitsForText: Bool = false
     ) throws {
         try checkStartup()
         guard let leasedRole = inboundLeaseRoles[lease.id],
@@ -192,13 +235,27 @@ final class TogentService {
                 message,
                 attachmentPaths: attachmentPaths
             ),
-            receivedAt: receivedAt
+            receivedAt: receivedAt,
+            batchKey: batchKey,
+            waitsForText: waitsForText
         )
     }
 
-    func commitStagedInbound(deduplicationKey: String) throws {
-        try store.queueStagedJob(deduplicationKey: deduplicationKey)
-        startWorkerIfNeeded()
+    func commitStagedInbound(
+        deduplicationKey: String,
+        deferForBatching: Bool = false
+    ) throws {
+        guard deferForBatching else {
+            try store.queueStagedJob(deduplicationKey: deduplicationKey)
+            startWorkerIfNeeded()
+            return
+        }
+        guard let status = try store.stagedBatchStatus(
+            deduplicationKey: deduplicationKey
+        ) else {
+            throw TogentError.database("待提交的微信消息批次不存在")
+        }
+        scheduleBatch(status)
     }
 
     func discardStagedInbound(deduplicationKey: String) {
@@ -208,7 +265,12 @@ final class TogentService {
     func recover(committedDeduplicationKeys: Set<String>) {
         do {
             try store.recoverInterruptedJobs()
-            try store.reconcileStagedJobs(committedKeys: committedDeduplicationKeys)
+            let pending = try store.reconcileStagedJobs(
+                committedKeys: committedDeduplicationKeys
+            )
+            for status in pending {
+                scheduleBatch(status)
+            }
             startWorkerIfNeeded()
         } catch {
             startupError = error
@@ -216,6 +278,9 @@ final class TogentService {
     }
 
     func stop() {
+        let batches = Array(scheduledBatchTasks.values)
+        scheduledBatchTasks.removeAll()
+        batches.forEach { $0.task.cancel() }
         workerTask?.cancel()
         workerTask = nil
         Task { [runtime] in
@@ -224,9 +289,15 @@ final class TogentService {
     }
 
     func stopAndWait() async {
+        let batches = Array(scheduledBatchTasks.values)
+        scheduledBatchTasks.removeAll()
+        batches.forEach { $0.task.cancel() }
         let worker = workerTask
         worker?.cancel()
         await runtime.stopAll()
+        for batch in batches {
+            await batch.task.value
+        }
         await worker?.value
         workerTask = nil
     }
@@ -242,6 +313,66 @@ final class TogentService {
         Task { [runtime] in
             await runtime.stopAll()
         }
+    }
+
+    private func scheduleBatch(_ status: TogentStagedBatchStatus) {
+        scheduledBatchTasks.removeValue(forKey: status.batchKey)?.task.cancel()
+        let id = UUID()
+        let delay: TimeInterval
+        if status.waitsForText {
+            let age = max(0, now().timeIntervalSince(status.oldestReceivedAt))
+            delay = max(0, imageCaptionTimeout - age)
+        } else {
+            delay = messageBatchDebounce
+        }
+        let task = Task { [weak self] in
+            do {
+                try await Task.sleep(
+                    nanoseconds: Self.nanoseconds(for: delay)
+                )
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            self?.finishScheduledBatch(batchKey: status.batchKey, id: id)
+        }
+        scheduledBatchTasks[status.batchKey] = ScheduledBatchTask(
+            id: id,
+            task: task
+        )
+    }
+
+    private func finishScheduledBatch(batchKey: String, id: UUID) {
+        guard scheduledBatchTasks[batchKey]?.id == id else { return }
+        scheduledBatchTasks.removeValue(forKey: batchKey)
+        do {
+            guard let current = try store.stagedBatchStatus(batchKey: batchKey) else {
+                return
+            }
+            if current.waitsForText {
+                let age = max(0, now().timeIntervalSince(current.oldestReceivedAt))
+                if age < imageCaptionTimeout {
+                    scheduleBatch(current)
+                    return
+                }
+                try store.expireStagedBatch(batchKey: batchKey)
+            } else {
+                try store.queueStagedBatch(batchKey: batchKey)
+                startWorkerIfNeeded()
+            }
+            didChange?()
+        } catch {
+            startupError = error
+            didChange?()
+        }
+    }
+
+    private static func nanoseconds(for seconds: TimeInterval) -> UInt64 {
+        guard seconds.isFinite else { return UInt64.max }
+        return UInt64(min(
+            seconds * 1_000_000_000,
+            Double(UInt64.max)
+        ))
     }
 
     private func startWorkerIfNeeded() {
@@ -379,11 +510,11 @@ final class TogentService {
 
         let now = Date()
         let role = TogentRole(
-            name: "默认角色",
+            name: Self.defaultRoleName,
             workspacePath: try workspace.canonicalPath(
                 workspace.defaultWorkspacePath(registeredPaths: [])
             ),
-            prompt: "",
+            prompt: Self.defaultRolePrompt,
             publishedModelID: "",
             isActive: true,
             createdAt: now,
@@ -496,9 +627,9 @@ final class TogentService {
     private static func prompt(job: TogentJob, role: TogentRole) -> String {
         let formatter = ISO8601DateFormatter()
         return """
-        这是从微信归档后进入 Togent 的单条用户任务。微信是唯一任务入口；不要将其与其他消息合并。
+        这是微信消息完成角色归档后进入 Togent 的一个用户任务。微信是唯一任务入口；用户在短时间内连续发送的多条消息可能已按顺序合并在本任务中，不要再与本任务之外的消息合并。
 
-        收到时间：\(formatter.string(from: job.receivedAt))
+        批次首条收到时间：\(formatter.string(from: job.receivedAt))
         当前角色：\(role.name)
         当前工作区：\(role.workspacePath)
         项目分类根目录：\(role.workspacePath)/project

@@ -1,8 +1,21 @@
 import Foundation
 import SQLite3
 
+struct TogentStagedBatchStatus: Equatable {
+    let batchKey: String
+    let waitsForText: Bool
+    let oldestReceivedAt: Date
+}
+
 final class TogentStore: @unchecked Sendable {
     private static let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
+    private struct StagedBatchPart {
+        let id: UUID
+        let fromUserID: String
+        let contextToken: String
+        let messageText: String
+    }
 
     let databaseURL: URL
     private let fileManager: FileManager
@@ -168,7 +181,9 @@ final class TogentStore: @unchecked Sendable {
         fromUserID: String,
         contextToken: String,
         messageText: String,
-        receivedAt: Date
+        receivedAt: Date,
+        batchKey: String = "",
+        waitsForText: Bool = false
     ) throws -> TogentJob {
         try withDatabase { database in
             let now = Date()
@@ -177,8 +192,9 @@ final class TogentStore: @unchecked Sendable {
                 sql: """
                 INSERT OR IGNORE INTO jobs
                 (id, dedupe_key, role_id, from_user_id, context_token, message_text,
-                 received_at, state, attempt_count, last_error, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'staged', 0, NULL, ?, ?)
+                 batch_key, waits_for_text, received_at, state, attempt_count,
+                 last_error, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'staged', 0, NULL, ?, ?)
                 """,
                 bindings: [
                     .text(UUID().uuidString),
@@ -187,6 +203,8 @@ final class TogentStore: @unchecked Sendable {
                     .text(fromUserID),
                     .text(contextToken),
                     .text(messageText),
+                    .text(batchKey.isEmpty ? "single:\(deduplicationKey)" : batchKey),
+                    .integer(waitsForText ? 1 : 0),
                     .double(receivedAt.timeIntervalSince1970),
                     .double(now.timeIntervalSince1970),
                     .double(now.timeIntervalSince1970)
@@ -212,6 +230,56 @@ final class TogentStore: @unchecked Sendable {
         }
     }
 
+    func stagedBatchStatus(
+        deduplicationKey: String
+    ) throws -> TogentStagedBatchStatus? {
+        try withDatabase { database in
+            let keys = try textColumn(
+                database,
+                sql: """
+                SELECT batch_key FROM jobs
+                WHERE dedupe_key = ? AND state = 'staged'
+                LIMIT 1
+                """,
+                bindings: [.text(deduplicationKey)]
+            )
+            guard let batchKey = keys.first else { return nil }
+            return try stagedBatchStatus(database, batchKey: batchKey)
+        }
+    }
+
+    func stagedBatchStatus(batchKey: String) throws -> TogentStagedBatchStatus? {
+        try withDatabase {
+            try stagedBatchStatus($0, batchKey: batchKey)
+        }
+    }
+
+    func queueStagedBatch(batchKey: String) throws {
+        try withDatabase { database in
+            try transaction(database) {
+                try queueStagedBatch(database, batchKey: batchKey)
+            }
+        }
+    }
+
+    func expireStagedBatch(batchKey: String) throws {
+        try withDatabase { database in
+            try execute(
+                database,
+                sql: """
+                UPDATE jobs
+                SET state = 'completed', from_user_id = '', context_token = '',
+                    message_text = '', last_error = NULL, updated_at = ?
+                WHERE batch_key = ? AND state = 'staged'
+                """,
+                bindings: [
+                    .double(Date().timeIntervalSince1970),
+                    .text(batchKey)
+                ]
+            )
+        }
+    }
+
     func discardStagedJob(deduplicationKey: String) throws {
         try withDatabase { database in
             try execute(
@@ -222,7 +290,10 @@ final class TogentStore: @unchecked Sendable {
         }
     }
 
-    func reconcileStagedJobs(committedKeys: Set<String>) throws {
+    func reconcileStagedJobs(
+        committedKeys: Set<String>
+    ) throws -> [TogentStagedBatchStatus] {
+        var pendingImageBatches: [TogentStagedBatchStatus] = []
         try withDatabase { database in
             try transaction(database) {
                 let staged = try textColumn(
@@ -230,13 +301,7 @@ final class TogentStore: @unchecked Sendable {
                     sql: "SELECT dedupe_key FROM jobs WHERE state = 'staged'"
                 )
                 for key in staged {
-                    if committedKeys.contains(key) {
-                        try execute(
-                            database,
-                            sql: "UPDATE jobs SET state = 'queued', updated_at = ? WHERE dedupe_key = ?",
-                            bindings: [.double(Date().timeIntervalSince1970), .text(key)]
-                        )
-                    } else {
+                    if !committedKeys.contains(key) {
                         try execute(
                             database,
                             sql: "DELETE FROM jobs WHERE dedupe_key = ? AND state = 'staged'",
@@ -244,8 +309,31 @@ final class TogentStore: @unchecked Sendable {
                         )
                     }
                 }
+                let batchKeys = try textColumn(
+                    database,
+                    sql: """
+                    SELECT batch_key FROM jobs
+                    WHERE state = 'staged'
+                    GROUP BY batch_key
+                    ORDER BY MIN(created_at)
+                    """
+                )
+                for batchKey in batchKeys {
+                    guard let status = try stagedBatchStatus(
+                        database,
+                        batchKey: batchKey
+                    ) else {
+                        continue
+                    }
+                    if status.waitsForText {
+                        pendingImageBatches.append(status)
+                    } else {
+                        try queueStagedBatch(database, batchKey: batchKey)
+                    }
+                }
             }
         }
+        return pendingImageBatches
     }
 
     func recoverInterruptedJobs() throws {
@@ -358,6 +446,9 @@ final class TogentStore: @unchecked Sendable {
                     from_user_id TEXT NOT NULL,
                     context_token TEXT NOT NULL,
                     message_text TEXT NOT NULL,
+                    batch_key TEXT NOT NULL,
+                    waits_for_text INTEGER NOT NULL DEFAULT 0
+                        CHECK (waits_for_text IN (0, 1)),
                     received_at REAL NOT NULL,
                     state TEXT NOT NULL CHECK (
                         state IN ('staged', 'queued', 'running', 'completed', 'failed')
@@ -370,12 +461,63 @@ final class TogentStore: @unchecked Sendable {
                 )
                 """
             )
+            try ensureBatchColumns(database)
             try execute(
                 database,
                 sql: "CREATE INDEX IF NOT EXISTS jobs_state_order ON jobs(state, created_at)"
             )
+            try execute(
+                database,
+                sql: """
+                CREATE INDEX IF NOT EXISTS jobs_staged_batch
+                ON jobs(batch_key, state, created_at)
+                """
+            )
         }
         applyPermissions()
+    }
+
+    private func ensureBatchColumns(_ database: OpaquePointer) throws {
+        let columns = try columnNames(database, table: "jobs")
+        if !columns.contains("batch_key") {
+            try executeScript(
+                database,
+                sql: "ALTER TABLE jobs ADD COLUMN batch_key TEXT NOT NULL DEFAULT ''"
+            )
+        }
+        if !columns.contains("waits_for_text") {
+            try executeScript(
+                database,
+                sql: """
+                ALTER TABLE jobs ADD COLUMN waits_for_text INTEGER NOT NULL DEFAULT 0
+                CHECK (waits_for_text IN (0, 1))
+                """
+            )
+        }
+        try execute(
+            database,
+            sql: """
+            UPDATE jobs SET batch_key = 'legacy:' || id
+            WHERE batch_key = ''
+            """
+        )
+    }
+
+    private func columnNames(
+        _ database: OpaquePointer,
+        table: String
+    ) throws -> Set<String> {
+        let statement = try prepare(
+            database,
+            sql: "PRAGMA table_info(\(table))",
+            bindings: []
+        )
+        defer { sqlite3_finalize(statement) }
+        var names: Set<String> = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            names.insert(text(statement, 1))
+        }
+        return names
     }
 
     private func updateJob(
@@ -422,6 +564,117 @@ final class TogentStore: @unchecked Sendable {
                     error.map(SQLiteValue.text) ?? .null,
                     .double(Date().timeIntervalSince1970),
                     .text(id.uuidString)
+                ],
+                requireChange: true
+            )
+        }
+    }
+
+    private func stagedBatchStatus(
+        _ database: OpaquePointer,
+        batchKey: String
+    ) throws -> TogentStagedBatchStatus? {
+        let statement = try prepare(
+            database,
+            sql: """
+            SELECT batch_key, MIN(received_at),
+                   SUM(CASE WHEN waits_for_text = 0 THEN 1 ELSE 0 END),
+                   COUNT(*)
+            FROM jobs
+            WHERE batch_key = ? AND state = 'staged'
+            GROUP BY batch_key
+            """,
+            bindings: [.text(batchKey)]
+        )
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW,
+              sqlite3_column_int64(statement, 3) > 0 else {
+            return nil
+        }
+        return TogentStagedBatchStatus(
+            batchKey: text(statement, 0),
+            waitsForText: sqlite3_column_int64(statement, 2) == 0,
+            oldestReceivedAt: Date(
+                timeIntervalSince1970: sqlite3_column_double(statement, 1)
+            )
+        )
+    }
+
+    private func queueStagedBatch(
+        _ database: OpaquePointer,
+        batchKey: String
+    ) throws {
+        guard let status = try stagedBatchStatus(database, batchKey: batchKey) else {
+            return
+        }
+        guard !status.waitsForText else {
+            throw TogentError.database("纯图片批次仍在等待后续文字")
+        }
+        let statement = try prepare(
+            database,
+            sql: """
+            SELECT id, from_user_id, context_token, message_text
+            FROM jobs
+            WHERE batch_key = ? AND state = 'staged'
+            ORDER BY created_at, rowid
+            """,
+            bindings: [.text(batchKey)]
+        )
+        defer { sqlite3_finalize(statement) }
+        var parts: [StagedBatchPart] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let id = UUID(uuidString: text(statement, 0)) else {
+                throw TogentError.database("批次任务 UUID 损坏")
+            }
+            parts.append(StagedBatchPart(
+                id: id,
+                fromUserID: text(statement, 1),
+                contextToken: text(statement, 2),
+                messageText: text(statement, 3)
+            ))
+        }
+        guard let primary = parts.first, let latest = parts.last else { return }
+        let replyPart = parts.reversed().first {
+            !$0.contextToken.isEmpty
+        } ?? latest
+        let combined: String
+        if parts.count == 1 {
+            combined = primary.messageText
+        } else {
+            combined = parts.enumerated().map { index, part in
+                "【连续消息 \(index + 1)/\(parts.count)】\n\(part.messageText)"
+            }.joined(separator: "\n\n")
+        }
+        let now = Date().timeIntervalSince1970
+        try execute(
+            database,
+            sql: """
+            UPDATE jobs
+            SET from_user_id = ?, context_token = ?, message_text = ?,
+                state = 'queued', updated_at = ?
+            WHERE id = ? AND state = 'staged'
+            """,
+            bindings: [
+                .text(replyPart.fromUserID),
+                .text(replyPart.contextToken),
+                .text(combined),
+                .double(now),
+                .text(primary.id.uuidString)
+            ],
+            requireChange: true
+        )
+        for follower in parts.dropFirst() {
+            try execute(
+                database,
+                sql: """
+                UPDATE jobs
+                SET state = 'completed', from_user_id = '', context_token = '',
+                    message_text = '', last_error = NULL, updated_at = ?
+                WHERE id = ? AND state = 'staged'
+                """,
+                bindings: [
+                    .double(now),
+                    .text(follower.id.uuidString)
                 ],
                 requireChange: true
             )
@@ -614,8 +867,12 @@ final class TogentStore: @unchecked Sendable {
         return Int(sqlite3_column_int64(statement, 0))
     }
 
-    private func textColumn(_ database: OpaquePointer, sql: String) throws -> [String] {
-        let statement = try prepare(database, sql: sql, bindings: [])
+    private func textColumn(
+        _ database: OpaquePointer,
+        sql: String,
+        bindings: [SQLiteValue] = []
+    ) throws -> [String] {
+        let statement = try prepare(database, sql: sql, bindings: bindings)
         defer { sqlite3_finalize(statement) }
         var result: [String] = []
         while sqlite3_step(statement) == SQLITE_ROW {

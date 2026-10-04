@@ -255,7 +255,24 @@ func testTogentDefaultRoleBootstrap() async {
     let roles = service.roles
     expect(roles.count == 1, "空角色库首启只创建一个默认角色")
     let role = roles[0]
-    expect(role.name == "默认角色" && role.isActive, "默认角色命名并自动激活")
+    expect(
+        role.name == TogentService.defaultRoleName && role.isActive,
+        "默认角色命名为 default 并自动激活"
+    )
+    expect(
+        role.prompt == TogentService.defaultRolePrompt
+            && !role.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+        "default 写入非空内置角色提示词"
+    )
+    expect(
+        ["虚构 AI 角色", "20 岁", "中国女大学生", "简体中文", "完成用户任务"]
+            .allSatisfy(role.prompt.contains),
+        "default 提示词冻结虚构成年女大学生身份与任务优先语义"
+    )
+    expect(
+        TogentRoleDraft(role: role).prompt == TogentService.defaultRolePrompt,
+        "角色编辑弹窗的数据源回显 default 内置提示词"
+    )
     expect(role.publishedModelID.isEmpty, "默认角色模型初始为未配置")
     expect(role.workspacePath.hasSuffix("/Documents/togent/角色1"),
            "默认角色使用最小未占用角色编号")
@@ -269,6 +286,15 @@ func testTogentDefaultRoleBootstrap() async {
             .appendingPathComponent("wechat")
             .path
     ), "默认角色自动创建私有 wechat")
+    let agents = try! String(
+        contentsOf: URL(fileURLWithPath: role.workspacePath)
+            .appendingPathComponent("AGENTS.md"),
+        encoding: .utf8
+    )
+    expect(
+        agents.contains(TogentService.defaultRolePrompt),
+        "default 内置提示词同步写入 AGENTS 托管区块"
+    )
 
     var edit = TogentRoleDraft(role: role)
     edit.prompt = "无模型时仍可维护默认角色"
@@ -286,6 +312,10 @@ func testTogentDefaultRoleBootstrap() async {
         availableModelOptions: { [] }
     )
     expect(restarted.roles.count == 1, "重复启动不会重复创建默认角色")
+    expect(
+        restarted.roles.first?.prompt == edit.prompt,
+        "重复启动保留用户编辑后的 default 提示词"
+    )
     service.stop()
     restarted.stop()
 
@@ -307,6 +337,37 @@ func testTogentDefaultRoleBootstrap() async {
     expect(failed.startupError != nil, "默认角色工作区初始化失败会明确阻断启动")
     expect(failed.roles.isEmpty, "默认角色工作区失败不留下半成品 registry")
     failed.stop()
+
+    let existingHome = makeTogentTemporaryDirectory("existing-role")
+    defer { try? FileManager.default.removeItem(at: existingHome) }
+    let existingStore = TogentStore(
+        databaseURL: existingHome.appendingPathComponent("state/togent.sqlite")
+    )
+    var existingRole = makeTogentRole(
+        name: "已有角色",
+        workspace: existingHome.appendingPathComponent("workspace"),
+        active: true
+    )
+    existingRole.prompt = "用户自定义提示词"
+    _ = try! existingStore.insertRole(existingRole)
+    let existingService = TogentService(
+        store: existingStore,
+        workspace: TogentWorkspaceService(homeDirectory: existingHome),
+        runtime: StubTogentRuntime(),
+        availableModelOptions: { [] }
+    )
+    let preservedRoles = existingService.roles
+    expect(
+        preservedRoles.count == 1
+            && preservedRoles[0].id == existingRole.id
+            && preservedRoles[0].name == existingRole.name
+            && preservedRoles[0].workspacePath == existingRole.workspacePath
+            && preservedRoles[0].prompt == existingRole.prompt
+            && preservedRoles[0].publishedModelID == existingRole.publishedModelID
+            && preservedRoles[0].isActive == existingRole.isActive,
+        "已有角色库不新增 default 且不覆盖用户名称或提示词"
+    )
+    existingService.stop()
 }
 
 @MainActor
