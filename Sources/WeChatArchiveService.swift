@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 enum WeChatArchiveError: Error, Equatable {
     case createDirectory
@@ -33,18 +34,21 @@ struct SystemWeChatFileSystem: WeChatFileSystem {
     }
 
     func append(_ data: Data, to url: URL) throws {
-        if !manager.fileExists(atPath: url.path) {
-            guard manager.createFile(
-                atPath: url.path,
-                contents: nil,
-                attributes: [.posixPermissions: NSNumber(value: 0o600)]
-            ) else {
-                throw WeChatArchiveError.appendLog
-            }
+        let descriptor = url.path.withCString {
+            Darwin.open(
+                $0,
+                O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW | O_CLOEXEC,
+                mode_t(0o600)
+            )
         }
-        let handle = try FileHandle(forWritingTo: url)
+        guard descriptor >= 0, Darwin.fchmod(descriptor, mode_t(0o600)) == 0 else {
+            if descriptor >= 0 {
+                Darwin.close(descriptor)
+            }
+            throw WeChatArchiveError.appendLog
+        }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
         defer { try? handle.close() }
-        try handle.seekToEnd()
         try handle.write(contentsOf: data)
         try handle.synchronize()
     }
@@ -157,7 +161,6 @@ actor WeChatArchiveService: WeChatArchiving {
                     try fileSystem.write(data, to: partURL)
                     try fileSystem.setPermissions(0o600, at: partURL)
                     try fileSystem.moveItem(at: partURL, to: finalURL)
-                    try fileSystem.setPermissions(0o600, at: finalURL)
                     savedAttachments.append(finalURL)
                     attachmentLines.append(
                         "- \(result.plan.label)：[\(escapeLinkText(finalURL.lastPathComponent))](\(encodeLink(finalURL.lastPathComponent)))"
@@ -181,7 +184,6 @@ actor WeChatArchiveService: WeChatArchiving {
         let logURL = dateDirectory.appendingPathComponent("wechat\(dateName).md")
         do {
             try fileSystem.append(Data(markdown.utf8), to: logURL)
-            try fileSystem.setPermissions(0o600, at: logURL)
         } catch {
             for url in savedAttachments {
                 fileSystem.removeItemIfPresent(at: url)

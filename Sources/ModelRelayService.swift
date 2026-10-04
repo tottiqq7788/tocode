@@ -1,6 +1,12 @@
 import Foundation
 
 final class ModelRelayService: @unchecked Sendable {
+    private struct FetchedModels {
+        let discovery: ModelRelayModelDiscovery
+        let keyID: UUID
+        let secretDigest: Data
+    }
+
     private let configStore: ModelRelayConfigStoring
     private let upstreamKeyStore: ModelRelayUpstreamKeyStoring
     private let localKeyVault: ModelRelayLocalKeyVault
@@ -317,12 +323,13 @@ final class ModelRelayService: @unchecked Sendable {
         }
     }
 
+    @discardableResult
     func testProviderConnection(
         providerID: UUID?,
         baseURL: String,
         candidateSecret: String?,
         completion: @escaping (Result<ModelRelayProviderConnectionTest, Error>) -> Void
-    ) {
+    ) -> Task<Void, Never> {
         let normalizedURL: String
         let secret: String
         let replacesKey: Bool
@@ -361,9 +368,9 @@ final class ModelRelayService: @unchecked Sendable {
             }
         } catch {
             completeOnMain(completion, result: .failure(error))
-            return
+            return Task {}
         }
-        Task { [weak self] in
+        return Task { [weak self] in
             guard let self else { return }
             do {
                 let discovery = try await self.upstreamClient.discoverModels(
@@ -372,6 +379,7 @@ final class ModelRelayService: @unchecked Sendable {
                     cachedCapabilities: cachedCapabilities,
                     probeCapabilities: true
                 )
+                try Task.checkCancellation()
                 self.completeOnMain(completion, result: .success(
                     ModelRelayProviderConnectionTest(
                         providerID: providerID,
@@ -621,7 +629,13 @@ final class ModelRelayService: @unchecked Sendable {
                         }) else {
                             throw ModelRelayError.providerNotFound
                         }
-                        _ = try self.mergeModels(provider: storedProvider, modelIDs: modelIDs)
+                        _ = try self.mergeModels(
+                            provider: storedProvider,
+                            modelIDs: modelIDs,
+                            capabilities: Self.unknownCapabilities(for: modelIDs),
+                            expectedKeyID: reference.id,
+                            expectedSecretDigest: ModelRelayLocalKeyVault.digest(secret)
+                        )
                         self.router.recordSuccess(keyID: reference.id)
                         return reference
                     } catch {
@@ -741,7 +755,13 @@ final class ModelRelayService: @unchecked Sendable {
                         secret: secret
                     )
                     do {
-                        _ = try self.mergeModels(provider: provider, modelIDs: modelIDs)
+                        _ = try self.mergeModels(
+                            provider: provider,
+                            modelIDs: modelIDs,
+                            capabilities: Self.unknownCapabilities(for: modelIDs),
+                            expectedKeyID: keyID,
+                            expectedSecretDigest: ModelRelayLocalKeyVault.digest(secret)
+                        )
                     } catch {
                         let originalError = error
                         do {
@@ -831,16 +851,17 @@ final class ModelRelayService: @unchecked Sendable {
         router.resetHealth(keyIDs: [keyID])
     }
 
+    @discardableResult
     func fetchModels(
         providerID: UUID,
         resetAuthenticationFailures: Bool = true,
         probeCapabilities: Bool = true,
         completion: @escaping (Result<[ModelRelayModelRoute], Error>) -> Void
-    ) {
+    ) -> Task<Void, Never> {
         let snapshot = configurationSnapshot()
         guard let provider = snapshot.providers.first(where: { $0.id == providerID }) else {
             completeOnMain(completion, result: .failure(ModelRelayError.providerNotFound))
-            return
+            return Task {}
         }
         let references: [ModelRelayUpstreamKeyReference]
         let entityKeys = Array(provider.keys.prefix(1))
@@ -851,19 +872,22 @@ final class ModelRelayService: @unchecked Sendable {
             let eligible = Set(router.keyIDsEligibleForAutomaticRefresh(entityKeys.map(\.id)))
             references = entityKeys.filter { eligible.contains($0.id) }
         }
-        Task { [weak self] in
+        return Task { [weak self] in
             guard let self else { return }
             do {
-                let discovery = try await self.fetchModels(
+                let fetched = try await self.fetchModels(
                     provider: provider,
                     references: references,
                     probeCapabilities: probeCapabilities
                 )
+                try Task.checkCancellation()
                 do {
                     let routes = try self.mergeModels(
                         provider: provider,
-                        modelIDs: discovery.modelIDs,
-                        capabilities: discovery.capabilities
+                        modelIDs: fetched.discovery.modelIDs,
+                        capabilities: fetched.discovery.capabilities,
+                        expectedKeyID: fetched.keyID,
+                        expectedSecretDigest: fetched.secretDigest
                     )
                     self.completeOnMain(completion, result: .success(routes))
                 } catch {
@@ -920,9 +944,9 @@ final class ModelRelayService: @unchecked Sendable {
         provider: ModelRelayProvider,
         references: [ModelRelayUpstreamKeyReference],
         probeCapabilities: Bool
-    ) async throws -> ModelRelayModelDiscovery {
+    ) async throws -> FetchedModels {
         var lastError: Error = ModelRelayError.noHealthyUpstream
-        var firstSuccessfulCatalog: ModelRelayModelDiscovery?
+        var firstSuccessfulCatalog: FetchedModels?
         let cachedCapabilities = Dictionary(
             uniqueKeysWithValues: provider.models.map {
                 ($0.upstreamModelID, $0.capability)
@@ -943,7 +967,11 @@ final class ModelRelayService: @unchecked Sendable {
                 )
                 router.recordSuccess(keyID: reference.id)
                 if firstSuccessfulCatalog == nil {
-                    firstSuccessfulCatalog = discovery
+                    firstSuccessfulCatalog = FetchedModels(
+                        discovery: discovery,
+                        keyID: reference.id,
+                        secretDigest: ModelRelayLocalKeyVault.digest(secret)
+                    )
                 }
             } catch is CancellationError {
                 throw CancellationError()
@@ -970,6 +998,16 @@ final class ModelRelayService: @unchecked Sendable {
             throw ModelRelayError.keyNotFound
         }
         return raw
+    }
+
+    private static func unknownCapabilities(
+        for modelIDs: [String]
+    ) -> [String: ModelRelayModelCapability] {
+        Dictionary(
+            uniqueKeysWithValues: Set(modelIDs).map {
+                ($0, ModelRelayModelCapability.unknown)
+            }
+        )
     }
 
     private func ensureUniqueProviderName(
@@ -1028,7 +1066,9 @@ final class ModelRelayService: @unchecked Sendable {
     private func mergeModels(
         provider: ModelRelayProvider,
         modelIDs: [String],
-        capabilities: [String: ModelRelayModelCapability] = [:]
+        capabilities: [String: ModelRelayModelCapability] = [:],
+        expectedKeyID: UUID? = nil,
+        expectedSecretDigest: Data? = nil
     ) throws -> [ModelRelayModelRoute] {
         let uniqueIDs = Array(Set(modelIDs)).sorted()
         guard !uniqueIDs.isEmpty else { throw ModelRelayError.noModels }
@@ -1038,6 +1078,16 @@ final class ModelRelayService: @unchecked Sendable {
                   configuration.providers[providerIndex].baseURL == provider.baseURL,
                   configuration.providers[providerIndex].upstreamKey?.id == provider.upstreamKey?.id else {
                 throw ModelRelayError.providerNotFound
+            }
+            if let expectedKeyID, let expectedSecretDigest {
+                guard configuration.providers[providerIndex].upstreamKey?.id == expectedKeyID,
+                      let currentSecret = try upstreamKeyStore.load(id: expectedKeyID),
+                      ModelRelayLocalKeyVault.constantTimeEqual(
+                        ModelRelayLocalKeyVault.digest(currentSecret),
+                        expectedSecretDigest
+                      ) else {
+                    throw ModelRelayError.providerNotFound
+                }
             }
             let currentName = configuration.providers[providerIndex].name
             let existingForProvider = Dictionary(

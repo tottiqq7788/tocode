@@ -1194,6 +1194,7 @@ func testModelRelayCapabilityDetectionAndRefreshBoundaries() async {
                   {"id":"catalog-text","input_modalities":["text"]},
                   {"id":"vision","input_modalities":["text","image"]},
                   {"id":"reject"},
+                  {"id":"detail-reject"},
                   {"id":"auth401"},
                   {"id":"auth403"},
                   {"id":"server"},
@@ -1217,6 +1218,11 @@ func testModelRelayCapabilityDetectionAndRefreshBoundaries() async {
                 status: 400,
                 chunks: [Data(#"{"error":{"message":"This model does not support image input"}}"#.utf8)]
             )
+        case "detail-reject":
+            return ModelRelayStubResponse(
+                status: 400,
+                chunks: [Data(#"{"error":{"message":"Unsupported value low for image_url.detail"}}"#.utf8)]
+            )
         case "auth401":
             return ModelRelayStubResponse(status: 401, chunks: [Data()])
         case "auth403":
@@ -1239,7 +1245,7 @@ func testModelRelayCapabilityDetectionAndRefreshBoundaries() async {
             cachedCapabilities: [:],
             probeCapabilities: true
         )
-        expect(discovery.modelIDs.count == 9, "显式探测保留完整模型目录")
+        expect(discovery.modelIDs.count == 10, "显式探测保留完整模型目录")
         expect(
             discovery.capabilities["catalog-text"]?.imageInput == .textOnly
                 && discovery.capabilities["catalog-text"]?.evidence == .catalogMetadata,
@@ -1256,13 +1262,16 @@ func testModelRelayCapabilityDetectionAndRefreshBoundaries() async {
             "明确拒绝图片时标记纯文本"
         )
         expect(
-            ["auth401", "auth403", "server", "rate", "timeout", "wrong"].allSatisfy {
+            [
+                "detail-reject", "auth401", "auth403",
+                "server", "rate", "timeout", "wrong"
+            ].allSatisfy {
                 discovery.capabilities[$0]?.imageInput == .unknown
             },
-            "鉴权、服务端、限流、超时和错误答案均保持能力未知"
+            "参数不兼容、鉴权、服务端、限流、超时和错误答案均保持能力未知"
         )
         let posts = ModelRelayURLProtocol.requests.filter { $0.httpMethod == "POST" }
-        expect(posts.count == 8, "显式操作对每个未确认模型最多发送一个图片探针")
+        expect(posts.count == 9, "显式操作对每个未确认模型最多发送一个图片探针")
         expect(
             Set(posts.compactMap { request -> String? in
                 guard let object = try? JSONSerialization.jsonObject(
@@ -1281,6 +1290,11 @@ func testModelRelayCapabilityDetectionAndRefreshBoundaries() async {
     let concurrentLock = NSLock()
     var activeProbes = 0
     var maximumActiveProbes = 0
+    let globallyLimitedClient = ModelRelayUpstreamClient(
+        sessionConfiguration: modelRelayTestSessionConfiguration(),
+        maximumConcurrentProbes: 9,
+        challengeFactory: { challenge }
+    )
     ModelRelayURLProtocol.reset { request in
         if request.httpMethod == "GET" {
             let models = (0..<9).map { ["id": "parallel-\($0)"] }
@@ -1300,15 +1314,57 @@ func testModelRelayCapabilityDetectionAndRefreshBoundaries() async {
         return ModelRelayStubResponse(status: 200, chunks: [completion(expectedDigits)])
     }
     do {
-        _ = try await client.discoverModels(
+        async let first = globallyLimitedClient.discoverModels(
             baseURL: "https://parallel.example/v1",
             secret: "secret",
             cachedCapabilities: [:],
             probeCapabilities: true
         )
-        expect(maximumActiveProbes <= 3, "图片能力探针并发数不超过固定上限")
+        async let second = globallyLimitedClient.discoverModels(
+            baseURL: "https://parallel.example/v1",
+            secret: "secret",
+            cachedCapabilities: [:],
+            probeCapabilities: true
+        )
+        _ = try await (first, second)
+        expect(
+            maximumActiveProbes <= 3,
+            "并行显式操作共享最多三个图片探针名额"
+        )
     } catch {
         expect(false, "限并发探测应完成：\(error)")
+    }
+
+    ModelRelayURLProtocol.reset { request in
+        if request.httpMethod == "GET" {
+            return ModelRelayStubResponse(
+                status: 200,
+                chunks: [Data(#"{"data":[{"id":"factory-failure"}]}"#.utf8)]
+            )
+        }
+        return ModelRelayStubResponse(status: 500, chunks: [])
+    }
+    let challengeFailureClient = ModelRelayUpstreamClient(
+        sessionConfiguration: modelRelayTestSessionConfiguration(),
+        challengeFactory: { throw URLError(.cannotDecodeRawData) }
+    )
+    do {
+        let discovery = try await challengeFailureClient.discoverModels(
+            baseURL: "https://factory-failure.example/v1",
+            secret: "secret",
+            cachedCapabilities: [:],
+            probeCapabilities: true
+        )
+        expect(
+            discovery.capabilities["factory-failure"]?.imageInput == .unknown,
+            "本地探针素材生成失败时安全降级能力未知"
+        )
+        expect(
+            ModelRelayURLProtocol.requests.allSatisfy { $0.httpMethod == "GET" },
+            "本地探针素材生成失败不会污染上游调用健康"
+        )
+    } catch {
+        expect(false, "本地探针素材生成失败不应使模型目录发现失败：\(error)")
     }
 
     ModelRelayBlockingURLProtocol.reset()
@@ -1340,6 +1396,53 @@ func testModelRelayCapabilityDetectionAndRefreshBoundaries() async {
         ModelRelayBlockingURLProtocol.waitUntilStopped(timeout: 2),
         "取消探针会取消底层网络任务"
     )
+
+    ModelRelayBlockingURLProtocol.reset()
+    let cancelKey = ModelRelayUpstreamKeyReference(name: "取消测试")
+    let cancelProvider = ModelRelayProvider(
+        name: "cancel-provider",
+        baseURL: "https://cancel-service.example/v1",
+        keys: [cancelKey],
+        models: [
+            ModelRelayModelRoute(upstreamModelID: "cancel-model", alias: "cancel-model")
+        ]
+    )
+    let cancellationService = ModelRelayService(
+        configStore: MemoryModelRelayConfigStore(
+            ModelRelayConfiguration(providers: [cancelProvider])
+        ),
+        upstreamKeyStore: MemoryModelRelayKeyStore([cancelKey.id: "cancel-secret"]),
+        localKeyVault: ModelRelayLocalKeyVault(iterations: 1),
+        upstreamClient: cancellableClient
+    )
+    var serviceOperation: Task<Void, Never>?
+    let cancellationResults = AsyncStream<Result<ModelRelayProviderConnectionTest, Error>> {
+        continuation in
+        serviceOperation = cancellationService.testProviderConnection(
+            providerID: cancelProvider.id,
+            baseURL: cancelProvider.baseURL,
+            candidateSecret: nil
+        ) { result in
+            continuation.yield(result)
+            continuation.finish()
+        }
+    }
+    expect(
+        ModelRelayBlockingURLProtocol.waitUntilStarted(timeout: 2),
+        "Service 显式测试已发出可取消请求"
+    )
+    serviceOperation?.cancel()
+    expect(
+        ModelRelayBlockingURLProtocol.waitUntilStopped(timeout: 2),
+        "Service 返回的操作句柄会取消底层网络任务"
+    )
+    var cancellationIterator = cancellationResults.makeAsyncIterator()
+    let capturedCancellationResult = await cancellationIterator.next()
+    if case .some(.failure(let error)) = capturedCancellationResult {
+        expect(error is CancellationError, "Service 取消不会伪造能力结论")
+    } else {
+        expect(false, "Service 取消应返回 CancellationError")
+    }
 
     let key = ModelRelayUpstreamKeyReference(name: "默认")
     let provider = ModelRelayProvider(
@@ -1458,6 +1561,112 @@ func testModelRelayCapabilityDetectionAndRefreshBoundaries() async {
         )
     } else {
         expect(false, "连接变更后的显式重测应成功")
+    }
+
+    let staleRefreshStarted = DispatchSemaphore(value: 0)
+    let releaseStaleRefresh = DispatchSemaphore(value: 0)
+    ModelRelayURLProtocol.reset { request in
+        let authorization = request.value(forHTTPHeaderField: "Authorization")
+        if request.httpMethod == "GET",
+           authorization == "Bearer stored-secret" {
+            staleRefreshStarted.signal()
+            _ = releaseStaleRefresh.wait(timeout: .now() + 3)
+        }
+        if request.httpMethod == "GET" {
+            return ModelRelayStubResponse(
+                status: 200,
+                chunks: [Data(#"{"data":[{"id":"refresh-model"}]}"#.utf8)]
+            )
+        }
+        return ModelRelayStubResponse(status: 200, chunks: [completion(expectedDigits)])
+    }
+    let staleRefresh = Task {
+        await withCheckedContinuation { continuation in
+            service.fetchModels(providerID: provider.id, probeCapabilities: true) {
+                continuation.resume(returning: $0)
+            }
+        }
+    }
+    expect(
+        waitForModelRelaySignal(staleRefreshStarted, timeout: 2),
+        "旧 Key 的手动刷新已进入飞行中状态"
+    )
+    let replacementResult: Result<Void, Error> = await withCheckedContinuation {
+        continuation in
+        service.replaceUpstreamKey(
+            providerID: provider.id,
+            keyID: key.id,
+            name: key.name,
+            secret: "rotated-secret"
+        ) {
+            continuation.resume(returning: $0)
+        }
+    }
+    if case .success = replacementResult {
+        expect(
+            service.snapshot().providers.first?.models.first?.capability.imageInput == .unknown,
+            "同 UUID Key 替换后旧模型能力立即失效为未知"
+        )
+    } else {
+        expect(false, "同 UUID Key 替换应成功")
+    }
+    releaseStaleRefresh.signal()
+    if case .failure(let error) = await staleRefresh.value,
+       case ModelRelayError.providerNotFound = error {
+        expect(true, "旧 Key 的飞行中刷新不能覆盖替换后的能力")
+    } else {
+        expect(false, "旧 Key 的飞行中刷新应因连接身份变化被拒绝")
+    }
+
+    let keylessProvider = ModelRelayProvider(
+        name: "keyless-provider",
+        baseURL: "https://keyless.example/v1",
+        models: [
+            ModelRelayModelRoute(
+                upstreamModelID: "keyless-model",
+                alias: "keyless-model",
+                capability: ModelRelayModelCapability(
+                    imageInput: .multimodal,
+                    evidence: .imageProbe,
+                    checkedAt: Date(),
+                    probeVersion: ModelRelayModelCapability.currentProbeVersion
+                )
+            )
+        ]
+    )
+    let keylessService = ModelRelayService(
+        configStore: MemoryModelRelayConfigStore(
+            ModelRelayConfiguration(providers: [keylessProvider])
+        ),
+        upstreamKeyStore: MemoryModelRelayKeyStore(),
+        localKeyVault: ModelRelayLocalKeyVault(iterations: 1),
+        upstreamClient: client
+    )
+    ModelRelayURLProtocol.reset { request in
+        expect(request.httpMethod == "GET", "新增 Key 只拉取模型目录")
+        return ModelRelayStubResponse(
+            status: 200,
+            chunks: [Data(#"{"data":[{"id":"keyless-model"}]}"#.utf8)]
+        )
+    }
+    let addedKey: Result<ModelRelayUpstreamKeyReference, Error> =
+        await withCheckedContinuation { continuation in
+            keylessService.addUpstreamKey(
+                providerID: keylessProvider.id,
+                name: "默认",
+                secret: "new-secret"
+            ) {
+                continuation.resume(returning: $0)
+            }
+        }
+    if case .success = addedKey {
+        expect(
+            keylessService.snapshot().providers.first?.models.first?.capability.imageInput
+                == .unknown,
+            "新增 Key 后不会沿用无连接来源的旧多模态结论"
+        )
+    } else {
+        expect(false, "无 Key 厂家新增 Key 应成功")
     }
 }
 

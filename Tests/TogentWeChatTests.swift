@@ -1090,5 +1090,19 @@ func testTogentWeChatRealPiEndToEnd() async {
         observationSnapshot().textOmitted,
         "能力未知模型读取图片时不会向上游发送 image_url"
     )
+    let sessionDirectory = root
+        .appendingPathComponent("runtime", isDirectory: true)
+        .appendingPathComponent(role.id.uuidString, isDirectory: true)
+        .appendingPathComponent("sessions", isDirectory: true)
+    let persistedSessions = ((try? FileManager.default.contentsOfDirectory(
+        at: sessionDirectory,
+        includingPropertiesForKeys: [.isRegularFileKey]
+    )) ?? []).compactMap { try? String(contentsOf: $0, encoding: .utf8) }
+        .joined(separator: "\n")
+    expect(
+        !persistedSessions.contains((imageData as Data).base64EncodedString())
+            && !persistedSessions.contains(#""type":"image","data""#),
+        "真 Pi 完成识图后持久会话不保留图片正文/base64"
+    )
     await runtime.stopAll()
 }

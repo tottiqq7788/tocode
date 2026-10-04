@@ -117,7 +117,23 @@ struct ModelRelayModelCapability: Codable, Equatable, Sendable {
     }
 
     var isCurrentAndConclusive: Bool {
-        imageInput != .unknown && probeVersion == Self.currentProbeVersion
+        guard checkedAt != nil,
+              probeVersion == Self.currentProbeVersion else {
+            return false
+        }
+        switch (imageInput, evidence) {
+        case (.multimodal, .imageProbe):
+            return true
+        case (.textOnly, .catalogMetadata),
+             (.textOnly, .explicitImageRejection):
+            return true
+        default:
+            return false
+        }
+    }
+
+    var effectiveImageInput: ModelRelayImageInputCapability {
+        isCurrentAndConclusive ? imageInput : .unknown
     }
 }
 
@@ -249,10 +265,10 @@ struct ModelRelayCapabilitySummary: Equatable {
     ) {
         total = modelIDs.count
         multimodal = modelIDs.filter {
-            capabilities[$0]?.imageInput == .multimodal
+            capabilities[$0]?.effectiveImageInput == .multimodal
         }.count
         textOnly = modelIDs.filter {
-            capabilities[$0]?.imageInput == .textOnly
+            capabilities[$0]?.effectiveImageInput == .textOnly
         }.count
         unknown = max(0, total - multimodal - textOnly)
     }

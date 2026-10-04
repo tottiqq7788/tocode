@@ -18,11 +18,18 @@ actor TogentRuntimeService: TogentRuntimeExecuting {
         let signature: Signature
         let client: TogentRPCClient
         let broker: TogentGitBroker
+        let sessions: URL
 
-        init(signature: Signature, client: TogentRPCClient, broker: TogentGitBroker) {
+        init(
+            signature: Signature,
+            client: TogentRPCClient,
+            broker: TogentGitBroker,
+            sessions: URL
+        ) {
             self.signature = signature
             self.client = client
             self.broker = broker
+            self.sessions = sessions
         }
 
         func stop() {
@@ -80,9 +87,12 @@ actor TogentRuntimeService: TogentRuntimeExecuting {
             entries[role.id] = entry
         }
         do {
-            return try await entry.client.promptAndWait(prompt)
+            let answer = try await entry.client.promptAndWait(prompt)
+            try sandbox.redactPersistedSessionImages(in: entry.sessions)
+            return answer
         } catch {
             entry.stop()
+            try? sandbox.redactPersistedSessionImages(in: entry.sessions)
             entries.removeValue(forKey: role.id)
             throw error
         }
@@ -123,6 +133,7 @@ actor TogentRuntimeService: TogentRuntimeExecuting {
                 bundledRuntime: runtimeDirectory,
                 relayAccess: access
             )
+            try sandbox.redactPersistedSessionImages(in: layout.sessions)
             try fileManager.createDirectory(
                 at: URL(
                     fileURLWithPath: TogentSandbox.safeEnvironment(
@@ -172,7 +183,12 @@ actor TogentRuntimeService: TogentRuntimeExecuting {
                     workingDirectory: workspace
                 )
                 try client.start()
-                return Entry(signature: signature, client: client, broker: broker)
+                return Entry(
+                    signature: signature,
+                    client: client,
+                    broker: broker,
+                    sessions: layout.sessions
+                )
             } catch {
                 broker.stop()
                 lastError = error

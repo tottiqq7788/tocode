@@ -132,6 +132,94 @@ final class TogentSandbox {
         )
     }
 
+    func redactPersistedSessionImages(in sessions: URL) throws {
+        guard let enumerator = fileManager.enumerator(
+            at: sessions,
+            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
+            options: []
+        ) else {
+            return
+        }
+        for case let file as URL in enumerator {
+            let values = try file.resourceValues(
+                forKeys: [.isRegularFileKey, .isSymbolicLinkKey]
+            )
+            guard values.isRegularFile == true, values.isSymbolicLink != true else {
+                continue
+            }
+            guard file.pathExtension.lowercased() == "jsonl" else {
+                continue
+            }
+            do {
+                let data = try Data(contentsOf: file)
+                guard let text = String(data: data, encoding: .utf8) else {
+                    throw TogentError.runtimeLaunch("Pi 会话不是 UTF-8 JSONL")
+                }
+                var changed = false
+                let lines = text.split(
+                    separator: "\n",
+                    omittingEmptySubsequences: false
+                )
+                let sanitized = try lines.map { line -> String in
+                    guard !line.isEmpty else { return "" }
+                    let object = try JSONSerialization.jsonObject(
+                        with: Data(line.utf8)
+                    )
+                    let result = Self.redactingImages(in: object)
+                    changed = changed || result.changed
+                    return String(
+                        data: try JSONSerialization.data(withJSONObject: result.value),
+                        encoding: .utf8
+                    )!
+                }.joined(separator: "\n")
+                guard changed else { continue }
+                try Data(sanitized.utf8).write(to: file, options: .atomic)
+                try fileManager.setAttributes(
+                    [.posixPermissions: NSNumber(value: 0o600)],
+                    ofItemAtPath: file.path
+                )
+            } catch {
+                try? fileManager.removeItem(at: file)
+                throw TogentError.runtimeLaunch(
+                    "Pi 会话图片正文脱敏失败，已删除受影响会话：\(error.localizedDescription)"
+                )
+            }
+        }
+    }
+
+    private static func redactingImages(in value: Any) -> (value: Any, changed: Bool) {
+        if let dictionary = value as? [String: Any] {
+            if dictionary["type"] as? String == "image",
+               dictionary["data"] is String {
+                return (
+                    [
+                        "type": "text",
+                        "text": "[已从持久会话移除归档图片正文；如仍需识图，请重新读取原工作区相对路径。]"
+                    ],
+                    true
+                )
+            }
+            var changed = false
+            var result: [String: Any] = [:]
+            for (key, nested) in dictionary {
+                let redacted = redactingImages(in: nested)
+                result[key] = redacted.value
+                changed = changed || redacted.changed
+            }
+            return (result, changed)
+        }
+        if let array = value as? [Any] {
+            var changed = false
+            let result = array.map { nested -> Any in
+                let redacted = redactingImages(in: nested)
+                changed = changed || redacted.changed
+                return redacted.value
+            }
+            return (result, changed)
+        }
+        return (value, false)
+    }
+
     func profileText(
         workspace: URL,
         runtimeRoot: URL,

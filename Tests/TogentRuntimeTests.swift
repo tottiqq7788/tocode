@@ -107,6 +107,26 @@ func testTogentRelayInternalCredentialAndHealthModels() {
             && unknownItem.image?.accessibilityDescription == "能力未知",
         "角色模型下拉明确标出能力未知"
     )
+    var unverifiedProvider = provider
+    unverifiedProvider.models = [
+        ModelRelayModelRoute(
+            upstreamModelID: "upstream",
+            alias: "published",
+            capability: ModelRelayModelCapability(
+                imageInput: .multimodal,
+                checkedAt: Date(),
+                probeVersion: ModelRelayModelCapability.currentProbeVersion
+            )
+        )
+    ]
+    router.update(configuration: ModelRelayConfiguration(providers: [unverifiedProvider]))
+    expect(
+        router.availableTogentModels().first?.imageInput == .unknown
+            && router.togentModelFingerprintsForHealthObservation()
+                == ["published|unknown"],
+        "缺少 imageProbe 证据的多模态元数据按能力未知降级"
+    )
+    router.update(configuration: ModelRelayConfiguration(providers: [provider]))
     router.recordFailure(keyID: reference.id, statusCode: 401)
     expect(router.availableTogentModels().isEmpty, "厂家鉴权失败后模型立即从 Togent 列表消失")
     expect(availabilityChanges == 1, "厂家健康可用性变化会通知 Togent")
@@ -217,6 +237,24 @@ func testTogentSandboxProfileAndEnvironment() {
         atPath: layout.settingsFile.path
     )[.posixPermissions] as? NSNumber)?.intValue
     expect(settingsMode == 0o600, "受管 Pi 图片设置文件权限为 0600")
+
+    let session = layout.sessions.appendingPathComponent("image-session.jsonl")
+    let sessionImage = "session-image-base64-must-not-persist"
+    let sessionLine = """
+    {"type":"message","message":{"role":"toolResult","content":[{"type":"text","text":"read image"},{"type":"image","data":"\(sessionImage)","mimeType":"image/jpeg"}]}}
+    """
+    try! Data((sessionLine + "\n").utf8).write(to: session)
+    try! sandbox.redactPersistedSessionImages(in: layout.sessions)
+    let redactedSession = try! String(contentsOf: session, encoding: .utf8)
+    expect(!redactedSession.contains(sessionImage), "持久 Pi 会话不保留图片 base64")
+    expect(
+        redactedSession.contains("已从持久会话移除归档图片正文"),
+        "持久 Pi 会话以可重读路径语义替代图片正文"
+    )
+    let sessionMode = (try? FileManager.default.attributesOfItem(
+        atPath: session.path
+    )[.posixPermissions] as? NSNumber)?.intValue
+    expect(sessionMode == 0o600, "脱敏后的 Pi 会话权限固定为 0600")
 
     let outside = canonicalRoot.appendingPathComponent("outside-secret.txt")
     try! "secret".write(to: outside, atomically: true, encoding: .utf8)
@@ -478,6 +516,22 @@ func testTogentGitBrokerRejectsUncontrolledOperations() {
     expect(outsideFetch["ok"] as? Bool == false, "Git broker 拒绝角色 project 外路径")
 }
 
+private func directoryContains(_ needle: Data, under root: URL) -> Bool {
+    guard let enumerator = FileManager.default.enumerator(
+        at: root,
+        includingPropertiesForKeys: [.isRegularFileKey]
+    ) else {
+        return false
+    }
+    for case let file as URL in enumerator {
+        if let data = try? Data(contentsOf: file),
+           data.range(of: needle) != nil {
+            return true
+        }
+    }
+    return false
+}
+
 func testRealPiThroughSandboxAndRelay() async {
     let runtimeDirectory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         .appendingPathComponent("build/togent-runtime", isDirectory: true)
@@ -589,20 +643,10 @@ func testRealPiThroughSandboxAndRelay() async {
             !sessionPermissions.isEmpty && sessionPermissions.allSatisfy { $0 == 0o600 },
             "Pi 持久会话文件权限为 0600"
         )
-        var leakedToken = false
-        if let enumerator = FileManager.default.enumerator(
-            at: roleRuntime,
-            includingPropertiesForKeys: [.isRegularFileKey]
-        ) {
-            for case let file as URL in enumerator {
-                if let data = try? Data(contentsOf: file),
-                   data.range(of: Data(token.utf8)) != nil {
-                    leakedToken = true
-                    break
-                }
-            }
-        }
-        expect(!leakedToken, "Togent 内部 token 不进入 runtime、配置或会话文件")
+        expect(
+            !directoryContains(Data(token.utf8), under: roleRuntime),
+            "Togent 内部 token 不进入 runtime、配置或会话文件"
+        )
     } catch {
         expect(false, "真 Pi RPC E2E 不应失败：\(error.localizedDescription)")
     }

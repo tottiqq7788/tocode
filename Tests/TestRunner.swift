@@ -4681,6 +4681,38 @@ func testWeChatArchive() async {
         expect(false, "路径穿越返回明确归档边界错误")
     }
 
+    let linkRoot = root.appendingPathComponent("log-link", isDirectory: true)
+    let linkDay = linkRoot.appendingPathComponent("260907", isDirectory: true)
+    try! fm.createDirectory(at: linkDay, withIntermediateDirectories: true)
+    let outsideLog = root.appendingPathComponent("outside-log.md")
+    try! "另一角色原文".write(to: outsideLog, atomically: true, encoding: .utf8)
+    try! fm.createSymbolicLink(
+        at: linkDay.appendingPathComponent("wechat260907.md"),
+        withDestinationURL: outsideLog
+    )
+    let linkArchive = WeChatArchiveService(
+        root: linkRoot,
+        transport: transport,
+        calendarProvider: makeArchiveCalendar
+    )
+    do {
+        _ = try await linkArchive.archive(
+            WeChatMessage(fromUserID: "sender", items: [
+                WeChatItem(type: 1, textItem: WeChatTextItem(text: "不得越界追加"))
+            ]),
+            receivedAt: receivedAt
+        )
+        expect(false, "归档日志不得跟随预置 symlink")
+    } catch WeChatArchiveError.appendLog {
+        expect(true, "归档日志以 O_NOFOLLOW 拒绝 symlink")
+    } catch {
+        expect(false, "归档日志 symlink 返回明确追加错误")
+    }
+    expect(
+        (try! String(contentsOf: outsideLog, encoding: .utf8)) == "另一角色原文",
+        "归档失败前不会污染 symlink 指向的另一角色文件"
+    )
+
     let nextDay = calendar.date(from: DateComponents(
         year: 2026, month: 9, day: 8, hour: 0, minute: 0, second: 1
     ))!

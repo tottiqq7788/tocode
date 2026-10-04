@@ -857,18 +857,18 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             tested: tested,
             status: status,
             performTest: { [weak self] nextDraft, completion in
-                guard let self else { return }
+                guard let self else { return {} }
                 let baseURL: String
                 do {
                     baseURL = try nextDraft.resolvedBaseURL()
                 } catch {
                     completion(.failure(error))
-                    return
+                    return {}
                 }
                 if let providerID {
                     self.relayBusyProviderIDs.insert(providerID)
                 }
-                self.modelRelay.testProviderConnection(
+                let task = self.modelRelay.testProviderConnection(
                     providerID: providerID,
                     baseURL: baseURL,
                     candidateSecret: nextDraft.secret.isEmpty ? nil : nextDraft.secret
@@ -878,15 +878,17 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                     }
                     completion(result)
                 }
+                return { task.cancel() }
             },
             performRefresh: providerID.map { id in
                 { [weak self] completion in
-                    guard let self else { return }
+                    guard let self else { return {} }
                     self.relayBusyProviderIDs.insert(id)
-                    self.modelRelay.fetchModels(providerID: id) { [weak self] result in
+                    let task = self.modelRelay.fetchModels(providerID: id) { [weak self] result in
                         self?.relayBusyProviderIDs.remove(id)
                         completion(result.map(ModelRelayCapabilitySummary.init(routes:)))
                     }
+                    return { task.cancel() }
                 }
             }
         ) {

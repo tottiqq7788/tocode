@@ -22,11 +22,77 @@ struct ModelRelayImageProbeChallenge: Equatable, Sendable {
     let dataURL: String
 }
 
+private final class ModelRelayProbeLimiter: @unchecked Sendable {
+    private struct Waiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Void, Error>
+    }
+
+    private let limit: Int
+    private let lock = NSLock()
+    private var active = 0
+    private var waiters: [Waiter] = []
+
+    init(limit: Int) {
+        self.limit = limit
+    }
+
+    func acquire() async throws {
+        try Task.checkCancellation()
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<Void, Error>) in
+                lock.lock()
+                if Task.isCancelled {
+                    lock.unlock()
+                    continuation.resume(throwing: CancellationError())
+                } else if active < limit {
+                    active += 1
+                    lock.unlock()
+                    continuation.resume()
+                } else {
+                    waiters.append(Waiter(id: id, continuation: continuation))
+                    lock.unlock()
+                }
+            }
+        } onCancel: {
+            self.cancel(id: id)
+        }
+    }
+
+    func release() {
+        let continuation: CheckedContinuation<Void, Error>?
+        lock.lock()
+        if waiters.isEmpty {
+            active = max(0, active - 1)
+            continuation = nil
+        } else {
+            continuation = waiters.removeFirst().continuation
+        }
+        lock.unlock()
+        continuation?.resume()
+    }
+
+    private func cancel(id: UUID) {
+        let continuation: CheckedContinuation<Void, Error>?
+        lock.lock()
+        if let index = waiters.firstIndex(where: { $0.id == id }) {
+            continuation = waiters.remove(at: index).continuation
+        } else {
+            continuation = nil
+        }
+        lock.unlock()
+        continuation?.resume(throwing: CancellationError())
+    }
+}
+
 final class ModelRelayUpstreamClient: ModelRelayCatalogFetching {
     private let sessionConfiguration: URLSessionConfiguration
     private let challengeFactory: () throws -> ModelRelayImageProbeChallenge
     private let now: () -> Date
     private let maximumConcurrentProbes: Int
+    private let probeLimiter: ModelRelayProbeLimiter
 
     init(
         sessionConfiguration: URLSessionConfiguration = .ephemeral,
@@ -42,7 +108,9 @@ final class ModelRelayUpstreamClient: ModelRelayCatalogFetching {
         configuration.timeoutIntervalForRequest = 60
         configuration.timeoutIntervalForResource = 300
         self.sessionConfiguration = configuration
-        self.maximumConcurrentProbes = max(1, maximumConcurrentProbes)
+        let probeLimit = min(3, max(1, maximumConcurrentProbes))
+        self.maximumConcurrentProbes = probeLimit
+        self.probeLimiter = ModelRelayProbeLimiter(limit: probeLimit)
         self.challengeFactory = challengeFactory
         self.now = now
     }
@@ -202,8 +270,20 @@ final class ModelRelayUpstreamClient: ModelRelayCatalogFetching {
         baseURL: String,
         secret: String
     ) async throws -> ModelRelayModelCapability {
+        try await probeLimiter.acquire()
+        defer { probeLimiter.release() }
         try Task.checkCancellation()
-        let challenge = try challengeFactory()
+        let checkedAt = now()
+        let challenge: ModelRelayImageProbeChallenge
+        do {
+            challenge = try challengeFactory()
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            try Task.checkCancellation()
+            return unknownCapability(checkedAt: checkedAt)
+        }
+        try Task.checkCancellation()
         let url = try ModelRelayValidation.endpoint(
             baseURL: baseURL,
             route: "chat/completions"
@@ -238,7 +318,6 @@ final class ModelRelayUpstreamClient: ModelRelayCatalogFetching {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
 
-        let checkedAt = now()
         let data: Data
         let response: URLResponse
         do {
@@ -250,8 +329,10 @@ final class ModelRelayUpstreamClient: ModelRelayCatalogFetching {
         } catch is CancellationError {
             throw CancellationError()
         } catch {
+            try Task.checkCancellation()
             return unknownCapability(checkedAt: checkedAt)
         }
+        try Task.checkCancellation()
         guard let http = response as? HTTPURLResponse else {
             return unknownCapability(checkedAt: checkedAt)
         }
@@ -376,15 +457,35 @@ final class ModelRelayUpstreamClient: ModelRelayCatalogFetching {
 
     private static func isExplicitImageRejection(status: Int, data: Data) -> Bool {
         guard status == 400 || status == 422 else { return false }
-        let message = String(data: data, encoding: .utf8)?.lowercased() ?? ""
-        let mentionsImage = [
-            "image", "vision", "multimodal", "image_url", "modality"
-        ].contains { message.contains($0) }
-        let explicitlyUnsupported = [
-            "does not support", "not support", "unsupported",
-            "only supports text", "text-only", "text only"
-        ].contains { message.contains($0) }
-        return mentionsImage && explicitlyUnsupported
+        let message = upstreamErrorMessage(from: data).lowercased()
+        let patterns = [
+            #"(?:does not|doesn't|doesnt|do not) support (?:the )?(?:image input|image_url|vision input|vision|multimodal input|multimodal)(?![._])"#,
+            #"(?:does not|doesn't|doesnt|do not) support (?:the )?images?\s*[.!]?$"#,
+            #"(?:image input|image_url|vision input|multimodal input)(?![._])(?: is| are)? (?:not supported|unsupported)"#,
+            #"unsupported (?:image input|image_url|vision input|multimodal input)(?![._])"#,
+            #"(?:only supports?|supports only) text(?: input)?\b"#,
+            #"\btext[- ]only(?: model)?\b"#
+        ]
+        return patterns.contains {
+            message.range(of: $0, options: .regularExpression) != nil
+        }
+    }
+
+    private static func upstreamErrorMessage(from data: Data) -> String {
+        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let error = object["error"] as? [String: Any],
+               let message = error["message"] as? String {
+                return message
+            }
+            if let error = object["error"] as? String {
+                return error
+            }
+            if let message = object["message"] as? String {
+                return message
+            }
+            return ""
+        }
+        return String(data: data, encoding: .utf8) ?? ""
     }
 
     func makeProxyOperation(

@@ -133,7 +133,7 @@ final class ModelRelayRouter: @unchecked Sendable {
                 return []
             }
             return provider.models.map {
-                "\($0.alias)|\($0.capability.imageInput.rawValue)"
+                "\($0.alias)|\($0.capability.effectiveImageInput.rawValue)"
             }
         }.sorted()
     }
@@ -156,7 +156,7 @@ final class ModelRelayRouter: @unchecked Sendable {
                     publishedModelID: $0.alias,
                     providerName: provider.name,
                     imageInput: TogentImageInputCapability(
-                        rawValue: $0.capability.imageInput.rawValue
+                        rawValue: $0.capability.effectiveImageInput.rawValue
                     ) ?? .unknown
                 )
             }

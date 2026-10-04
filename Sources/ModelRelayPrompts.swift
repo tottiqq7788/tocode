@@ -120,10 +120,10 @@ enum ModelRelayPrompts {
         performTest: @escaping (
             ProviderDraft,
             @escaping (Result<ModelRelayProviderConnectionTest, Error>) -> Void
-        ) -> Void,
+        ) -> (() -> Void),
         performRefresh: ((
             @escaping (Result<ModelRelayCapabilitySummary, Error>) -> Void
-        ) -> Void)? = nil
+        ) -> (() -> Void))? = nil
     ) -> ProviderFormAction {
         let draft = initialDraft ?? initialProviderDraft(existing: existing)
         let name = NSTextField(string: draft.name)
@@ -536,11 +536,13 @@ private final class ModelRelayProviderFormBridge: NSObject, NSTextFieldDelegate 
     private let performTest: (
         ModelRelayPrompts.ProviderDraft,
         @escaping (Result<ModelRelayProviderConnectionTest, Error>) -> Void
-    ) -> Void
+    ) -> (() -> Void)
     private let performRefresh: ((
         @escaping (Result<ModelRelayCapabilitySummary, Error>) -> Void
-    ) -> Void)?
+    ) -> (() -> Void))?
     private var isBusy = false
+    private var activeOperationID: UUID?
+    private var activeCancellation: (() -> Void)?
 
     init(
         alert: NSAlert,
@@ -563,10 +565,10 @@ private final class ModelRelayProviderFormBridge: NSObject, NSTextFieldDelegate 
         performTest: @escaping (
             ModelRelayPrompts.ProviderDraft,
             @escaping (Result<ModelRelayProviderConnectionTest, Error>) -> Void
-        ) -> Void,
+        ) -> (() -> Void),
         performRefresh: ((
             @escaping (Result<ModelRelayCapabilitySummary, Error>) -> Void
-        ) -> Void)?
+        ) -> (() -> Void))?
     ) {
         self.alert = alert
         self.fieldStack = fieldStack
@@ -645,7 +647,7 @@ private final class ModelRelayProviderFormBridge: NSObject, NSTextFieldDelegate 
             && initial.hasStoredKey
             && !draft.requiresConnectionTest()
         deleteButton?.isEnabled = !isBusy
-        cancelButton.isEnabled = !isBusy
+        cancelButton.isEnabled = true
         name.isEnabled = !isBusy
         provider.isEnabled = !isBusy
         secret.isEnabled = !isBusy
@@ -654,6 +656,9 @@ private final class ModelRelayProviderFormBridge: NSObject, NSTextFieldDelegate 
     }
 
     func detach() {
+        activeCancellation?()
+        activeCancellation = nil
+        activeOperationID = nil
         name.delegate = nil
         customURL.delegate = nil
         secret.delegate = nil
@@ -692,6 +697,10 @@ private final class ModelRelayProviderFormBridge: NSObject, NSTextFieldDelegate 
     }
 
     @objc private func cancelTapped(_ sender: NSButton) {
+        activeCancellation?()
+        activeCancellation = nil
+        activeOperationID = nil
+        isBusy = false
         NSApp.stopModal(withCode: .alertFirstButtonReturn)
     }
 
@@ -705,8 +714,12 @@ private final class ModelRelayProviderFormBridge: NSObject, NSTextFieldDelegate 
         isBusy = true
         statusLabel.stringValue = "正在测试连接…"
         refresh()
-        performTest(draft) { [weak self] result in
-            guard let self else { return }
+        let operationID = UUID()
+        activeOperationID = operationID
+        let cancellation = performTest(draft) { [weak self] result in
+            guard let self, self.activeOperationID == operationID else { return }
+            self.activeOperationID = nil
+            self.activeCancellation = nil
             self.isBusy = false
             switch result {
             case .success(let test):
@@ -718,6 +731,9 @@ private final class ModelRelayProviderFormBridge: NSObject, NSTextFieldDelegate 
             }
             self.refresh()
         }
+        if activeOperationID == operationID {
+            activeCancellation = cancellation
+        }
     }
 
     @objc private func refreshTapped(_ sender: NSButton) {
@@ -725,8 +741,12 @@ private final class ModelRelayProviderFormBridge: NSObject, NSTextFieldDelegate 
         isBusy = true
         statusLabel.stringValue = "正在刷新模型…"
         refresh()
-        performRefresh { [weak self] result in
-            guard let self else { return }
+        let operationID = UUID()
+        activeOperationID = operationID
+        let cancellation = performRefresh { [weak self] result in
+            guard let self, self.activeOperationID == operationID else { return }
+            self.activeOperationID = nil
+            self.activeCancellation = nil
             self.isBusy = false
             switch result {
             case .success(let summary):
@@ -735,6 +755,9 @@ private final class ModelRelayProviderFormBridge: NSObject, NSTextFieldDelegate 
                 self.statusLabel.stringValue = "刷新失败：\(error.localizedDescription)"
             }
             self.refresh()
+        }
+        if activeOperationID == operationID {
+            activeCancellation = cancellation
         }
     }
 }
