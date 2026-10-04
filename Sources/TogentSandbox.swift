@@ -10,6 +10,7 @@ struct TogentRuntimeLayout: Equatable {
     let sandboxProfile: URL
     let gitSocket: URL
     let modelsFile: URL
+    let settingsFile: URL
 }
 
 final class TogentSandbox {
@@ -47,6 +48,7 @@ final class TogentSandbox {
                 "tocode-tg-\(role.id.uuidString.prefix(12)).sock"
             )
         let models = agent.appendingPathComponent("models.json")
+        let settings = agent.appendingPathComponent("settings.json")
 
         for directory in [roleRoot, sessions, agent, temporary, bin] {
             try fileManager.createDirectory(
@@ -61,7 +63,9 @@ final class TogentSandbox {
                 "id": option.publishedModelID,
                 "name": option.displayName,
                 "reasoning": false,
-                "input": ["text"],
+                "input": option.imageInput == .multimodal
+                    ? ["text", "image"]
+                    : ["text"],
                 "contextWindow": 128_000,
                 "maxTokens": 16_384
             ] as [String: Any]
@@ -84,6 +88,17 @@ final class TogentSandbox {
         try fileManager.setAttributes(
             [.posixPermissions: NSNumber(value: 0o600)],
             ofItemAtPath: models.path
+        )
+        // 受管单文件运行时无法可靠加载 Pi 的图片缩放 worker；关闭自动缩放可避免
+        // read 工具把已归档的有效图片静默降级成纯文本错误。原图仍只在角色归档内读取。
+        let settingsData = try JSONSerialization.data(
+            withJSONObject: ["images": ["autoResize": false]],
+            options: [.prettyPrinted, .sortedKeys]
+        )
+        try settingsData.write(to: settings, options: .atomic)
+        try fileManager.setAttributes(
+            [.posixPermissions: NSNumber(value: 0o600)],
+            ofItemAtPath: settings.path
         )
 
         let gitHelper = bin.appendingPathComponent("togent-git")
@@ -112,7 +127,8 @@ final class TogentSandbox {
             binDirectory: bin,
             sandboxProfile: profile,
             gitSocket: socket,
-            modelsFile: models
+            modelsFile: models,
+            settingsFile: settings
         )
     }
 

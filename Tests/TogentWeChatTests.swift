@@ -1,4 +1,7 @@
 import Foundation
+import CoreGraphics
+import ImageIO
+import UniformTypeIdentifiers
 
 @MainActor
 func testTogentWeChatArchiveQueueReplyIntegration() async {
@@ -351,8 +354,41 @@ func testTogentDefaultRoleModelGateAndRoleArchiveRouting() async {
         routingRuntime.executions.map { $0.0.id } == [firstRole.id, secondRole.id],
         "归档与任务执行始终使用同一个收到时角色"
     )
+    let firstAttachment = archiveFiles[0].first { $0.contains("角色A.txt") }!
+    let secondAttachment = archiveFiles[1].first { $0.contains("角色B.txt") }!
+    expect(
+        routingRuntime.executions[0].1.contains("wechat/260907/\(firstAttachment)")
+            && routingRuntime.executions[1].1.contains("wechat/260907/\(secondAttachment)"),
+        "每个任务只收到本次真实归档生成的精确工作区相对附件路径"
+    )
+    expect(
+        !routingRuntime.executions[0].1.contains(secondRole.workspacePath)
+            && !routingRuntime.executions[1].1.contains(firstRole.workspacePath)
+            && routingRuntime.executions.allSatisfy {
+                !$0.1.lowercased().contains("base64")
+                    && !$0.1.contains("角色隔离附件")
+            },
+        "任务提示不复制附件正文/base64，也不泄露另一角色路径"
+    )
 
     let lease = try! routingTogent.beginInbound()!
+    do {
+        try routingTogent.stageInbound(
+            message: secondMessage,
+            deduplicationKey: "malicious-receipt",
+            receivedAt: receivedAt,
+            lease: lease,
+            archiveReceipt: WeChatArchiveReceipt(
+                logRelativePath: "wechat/260907/wechat260907.md",
+                attachmentRelativePaths: ["wechat/../角色A/secret.jpg"]
+            )
+        )
+        expect(false, "Togent 不得接受调用方伪造的路径穿越收据")
+    } catch TogentError.workspaceOutsideBoundary {
+        expect(true, "Togent 在任务持久化前再次拒绝越界附件路径")
+    } catch {
+        expect(false, "越界附件路径返回明确角色边界错误")
+    }
     var switchDuringArchive = TogentRoleDraft(role: firstRole)
     switchDuringArchive.isActive = true
     do {
@@ -703,7 +739,18 @@ func testTogentWeChatRealPiEndToEnd() async {
         models: [
             ModelRelayModelRoute(
                 upstreamModelID: "wechat-upstream-model",
-                alias: "wechat-e2e-model"
+                alias: "wechat-e2e-model",
+                capability: ModelRelayModelCapability(
+                    imageInput: .multimodal,
+                    evidence: .imageProbe,
+                    checkedAt: Date(),
+                    probeVersion: ModelRelayModelCapability.currentProbeVersion
+                )
+            ),
+            ModelRelayModelRoute(
+                upstreamModelID: "wechat-text-upstream",
+                alias: "wechat-text-model",
+                capability: .unknown
             )
         ]
     )
@@ -714,21 +761,118 @@ func testTogentWeChatRealPiEndToEnd() async {
         vault: ModelRelayLocalKeyVault(iterations: 1),
         internalCredentialDigest: ModelRelayLocalKeyVault.digest(relayToken)
     )
-    ModelRelayURLProtocol.reset { _ in
-        let first = """
-        data: {"id":"chatcmpl-wechat-e2e","object":"chat.completion.chunk","created":1,"model":"wechat-upstream-model","choices":[{"index":0,"delta":{"role":"assistant","content":"微信真 Pi 链路完成"},"finish_reason":null}]}
+    let expectedAttachmentPath = "wechat/261005/101112_123_01_image.jpg"
+    let observationLock = NSLock()
+    var initialPromptUsedExactPath = false
+    var sawImageURL = false
+    var textModelOmittedImage = false
+    func observationSnapshot() -> (promptPathOK: Bool, imageForwarded: Bool, textOmitted: Bool) {
+        observationLock.lock()
+        defer { observationLock.unlock() }
+        return (initialPromptUsedExactPath, sawImageURL, textModelOmittedImage)
+    }
+    ModelRelayURLProtocol.reset { request in
+        let bodyData = modelRelayURLRequestBody(request)
+        let bodyText = String(data: bodyData, encoding: .utf8) ?? ""
+        let body = try! JSONSerialization.jsonObject(with: bodyData) as! [String: Any]
+        let upstreamModel = body["model"] as? String
+        let containsImage = bodyText.contains(#""image_url""#)
+            && bodyText.contains("data:image")
+        let containsToolResult = bodyText.contains(#""role":"tool""#)
+        observationLock.lock()
+        if containsImage {
+            sawImageURL = true
+        } else if upstreamModel == "wechat-text-upstream" && containsToolResult {
+            textModelOmittedImage = true
+        } else if !(upstreamModel == "wechat-upstream-model" && containsToolResult) {
+            initialPromptUsedExactPath = initialPromptUsedExactPath
+                || (bodyText
+                    .replacingOccurrences(of: "\\/", with: "/")
+                    .contains(expectedAttachmentPath)
+                    && !bodyText.contains("data:image"))
+        }
+        observationLock.unlock()
 
-        """
-        let final = """
-        data: {"id":"chatcmpl-wechat-e2e","object":"chat.completion.chunk","created":1,"model":"wechat-upstream-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}
-
-        data: [DONE]
-
-        """
+        let chunks: [[String: Any]]
+        if containsImage
+            || (upstreamModel == "wechat-text-upstream" && containsToolResult) {
+            let answer = containsImage
+                ? "微信图片识别链路完成"
+                : "纯文本模型安全降级完成"
+            chunks = [
+                [
+                    "id": "chatcmpl-wechat-image-final",
+                    "object": "chat.completion.chunk",
+                    "created": 1,
+                    "model": "wechat-upstream-model",
+                    "choices": [[
+                        "index": 0,
+                        "delta": [
+                            "role": "assistant",
+                            "content": answer
+                        ],
+                        "finish_reason": NSNull()
+                    ]]
+                ],
+                [
+                    "id": "chatcmpl-wechat-image-final",
+                    "object": "chat.completion.chunk",
+                    "created": 1,
+                    "model": "wechat-upstream-model",
+                    "choices": [[
+                        "index": 0,
+                        "delta": [:],
+                        "finish_reason": "stop"
+                    ]]
+                ]
+            ]
+        } else {
+            chunks = [
+                [
+                    "id": "chatcmpl-wechat-image-read",
+                    "object": "chat.completion.chunk",
+                    "created": 1,
+                    "model": "wechat-upstream-model",
+                    "choices": [[
+                        "index": 0,
+                        "delta": [
+                            "role": "assistant",
+                            "tool_calls": [[
+                                "index": 0,
+                                "id": "call_read_wechat_image",
+                                "type": "function",
+                                "function": [
+                                    "name": "read",
+                                    "arguments": #"{"path":"\#(expectedAttachmentPath)"}"#
+                                ]
+                            ]]
+                        ],
+                        "finish_reason": NSNull()
+                    ]]
+                ],
+                [
+                    "id": "chatcmpl-wechat-image-read",
+                    "object": "chat.completion.chunk",
+                    "created": 1,
+                    "model": "wechat-upstream-model",
+                    "choices": [[
+                        "index": 0,
+                        "delta": [:],
+                        "finish_reason": "tool_calls"
+                    ]]
+                ]
+            ]
+        }
+        let payload = chunks.map {
+            "data: " + String(
+                data: try! JSONSerialization.data(withJSONObject: $0),
+                encoding: .utf8
+            )! + "\n\n"
+        }.joined() + "data: [DONE]\n\n"
         return ModelRelayStubResponse(
             status: 200,
             headers: ["Content-Type": "text/event-stream"],
-            chunks: [Data((first + "\n").utf8), Data(final.utf8)]
+            chunks: [Data(payload.utf8)]
         )
     }
     let relayServer = ModelRelayHTTPServer(
@@ -748,12 +892,18 @@ func testTogentWeChatRealPiEndToEnd() async {
 
     let model = TogentModelOption(
         publishedModelID: "wechat-e2e-model",
-        providerName: "微信 E2E 厂家"
+        providerName: "微信 E2E 厂家",
+        imageInput: .multimodal
+    )
+    let textModel = TogentModelOption(
+        publishedModelID: "wechat-text-model",
+        providerName: "微信 E2E 厂家",
+        imageInput: .unknown
     )
     let access = TogentRelayAccess(
         baseURL: "http://127.0.0.1:\(relayPort)/v1",
         bearerToken: relayToken,
-        models: [model]
+        models: [model, textModel]
     )
     let runtime = TogentRuntimeService(
         relayAccess: { access },
@@ -798,21 +948,71 @@ func testTogentWeChatRealPiEndToEnd() async {
         "完整 E2E 创建默认角色 project 目录"
     )
 
+    let archiveCalendar = makeArchiveCalendar()
+    let receivedAt = archiveCalendar.date(from: DateComponents(
+        year: 2026,
+        month: 10,
+        day: 5,
+        hour: 10,
+        minute: 11,
+        second: 12,
+        nanosecond: 123_000_000
+    ))!
+    let imageMedia = WeChatMedia(
+        encryptQueryParameter: "wechat-e2e-image",
+        aesKey: Data(repeating: 1, count: 16).base64EncodedString()
+    )
     let message = WeChatMessage(
         fromUserID: "wechat-e2e-user",
         contextToken: "wechat-e2e-context",
         messageID: "wechat-e2e-message",
-        items: [WeChatItem(
-            type: 1,
-            textItem: WeChatTextItem(text: "请完成完整链路测试")
-        )]
+        items: [
+            WeChatItem(
+                type: 1,
+                textItem: WeChatTextItem(text: "请识别这张图片")
+            ),
+            WeChatItem(
+                type: 2,
+                imageItem: WeChatImageItem(media: imageMedia)
+            )
+        ]
     )
     let transport = MockWeChatTransport()
+    let imageData = NSMutableData()
+    let imageContext = CGContext(
+        data: nil,
+        width: 64,
+        height: 64,
+        bitsPerComponent: 8,
+        bytesPerRow: 64 * 4,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    )!
+    imageContext.setFillColor(CGColor(red: 0.1, green: 0.6, blue: 0.9, alpha: 1))
+    imageContext.fill(CGRect(x: 0, y: 0, width: 64, height: 64))
+    imageContext.setFillColor(CGColor(gray: 1, alpha: 1))
+    imageContext.fill(CGRect(x: 16, y: 16, width: 32, height: 32))
+    let imageDestination = CGImageDestinationCreateWithData(
+        imageData,
+        UTType.jpeg.identifier as CFString,
+        1,
+        nil
+    )!
+    CGImageDestinationAddImage(
+        imageDestination,
+        imageContext.makeImage()!,
+        [kCGImageDestinationLossyCompressionQuality: 0.9] as CFDictionary
+    )
+    expect(CGImageDestinationFinalize(imageDestination), "图片 E2E 生成有效 JPEG")
+    transport.mediaResult = .success(imageData as Data)
     transport.updates = [
         .success(WeChatUpdates(messages: [message], cursor: "wechat-e2e-cursor")),
         .failure(CancellationError())
     ]
-    let archiver = MockWeChatArchiver()
+    let archiver = WeChatArchiveService(
+        transport: transport,
+        calendarProvider: makeArchiveCalendar
+    )
     let weChat = WeChatAssociationService(
         transport: transport,
         credentialStore: MemoryWeChatCredentialStore(
@@ -824,6 +1024,7 @@ func testTogentWeChatRealPiEndToEnd() async {
         opener: MockWeChatOpener(),
         notifier: MockWeChatNotifier(),
         sleeper: MockWeChatSleeper(),
+        now: { receivedAt },
         togent: togent
     )
     weChat.startBoundListener()
@@ -833,11 +1034,18 @@ func testTogentWeChatRealPiEndToEnd() async {
     weChat.stop()
     await togent.stopAndWait()
 
-    expect(completed, "假 iLink 普通消息经真 Pi 与 Relay 收到最终回复")
-    expect(archiver.messages == [message], "完整 E2E 在 Agent 执行前归档普通消息")
+    expect(completed, "假 iLink 图片经真实归档、真 Pi 与 Relay 收到最终回复")
+    let archivedImage = URL(
+        fileURLWithPath: role.workspacePath,
+        isDirectory: true
+    ).appendingPathComponent(expectedAttachmentPath)
     expect(
-        transport.sentTexts.first?.text == "微信真 Pi 链路完成",
-        "完整 E2E 只回复真 Pi 的 agent settled 最终文本"
+        FileManager.default.fileExists(atPath: archivedImage.path),
+        "完整图片 E2E 在 Agent 执行前真实落盘到当前角色归档"
+    )
+    expect(
+        transport.sentTexts.first?.text == "微信图片识别链路完成",
+        "完整图片 E2E 只回复真 Pi 的 agent settled 最终文本"
     )
     expect(
         (try? store.jobs().first?.state) == .completed,
@@ -852,4 +1060,35 @@ func testTogentWeChatRealPiEndToEnd() async {
         return body["model"] as? String == "wechat-upstream-model"
     }
     expect(rewrittenModel, "完整 E2E 的真 Pi 请求经 Relay 改写上游模型")
+    let imageObservation = observationSnapshot()
+    expect(
+        imageObservation.promptPathOK,
+        "真 Pi 初始任务只收到精确相对附件路径，不含图片正文/base64"
+    )
+    expect(imageObservation.imageForwarded, "真 Pi 调用 read 后 Relay 透明转发 image_url")
+
+    let textRole = TogentRole(
+        id: role.id,
+        name: role.name,
+        workspacePath: role.workspacePath,
+        prompt: role.prompt,
+        publishedModelID: textModel.publishedModelID,
+        isActive: true,
+        createdAt: role.createdAt,
+        updatedAt: Date()
+    )
+    do {
+        let answer = try await runtime.execute(
+            role: textRole,
+            prompt: "请调用 read 工具读取 \(expectedAttachmentPath)，然后回复结果。"
+        )
+        expect(answer.contains("纯文本模型安全降级完成"), "能力未知模型仍可按纯文本执行任务")
+    } catch {
+        expect(false, "能力未知模型安全降级 E2E 不应失败：\(error)")
+    }
+    expect(
+        observationSnapshot().textOmitted,
+        "能力未知模型读取图片时不会向上游发送 image_url"
+    )
+    await runtime.stopAll()
 }

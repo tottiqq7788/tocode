@@ -119,6 +119,25 @@ final class ModelRelayRouter: @unchecked Sendable {
         }.sorted()
     }
 
+    /// 运行时指纹包含图片输入能力；能力变化必须淘汰旧 Pi 与旧 models.json。
+    func togentModelFingerprintsForHealthObservation() -> [String] {
+        lock.lock()
+        let date = now()
+        let providers = configuration.providers
+        let healthSnapshot = health
+        lock.unlock()
+
+        return providers.flatMap { provider -> [String] in
+            guard let reference = provider.upstreamKey,
+                  healthSnapshot[reference.id, default: KeyHealth()].isAvailable(at: date) else {
+                return []
+            }
+            return provider.models.map {
+                "\($0.alias)|\($0.capability.imageInput.rawValue)"
+            }
+        }.sorted()
+    }
+
     func availableTogentModels() -> [TogentModelOption] {
         lock.lock()
         let date = now()
@@ -135,7 +154,10 @@ final class ModelRelayRouter: @unchecked Sendable {
             return provider.models.map {
                 TogentModelOption(
                     publishedModelID: $0.alias,
-                    providerName: provider.name
+                    providerName: provider.name,
+                    imageInput: TogentImageInputCapability(
+                        rawValue: $0.capability.imageInput.rawValue
+                    ) ?? .unknown
                 )
             }
         }.sorted {

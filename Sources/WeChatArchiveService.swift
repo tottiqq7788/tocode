@@ -4,6 +4,7 @@ enum WeChatArchiveError: Error, Equatable {
     case createDirectory
     case appendLog
     case missingArchiveRoot
+    case invalidReceiptPath
 }
 
 protocol WeChatFileSystem {
@@ -68,12 +69,22 @@ struct SystemWeChatFileSystem: WeChatFileSystem {
     }
 }
 
+struct WeChatArchiveReceipt: Equatable, Sendable {
+    let logRelativePath: String
+    let attachmentRelativePaths: [String]
+
+    static let empty = WeChatArchiveReceipt(
+        logRelativePath: "",
+        attachmentRelativePaths: []
+    )
+}
+
 protocol WeChatArchiving: AnyObject {
     func archive(
         _ message: WeChatMessage,
         receivedAt: Date,
         root: URL
-    ) async throws
+    ) async throws -> WeChatArchiveReceipt
 }
 
 actor WeChatArchiveService: WeChatArchiving {
@@ -94,18 +105,21 @@ actor WeChatArchiveService: WeChatArchiving {
         self.calendarProvider = calendarProvider
     }
 
-    func archive(_ message: WeChatMessage, receivedAt: Date) async throws {
+    func archive(
+        _ message: WeChatMessage,
+        receivedAt: Date
+    ) async throws -> WeChatArchiveReceipt {
         guard let fixedRoot else {
             throw WeChatArchiveError.missingArchiveRoot
         }
-        try await archive(message, receivedAt: receivedAt, root: fixedRoot)
+        return try await archive(message, receivedAt: receivedAt, root: fixedRoot)
     }
 
     func archive(
         _ message: WeChatMessage,
         receivedAt: Date,
         root: URL
-    ) async throws {
+    ) async throws -> WeChatArchiveReceipt {
         let calendar = calendarProvider()
         let dateName = format(receivedAt, pattern: "yyMMdd", calendar: calendar)
         let timeName = format(receivedAt, pattern: "HHmmss_SSS", calendar: calendar)
@@ -116,6 +130,7 @@ actor WeChatArchiveService: WeChatArchiving {
             try fileSystem.createDirectory(at: dateDirectory)
             try fileSystem.setPermissions(0o700, at: root)
             try fileSystem.setPermissions(0o700, at: dateDirectory)
+            try Self.validateArchiveDirectory(dateDirectory, under: root)
         } catch {
             throw WeChatArchiveError.createDirectory
         }
@@ -173,6 +188,98 @@ actor WeChatArchiveService: WeChatArchiving {
             }
             throw WeChatArchiveError.appendLog
         }
+        do {
+            return WeChatArchiveReceipt(
+                logRelativePath: try Self.validatedWorkspaceRelativePath(
+                    for: logURL,
+                    archiveRoot: root
+                ),
+                attachmentRelativePaths: try savedAttachments.map {
+                    try Self.validatedWorkspaceRelativePath(
+                        for: $0,
+                        archiveRoot: root
+                    )
+                }
+            )
+        } catch {
+            for url in savedAttachments {
+                fileSystem.removeItemIfPresent(at: url)
+            }
+            throw WeChatArchiveError.invalidReceiptPath
+        }
+    }
+
+    static func validatedWorkspaceRelativePath(
+        for fileURL: URL,
+        archiveRoot: URL,
+        fileManager: FileManager = .default
+    ) throws -> String {
+        let root = archiveRoot.standardizedFileURL
+        let file = fileURL.standardizedFileURL
+        guard isDescendant(file.path, of: root.path) else {
+            throw WeChatArchiveError.invalidReceiptPath
+        }
+        let attributes = try fileManager.attributesOfItem(atPath: file.path)
+        let values = try file.resourceValues(
+            forKeys: [.isRegularFileKey, .isSymbolicLinkKey]
+        )
+        guard attributes[.type] as? FileAttributeType == .typeRegular,
+              values.isRegularFile == true,
+              values.isSymbolicLink != true else {
+            throw WeChatArchiveError.invalidReceiptPath
+        }
+        let resolvedRoot = root.resolvingSymlinksInPath().standardizedFileURL
+        let resolvedFile = file.resolvingSymlinksInPath().standardizedFileURL
+        guard isDescendant(resolvedFile.path, of: resolvedRoot.path) else {
+            throw WeChatArchiveError.invalidReceiptPath
+        }
+
+        let workspace = root.deletingLastPathComponent().standardizedFileURL
+        let prefix = workspace.path.hasSuffix("/")
+            ? workspace.path
+            : workspace.path + "/"
+        guard file.path.hasPrefix(prefix) else {
+            throw WeChatArchiveError.invalidReceiptPath
+        }
+        let relative = String(file.path.dropFirst(prefix.count))
+        let components = relative.split(separator: "/", omittingEmptySubsequences: false)
+        guard !relative.hasPrefix("/"),
+              !components.isEmpty,
+              components.first == Substring(root.lastPathComponent),
+              components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else {
+            throw WeChatArchiveError.invalidReceiptPath
+        }
+        return relative
+    }
+
+    private static func validateArchiveDirectory(
+        _ directory: URL,
+        under archiveRoot: URL
+    ) throws {
+        let root = archiveRoot.standardizedFileURL
+        let candidate = directory.standardizedFileURL
+        let rootValues = try root.resourceValues(
+            forKeys: [.isDirectoryKey, .isSymbolicLinkKey]
+        )
+        let candidateValues = try candidate.resourceValues(
+            forKeys: [.isDirectoryKey, .isSymbolicLinkKey]
+        )
+        guard rootValues.isDirectory == true,
+              rootValues.isSymbolicLink != true,
+              candidateValues.isDirectory == true,
+              candidateValues.isSymbolicLink != true,
+              isDescendant(candidate.path, of: root.path),
+              isDescendant(
+                candidate.resolvingSymlinksInPath().path,
+                of: root.resolvingSymlinksInPath().path
+              ) else {
+            throw WeChatArchiveError.invalidReceiptPath
+        }
+    }
+
+    private static func isDescendant(_ candidate: String, of root: String) -> Bool {
+        let prefix = root.hasSuffix("/") ? root : root + "/"
+        return candidate.hasPrefix(prefix)
     }
 
     static func sanitizedFilename(_ rawName: String, fallback: String) -> String {

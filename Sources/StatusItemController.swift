@@ -885,7 +885,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                     self.relayBusyProviderIDs.insert(id)
                     self.modelRelay.fetchModels(providerID: id) { [weak self] result in
                         self?.relayBusyProviderIDs.remove(id)
-                        completion(result.map(\.count))
+                        completion(result.map(ModelRelayCapabilitySummary.init(routes:)))
                     }
                 }
             }

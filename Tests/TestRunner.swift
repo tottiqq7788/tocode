@@ -4587,8 +4587,8 @@ func testWeChatArchive() async {
         ]
     )
 
-    try! await archive.archive(message, receivedAt: receivedAt)
-    try! await archive.archive(message, receivedAt: receivedAt)
+    let firstReceipt = try! await archive.archive(message, receivedAt: receivedAt)
+    let secondReceipt = try! await archive.archive(message, receivedAt: receivedAt)
 
     let day = root.appendingPathComponent("260907", isDirectory: true)
     let log = day.appendingPathComponent("wechat260907.md")
@@ -4608,6 +4608,25 @@ func testWeChatArchive() async {
     expect(names.contains { $0.hasPrefix("080910_123_01_image") && $0.hasSuffix(".jpg") }, "图片按接收时间和两位序号命名")
     expect(names.contains { $0.hasPrefix("080910_123_02_报告") && $0.hasSuffix(".pdf") }, "文件保留清理后的原名和扩展")
     expect(names.contains { $0.contains("_2.") }, "同名附件冲突时追加递增序号且不覆盖")
+    expect(
+        firstReceipt.logRelativePath
+            == "\(root.lastPathComponent)/260907/wechat260907.md",
+        "归档收据返回工作区相对日志路径"
+    )
+    expect(
+        firstReceipt.attachmentRelativePaths.count == 3
+            && secondReceipt.attachmentRelativePaths.count == 3
+            && firstReceipt.attachmentRelativePaths.allSatisfy {
+                !$0.hasPrefix("/") && $0.hasPrefix("\(root.lastPathComponent)/260907/")
+            },
+        "归档收据只含本次实际保存且经过边界校验的相对附件路径"
+    )
+    expect(
+        firstReceipt.attachmentRelativePaths.allSatisfy {
+            !$0.contains("base64") && !$0.contains("decoded-media")
+        },
+        "归档收据不复制附件正文或 base64"
+    )
     let mediaFiles = names.filter { $0 != "wechat260907.md" }
     expect(mediaFiles.count == 6, "两次归档的三类媒体均保留")
     let dayPermissions = (try? fm.attributesOfItem(atPath: day.path)[
@@ -4633,11 +4652,39 @@ func testWeChatArchive() async {
         transport.mediaDescriptors.contains { $0.aesKey == "00112233445566778899aabbccddeeff" },
         "图片优先使用 image_item.aeskey"
     )
+    let outside = root.deletingLastPathComponent()
+        .appendingPathComponent("outside-\(UUID().uuidString).jpg")
+    try! Data("outside".utf8).write(to: outside)
+    defer { try? fm.removeItem(at: outside) }
+    let escapingLink = day.appendingPathComponent("escape.jpg")
+    try! fm.createSymbolicLink(at: escapingLink, withDestinationURL: outside)
+    do {
+        _ = try WeChatArchiveService.validatedWorkspaceRelativePath(
+            for: escapingLink,
+            archiveRoot: root
+        )
+        expect(false, "归档收据不得接受指向角色边界外的 symlink")
+    } catch WeChatArchiveError.invalidReceiptPath {
+        expect(true, "归档收据拒绝 symlink 越界")
+    } catch {
+        expect(false, "symlink 越界返回明确归档边界错误")
+    }
+    do {
+        _ = try WeChatArchiveService.validatedWorkspaceRelativePath(
+            for: root.appendingPathComponent("../\(outside.lastPathComponent)"),
+            archiveRoot: root
+        )
+        expect(false, "归档收据不得接受路径穿越")
+    } catch WeChatArchiveError.invalidReceiptPath {
+        expect(true, "归档收据拒绝路径穿越")
+    } catch {
+        expect(false, "路径穿越返回明确归档边界错误")
+    }
 
     let nextDay = calendar.date(from: DateComponents(
         year: 2026, month: 9, day: 8, hour: 0, minute: 0, second: 1
     ))!
-    try! await archive.archive(
+    _ = try! await archive.archive(
         WeChatMessage(fromUserID: "sender", items: [
             WeChatItem(type: 1, textItem: WeChatTextItem(text: "跨日"))
         ]),
@@ -4657,7 +4704,7 @@ func testWeChatArchive() async {
         calendarProvider: makeArchiveCalendar
     )
     do {
-        try await failingArchive.archive(
+        _ = try await failingArchive.archive(
             WeChatMessage(fromUserID: "sender", items: [
                 WeChatItem(type: 1, textItem: WeChatTextItem(text: "disk"))
             ]),
@@ -4680,7 +4727,7 @@ func testWeChatArchive() async {
         calendarProvider: makeArchiveCalendar
     )
     do {
-        try await rollbackArchive.archive(
+        _ = try await rollbackArchive.archive(
             WeChatMessage(fromUserID: "sender", items: [
                 WeChatItem(type: 2, imageItem: WeChatImageItem(media: media))
             ]),
@@ -4701,7 +4748,7 @@ func testWeChatArchive() async {
         transport: mediaFailTransport,
         calendarProvider: makeArchiveCalendar
     )
-    try! await mediaFailArchive.archive(
+    _ = try! await mediaFailArchive.archive(
         WeChatMessage(fromUserID: "sender", items: [
             WeChatItem(type: 2, imageItem: WeChatImageItem(media: media))
         ]),
@@ -6423,6 +6470,7 @@ struct TestRunnerMain {
         await testModelRelayValidatedKeyControlPlane()
         await testModelRelayStaleRefreshCannotOverwriteNewConnection()
         await testModelRelayUpstreamProxy()
+        await testModelRelayCapabilityDetectionAndRefreshBoundaries()
         await testModelRelayHTTPServerRuntime()
         await testModelRelayPortRollback()
         testModelRelayManualAndLegacyAKContract()

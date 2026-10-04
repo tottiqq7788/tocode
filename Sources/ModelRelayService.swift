@@ -104,7 +104,8 @@ final class ModelRelayService: @unchecked Sendable {
                         ModelRelayModelRoute(
                             id: UUID(),
                             upstreamModelID: $0.upstreamModelID,
-                            alias: $0.upstreamModelID
+                            alias: $0.upstreamModelID,
+                            capability: $0.capability
                         )
                     }
                 ))
@@ -133,7 +134,8 @@ final class ModelRelayService: @unchecked Sendable {
                 models.append(ModelRelayModelRoute(
                     id: route.id,
                     upstreamModelID: route.upstreamModelID,
-                    alias: published
+                    alias: published,
+                    capability: route.capability
                 ))
             }
             next.models = models
@@ -242,7 +244,7 @@ final class ModelRelayService: @unchecked Sendable {
     /// 健康状态回调专用；不能读取钥匙串，否则首次授权会阻塞菜单主线程。
     func togentRelayFingerprint() -> String {
         let snapshot = configurationSnapshot()
-        let models = router.togentModelIDsForHealthObservation()
+        let models = router.togentModelFingerprintsForHealthObservation()
         return (["http://127.0.0.1:\(snapshot.port)/v1"] + models)
             .joined(separator: "\n")
     }
@@ -324,6 +326,7 @@ final class ModelRelayService: @unchecked Sendable {
         let normalizedURL: String
         let secret: String
         let replacesKey: Bool
+        let cachedCapabilities: [String: ModelRelayModelCapability]
         do {
             normalizedURL = try ModelRelayValidation.normalizedBaseURL(baseURL)
             if let providerID {
@@ -335,6 +338,7 @@ final class ModelRelayService: @unchecked Sendable {
             if let candidateSecret, !candidateSecret.isEmpty {
                 secret = try normalizedUpstreamSecret(candidateSecret)
                 replacesKey = true
+                cachedCapabilities = [:]
             } else if let providerID {
                 let snapshot = configurationSnapshot()
                 guard let provider = snapshot.providers.first(where: { $0.id == providerID }),
@@ -345,6 +349,13 @@ final class ModelRelayService: @unchecked Sendable {
                 }
                 secret = stored
                 replacesKey = false
+                cachedCapabilities = provider.baseURL == normalizedURL
+                    ? Dictionary(
+                        uniqueKeysWithValues: provider.models.map {
+                            ($0.upstreamModelID, $0.capability)
+                        }
+                    )
+                    : [:]
             } else {
                 throw ModelRelayError.keyNotFound
             }
@@ -355,9 +366,11 @@ final class ModelRelayService: @unchecked Sendable {
         Task { [weak self] in
             guard let self else { return }
             do {
-                let modelIDs = try await self.upstreamClient.fetchModels(
+                let discovery = try await self.upstreamClient.discoverModels(
                     baseURL: normalizedURL,
-                    secret: secret
+                    secret: secret,
+                    cachedCapabilities: cachedCapabilities,
+                    probeCapabilities: true
                 )
                 self.completeOnMain(completion, result: .success(
                     ModelRelayProviderConnectionTest(
@@ -365,7 +378,8 @@ final class ModelRelayService: @unchecked Sendable {
                         baseURL: normalizedURL,
                         secret: secret,
                         replacesKey: replacesKey,
-                        modelIDs: modelIDs
+                        modelIDs: discovery.modelIDs,
+                        capabilities: discovery.capabilities
                     )
                 ))
             } catch {
@@ -415,6 +429,7 @@ final class ModelRelayService: @unchecked Sendable {
                     providerName: normalizedName,
                     modelIDs: test.modelIDs,
                     existing: [],
+                    capabilities: test.capabilities,
                     configuration: configuration
                 )
                 configuration.providers.append(provider)
@@ -514,6 +529,7 @@ final class ModelRelayService: @unchecked Sendable {
                     providerName: normalizedName,
                     modelIDs: test.modelIDs,
                     existing: current.models,
+                    capabilities: test.capabilities,
                     configuration: configuration
                 )
                 if rotatesConnection {
@@ -818,6 +834,7 @@ final class ModelRelayService: @unchecked Sendable {
     func fetchModels(
         providerID: UUID,
         resetAuthenticationFailures: Bool = true,
+        probeCapabilities: Bool = true,
         completion: @escaping (Result<[ModelRelayModelRoute], Error>) -> Void
     ) {
         let snapshot = configurationSnapshot()
@@ -837,12 +854,17 @@ final class ModelRelayService: @unchecked Sendable {
         Task { [weak self] in
             guard let self else { return }
             do {
-                let modelIDs = try await self.fetchModels(
+                let discovery = try await self.fetchModels(
                     provider: provider,
-                    references: references
+                    references: references,
+                    probeCapabilities: probeCapabilities
                 )
                 do {
-                    let routes = try self.mergeModels(provider: provider, modelIDs: modelIDs)
+                    let routes = try self.mergeModels(
+                        provider: provider,
+                        modelIDs: discovery.modelIDs,
+                        capabilities: discovery.capabilities
+                    )
                     self.completeOnMain(completion, result: .success(routes))
                 } catch {
                     self.completeOnMain(completion, result: .failure(error))
@@ -896,10 +918,16 @@ final class ModelRelayService: @unchecked Sendable {
 
     private func fetchModels(
         provider: ModelRelayProvider,
-        references: [ModelRelayUpstreamKeyReference]
-    ) async throws -> [String] {
+        references: [ModelRelayUpstreamKeyReference],
+        probeCapabilities: Bool
+    ) async throws -> ModelRelayModelDiscovery {
         var lastError: Error = ModelRelayError.noHealthyUpstream
-        var firstSuccessfulCatalog: [String]?
+        var firstSuccessfulCatalog: ModelRelayModelDiscovery?
+        let cachedCapabilities = Dictionary(
+            uniqueKeysWithValues: provider.models.map {
+                ($0.upstreamModelID, $0.capability)
+            }
+        )
         for reference in references {
             do {
                 guard let secret = try upstreamKeyStore.load(id: reference.id) else {
@@ -907,14 +935,18 @@ final class ModelRelayService: @unchecked Sendable {
                     lastError = ModelRelayError.keyNotFound
                     continue
                 }
-                let models = try await upstreamClient.fetchModels(
+                let discovery = try await upstreamClient.discoverModels(
                     baseURL: provider.baseURL,
-                    secret: secret
+                    secret: secret,
+                    cachedCapabilities: cachedCapabilities,
+                    probeCapabilities: probeCapabilities
                 )
                 router.recordSuccess(keyID: reference.id)
                 if firstSuccessfulCatalog == nil {
-                    firstSuccessfulCatalog = models
+                    firstSuccessfulCatalog = discovery
                 }
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
                 let statusCode: Int?
                 if case ModelRelayError.upstreamHTTP(let status) = error {
@@ -957,6 +989,7 @@ final class ModelRelayService: @unchecked Sendable {
         providerName: String,
         modelIDs: [String],
         existing: [ModelRelayModelRoute],
+        capabilities: [String: ModelRelayModelCapability] = [:],
         configuration: ModelRelayConfiguration
     ) -> [ModelRelayModelRoute] {
         let existingByID = Dictionary(
@@ -978,19 +1011,25 @@ final class ModelRelayService: @unchecked Sendable {
                 routes.append(ModelRelayModelRoute(
                     id: existing.id,
                     upstreamModelID: modelID,
-                    alias: published
+                    alias: published,
+                    capability: capabilities[modelID] ?? existing.capability
                 ))
             } else {
                 routes.append(ModelRelayModelRoute(
                     upstreamModelID: modelID,
-                    alias: published
+                    alias: published,
+                    capability: capabilities[modelID] ?? .unknown
                 ))
             }
         }
         return routes
     }
 
-    private func mergeModels(provider: ModelRelayProvider, modelIDs: [String]) throws -> [ModelRelayModelRoute] {
+    private func mergeModels(
+        provider: ModelRelayProvider,
+        modelIDs: [String],
+        capabilities: [String: ModelRelayModelCapability] = [:]
+    ) throws -> [ModelRelayModelRoute] {
         let uniqueIDs = Array(Set(modelIDs)).sorted()
         guard !uniqueIDs.isEmpty else { throw ModelRelayError.noModels }
         var result: [ModelRelayModelRoute] = []
@@ -1021,12 +1060,14 @@ final class ModelRelayService: @unchecked Sendable {
                     merged.append(ModelRelayModelRoute(
                         id: existing.id,
                         upstreamModelID: modelID,
-                        alias: published
+                        alias: published,
+                        capability: capabilities[modelID] ?? existing.capability
                     ))
                 } else {
                     merged.append(ModelRelayModelRoute(
                         upstreamModelID: modelID,
-                        alias: published
+                        alias: published,
+                        capability: capabilities[modelID] ?? .unknown
                     ))
                 }
             }
@@ -1093,7 +1134,11 @@ final class ModelRelayService: @unchecked Sendable {
     private func refreshAllProviders() {
         cleanupPendingUpstreamKeys()
         for provider in configurationSnapshot().providers where !provider.keys.isEmpty {
-            fetchModels(providerID: provider.id, resetAuthenticationFailures: false) { _ in }
+            fetchModels(
+                providerID: provider.id,
+                resetAuthenticationFailures: false,
+                probeCapabilities: false
+            ) { _ in }
         }
     }
 

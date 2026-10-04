@@ -1,11 +1,73 @@
 import Foundation
 
+enum TogentImageInputCapability: String, Codable, Equatable {
+    case multimodal
+    case textOnly
+    case unknown
+}
+
 struct TogentModelOption: Codable, Equatable {
     let publishedModelID: String
     let providerName: String
+    let imageInput: TogentImageInputCapability
+
+    init(
+        publishedModelID: String,
+        providerName: String,
+        imageInput: TogentImageInputCapability = .unknown
+    ) {
+        self.publishedModelID = publishedModelID
+        self.providerName = providerName
+        self.imageInput = imageInput
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case publishedModelID
+        case providerName
+        case imageInput
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        publishedModelID = try values.decode(String.self, forKey: .publishedModelID)
+        providerName = try values.decode(String.self, forKey: .providerName)
+        imageInput = try values.decodeIfPresent(
+            TogentImageInputCapability.self,
+            forKey: .imageInput
+        ) ?? .unknown
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(publishedModelID, forKey: .publishedModelID)
+        try values.encode(providerName, forKey: .providerName)
+        try values.encode(imageInput, forKey: .imageInput)
+    }
 
     var displayName: String {
-        "\(providerName) · \(publishedModelID)"
+        "\(providerName) · \(publishedModelID) · \(capabilityTitle)"
+    }
+
+    var capabilityTitle: String {
+        switch imageInput {
+        case .multimodal:
+            return "多模态"
+        case .textOnly:
+            return "纯文本"
+        case .unknown:
+            return "能力未知"
+        }
+    }
+
+    var capabilitySymbolName: String {
+        switch imageInput {
+        case .multimodal:
+            return "photo"
+        case .textOnly:
+            return "text.alignleft"
+        case .unknown:
+            return "questionmark.circle"
+        }
     }
 }
 

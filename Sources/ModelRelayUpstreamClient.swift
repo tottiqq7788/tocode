@@ -1,41 +1,96 @@
 import Foundation
+import CoreGraphics
+import ImageIO
+import UniformTypeIdentifiers
 
 protocol ModelRelayCatalogFetching {
     func fetchModels(baseURL: String, secret: String) async throws -> [String]
 }
 
+struct ModelRelayCatalogEntry: Equatable, Sendable {
+    let id: String
+    let explicitlyTextOnly: Bool
+}
+
+struct ModelRelayModelDiscovery: Equatable, Sendable {
+    let modelIDs: [String]
+    let capabilities: [String: ModelRelayModelCapability]
+}
+
+struct ModelRelayImageProbeChallenge: Equatable, Sendable {
+    let expectedDigits: String
+    let dataURL: String
+}
+
 final class ModelRelayUpstreamClient: ModelRelayCatalogFetching {
     private let sessionConfiguration: URLSessionConfiguration
+    private let challengeFactory: () throws -> ModelRelayImageProbeChallenge
+    private let now: () -> Date
+    private let maximumConcurrentProbes: Int
 
-    init(sessionConfiguration: URLSessionConfiguration = .ephemeral) {
+    init(
+        sessionConfiguration: URLSessionConfiguration = .ephemeral,
+        maximumConcurrentProbes: Int = 3,
+        challengeFactory: @escaping () throws -> ModelRelayImageProbeChallenge = {
+            try ModelRelayImageProbeGenerator.makeChallenge()
+        },
+        now: @escaping () -> Date = Date.init
+    ) {
         let configuration = sessionConfiguration
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.urlCache = nil
         configuration.timeoutIntervalForRequest = 60
         configuration.timeoutIntervalForResource = 300
         self.sessionConfiguration = configuration
+        self.maximumConcurrentProbes = max(1, maximumConcurrentProbes)
+        self.challengeFactory = challengeFactory
+        self.now = now
     }
 
     func fetchModels(baseURL: String, secret: String) async throws -> [String] {
+        try await fetchModelCatalog(baseURL: baseURL, secret: secret).map(\.id)
+    }
+
+    func discoverModels(
+        baseURL: String,
+        secret: String,
+        cachedCapabilities: [String: ModelRelayModelCapability],
+        probeCapabilities: Bool
+    ) async throws -> ModelRelayModelDiscovery {
+        let catalog = try await fetchModelCatalog(baseURL: baseURL, secret: secret)
+        guard probeCapabilities else {
+            return ModelRelayModelDiscovery(
+                modelIDs: catalog.map(\.id),
+                capabilities: [:]
+            )
+        }
+        let capabilities = try await detectCapabilities(
+            catalog: catalog,
+            baseURL: baseURL,
+            secret: secret,
+            cachedCapabilities: cachedCapabilities
+        )
+        return ModelRelayModelDiscovery(
+            modelIDs: catalog.map(\.id),
+            capabilities: capabilities
+        )
+    }
+
+    func fetchModelCatalog(
+        baseURL: String,
+        secret: String
+    ) async throws -> [ModelRelayCatalogEntry] {
         let url = try ModelRelayValidation.endpoint(baseURL: baseURL, route: "models")
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.setValue("Bearer \(secret)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
-        let redirect = ModelRelayRedirectDelegate(origin: url, secret: secret)
-        let session = URLSession(
-            configuration: sessionConfiguration,
-            delegate: redirect,
-            delegateQueue: nil
+        let (data, response) = try await perform(
+            request,
+            origin: url,
+            secret: secret
         )
-        defer { session.finishTasksAndInvalidate() }
-        let (data, response): (Data, URLResponse)
-        do {
-            (data, response) = try await session.data(for: request)
-        } catch {
-            throw ModelRelayError.upstream(error.localizedDescription)
-        }
         guard let http = response as? HTTPURLResponse else {
             throw ModelRelayError.upstream("没有 HTTP 响应")
         }
@@ -46,14 +101,290 @@ final class ModelRelayUpstreamClient: ModelRelayCatalogFetching {
               let entries = object["data"] as? [[String: Any]] else {
             throw ModelRelayError.upstream("/v1/models 响应格式无效")
         }
-        let models = entries.compactMap { $0["id"] as? String }
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        let unique = Array(Set(models)).sorted()
-        guard !unique.isEmpty else {
+        var unique: [String: ModelRelayCatalogEntry] = [:]
+        for entry in entries {
+            guard let rawID = entry["id"] as? String else { continue }
+            let id = rawID.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !id.isEmpty else { continue }
+            let textOnly = Self.catalogExplicitlyTextOnly(entry)
+            if let previous = unique[id] {
+                unique[id] = ModelRelayCatalogEntry(
+                    id: id,
+                    explicitlyTextOnly: previous.explicitlyTextOnly || textOnly
+                )
+            } else {
+                unique[id] = ModelRelayCatalogEntry(
+                    id: id,
+                    explicitlyTextOnly: textOnly
+                )
+            }
+        }
+        let catalog = unique.values.sorted { $0.id < $1.id }
+        guard !catalog.isEmpty else {
             throw ModelRelayError.noModels
         }
-        return unique
+        return catalog
+    }
+
+    private func detectCapabilities(
+        catalog: [ModelRelayCatalogEntry],
+        baseURL: String,
+        secret: String,
+        cachedCapabilities: [String: ModelRelayModelCapability]
+    ) async throws -> [String: ModelRelayModelCapability] {
+        try Task.checkCancellation()
+        var result: [String: ModelRelayModelCapability] = [:]
+        var pending: [ModelRelayCatalogEntry] = []
+        let checkedAt = now()
+
+        for entry in catalog {
+            if let cached = cachedCapabilities[entry.id],
+               cached.isCurrentAndConclusive {
+                result[entry.id] = cached
+            } else if entry.explicitlyTextOnly {
+                result[entry.id] = ModelRelayModelCapability(
+                    imageInput: .textOnly,
+                    evidence: .catalogMetadata,
+                    checkedAt: checkedAt,
+                    probeVersion: ModelRelayModelCapability.currentProbeVersion
+                )
+            } else {
+                pending.append(entry)
+            }
+        }
+
+        let probed = try await withThrowingTaskGroup(
+            of: (String, ModelRelayModelCapability).self,
+            returning: [String: ModelRelayModelCapability].self
+        ) { group in
+            var detected: [String: ModelRelayModelCapability] = [:]
+            var nextIndex = 0
+            let initialCount = min(maximumConcurrentProbes, pending.count)
+            for _ in 0..<initialCount {
+                let entry = pending[nextIndex]
+                nextIndex += 1
+                group.addTask { [self] in
+                    (
+                        entry.id,
+                        try await probeImageCapability(
+                            modelID: entry.id,
+                            baseURL: baseURL,
+                            secret: secret
+                        )
+                    )
+                }
+            }
+            while let capability = try await group.next() {
+                detected[capability.0] = capability.1
+                if nextIndex < pending.count {
+                    let entry = pending[nextIndex]
+                    nextIndex += 1
+                    group.addTask { [self] in
+                        (
+                            entry.id,
+                            try await probeImageCapability(
+                                modelID: entry.id,
+                                baseURL: baseURL,
+                                secret: secret
+                            )
+                        )
+                    }
+                }
+            }
+            return detected
+        }
+        result.merge(probed) { _, latest in latest }
+        return result
+    }
+
+    func probeImageCapability(
+        modelID: String,
+        baseURL: String,
+        secret: String
+    ) async throws -> ModelRelayModelCapability {
+        try Task.checkCancellation()
+        let challenge = try challengeFactory()
+        let url = try ModelRelayValidation.endpoint(
+            baseURL: baseURL,
+            route: "chat/completions"
+        )
+        let object: [String: Any] = [
+            "model": modelID,
+            "stream": false,
+            "temperature": 0,
+            "max_tokens": 16,
+            "messages": [[
+                "role": "user",
+                "content": [
+                    [
+                        "type": "text",
+                        "text": "Read the six digits in this image. Reply with exactly those digits and nothing else."
+                    ],
+                    [
+                        "type": "image_url",
+                        "image_url": [
+                            "url": challenge.dataURL,
+                            "detail": "low"
+                        ]
+                    ]
+                ]
+            ]]
+        ]
+        var request = URLRequest(url: url, timeoutInterval: 20)
+        request.httpMethod = "POST"
+        request.httpBody = try JSONSerialization.data(withJSONObject: object)
+        request.setValue("Bearer \(secret)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+
+        let checkedAt = now()
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await perform(
+                request,
+                origin: url,
+                secret: secret
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            return unknownCapability(checkedAt: checkedAt)
+        }
+        guard let http = response as? HTTPURLResponse else {
+            return unknownCapability(checkedAt: checkedAt)
+        }
+        guard (200...299).contains(http.statusCode) else {
+            if Self.isExplicitImageRejection(status: http.statusCode, data: data) {
+                return ModelRelayModelCapability(
+                    imageInput: .textOnly,
+                    evidence: .explicitImageRejection,
+                    checkedAt: checkedAt,
+                    probeVersion: ModelRelayModelCapability.currentProbeVersion
+                )
+            }
+            return unknownCapability(checkedAt: checkedAt)
+        }
+        guard let responseText = Self.assistantText(from: data) else {
+            return unknownCapability(checkedAt: checkedAt)
+        }
+        let returnedDigits = String(responseText.filter {
+            $0.asciiValue.map { (48...57).contains($0) } ?? false
+        })
+        guard returnedDigits == challenge.expectedDigits else {
+            return unknownCapability(checkedAt: checkedAt)
+        }
+        return ModelRelayModelCapability(
+            imageInput: .multimodal,
+            evidence: .imageProbe,
+            checkedAt: checkedAt,
+            probeVersion: ModelRelayModelCapability.currentProbeVersion
+        )
+    }
+
+    private func unknownCapability(checkedAt: Date) -> ModelRelayModelCapability {
+        ModelRelayModelCapability(
+            imageInput: .unknown,
+            checkedAt: checkedAt,
+            probeVersion: ModelRelayModelCapability.currentProbeVersion
+        )
+    }
+
+    private func perform(
+        _ request: URLRequest,
+        origin: URL,
+        secret: String
+    ) async throws -> (Data, URLResponse) {
+        let redirect = ModelRelayRedirectDelegate(origin: origin, secret: secret)
+        let session = URLSession(
+            configuration: sessionConfiguration,
+            delegate: redirect,
+            delegateQueue: nil
+        )
+        defer { session.finishTasksAndInvalidate() }
+        do {
+            return try await session.data(for: request)
+        } catch {
+            if error is CancellationError
+                || (error as? URLError)?.code == .cancelled {
+                throw CancellationError()
+            }
+            throw ModelRelayError.upstream(error.localizedDescription)
+        }
+    }
+
+    private static func catalogExplicitlyTextOnly(_ entry: [String: Any]) -> Bool {
+        let dictionaries = [entry, entry["architecture"], entry["capabilities"]]
+            .compactMap { $0 as? [String: Any] }
+        let modalityKeys = [
+            "input_modalities", "inputModalities", "modalities",
+            "supported_modalities", "supportedModalities"
+        ]
+        for dictionary in dictionaries {
+            for key in modalityKeys {
+                guard let raw = dictionary[key] else { continue }
+                let values: [String]
+                if let array = raw as? [String] {
+                    values = array
+                } else if let value = raw as? String {
+                    values = value
+                        .split(whereSeparator: { $0 == "," || $0 == " " })
+                        .map(String.init)
+                } else {
+                    continue
+                }
+                let normalized = values.map {
+                    $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                }
+                let hasImage = normalized.contains {
+                    $0 == "image" || $0 == "vision" || $0 == "image_url"
+                }
+                if !hasImage && normalized.contains("text") {
+                    return true
+                }
+            }
+            for key in [
+                "supports_image_input", "supportsImageInput",
+                "supports_vision", "supportsVision", "vision"
+            ] where dictionary[key] as? Bool == false {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func assistantText(from data: Data) -> String? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let choices = object["choices"] as? [[String: Any]],
+              let message = choices.first?["message"] as? [String: Any],
+              let content = message["content"] else {
+            return nil
+        }
+        if let text = content as? String {
+            return text
+        }
+        if let parts = content as? [[String: Any]] {
+            let text = parts.compactMap { part -> String? in
+                guard (part["type"] as? String) == "text" else { return nil }
+                return part["text"] as? String
+            }.joined()
+            return text.isEmpty ? nil : text
+        }
+        return nil
+    }
+
+    private static func isExplicitImageRejection(status: Int, data: Data) -> Bool {
+        guard status == 400 || status == 422 else { return false }
+        let message = String(data: data, encoding: .utf8)?.lowercased() ?? ""
+        let mentionsImage = [
+            "image", "vision", "multimodal", "image_url", "modality"
+        ].contains { message.contains($0) }
+        let explicitlyUnsupported = [
+            "does not support", "not support", "unsupported",
+            "only supports text", "text-only", "text only"
+        ].contains { message.contains($0) }
+        return mentionsImage && explicitlyUnsupported
     }
 
     func makeProxyOperation(
@@ -416,5 +747,100 @@ private final class ModelRelayRedirectDelegate: NSObject, URLSessionTaskDelegate
         var request = newRequest
         request.setValue("Bearer \(secret)", forHTTPHeaderField: "Authorization")
         completionHandler(request)
+    }
+}
+
+private enum ModelRelayImageProbeGenerator {
+    private static let digitSegments: [Character: Set<Character>] = [
+        "0": Set("abcdef"),
+        "1": Set("bc"),
+        "2": Set("abdeg"),
+        "3": Set("abcdg"),
+        "4": Set("bcfg"),
+        "5": Set("acdfg"),
+        "6": Set("acdefg"),
+        "7": Set("abc"),
+        "8": Set("abcdefg"),
+        "9": Set("abcdfg")
+    ]
+
+    static func makeChallenge() throws -> ModelRelayImageProbeChallenge {
+        let digits = String((0..<6).map { _ in Character(String(Int.random(in: 0...9))) })
+        let width = 252
+        let height = 84
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            throw ModelRelayError.upstream("无法生成图片能力探针")
+        }
+        context.setFillColor(CGColor(gray: 1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        context.setFillColor(CGColor(gray: 0.03, alpha: 1))
+        for (index, digit) in digits.enumerated() {
+            draw(
+                digit: digit,
+                originX: CGFloat(12 + index * 40),
+                in: context
+            )
+        }
+        context.setStrokeColor(CGColor(gray: 0.25, alpha: 1))
+        context.setLineWidth(2)
+        context.stroke(CGRect(x: 2, y: 2, width: width - 4, height: height - 4))
+
+        guard let image = context.makeImage() else {
+            throw ModelRelayError.upstream("无法生成图片能力探针")
+        }
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(
+            data,
+            UTType.png.identifier as CFString,
+            1,
+            nil
+        ) else {
+            throw ModelRelayError.upstream("无法编码图片能力探针")
+        }
+        CGImageDestinationAddImage(destination, image, nil)
+        guard CGImageDestinationFinalize(destination) else {
+            throw ModelRelayError.upstream("无法编码图片能力探针")
+        }
+        return ModelRelayImageProbeChallenge(
+            expectedDigits: digits,
+            dataURL: "data:image/png;base64,\((data as Data).base64EncodedString())"
+        )
+    }
+
+    private static func draw(
+        digit: Character,
+        originX: CGFloat,
+        in context: CGContext
+    ) {
+        guard let segments = digitSegments[digit] else { return }
+        let thickness: CGFloat = 5
+        let horizontalWidth: CGFloat = 24
+        let verticalHeight: CGFloat = 25
+        let x = originX
+        let lowY: CGFloat = 9
+        let middleY: CGFloat = 39
+        let highY: CGFloat = 69
+        let rectangles: [Character: CGRect] = [
+            "a": CGRect(x: x + thickness, y: highY, width: horizontalWidth, height: thickness),
+            "b": CGRect(x: x + horizontalWidth + thickness, y: middleY + thickness, width: thickness, height: verticalHeight),
+            "c": CGRect(x: x + horizontalWidth + thickness, y: lowY + thickness, width: thickness, height: verticalHeight),
+            "d": CGRect(x: x + thickness, y: lowY, width: horizontalWidth, height: thickness),
+            "e": CGRect(x: x, y: lowY + thickness, width: thickness, height: verticalHeight),
+            "f": CGRect(x: x, y: middleY + thickness, width: thickness, height: verticalHeight),
+            "g": CGRect(x: x + thickness, y: middleY, width: horizontalWidth, height: thickness)
+        ]
+        for segment in segments {
+            if let rectangle = rectangles[segment] {
+                context.fill(rectangle)
+            }
+        }
     }
 }

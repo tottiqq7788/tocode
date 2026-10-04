@@ -169,6 +169,30 @@ func testModelRelayValidationConfigAndVault() {
         (try? store.load().pendingUpstreamKeyDeletions) == [],
         "旧配置缺少清理日志字段时向后兼容为空"
     )
+    let legacyRouteID = UUID()
+    let legacyProviderID = UUID()
+    try! Data("""
+    {
+      "version": 1,
+      "port": 27800,
+      "providers": [{
+        "id": "\(legacyProviderID.uuidString)",
+        "name": "legacy",
+        "baseURL": "https://legacy.example/v1",
+        "keys": [],
+        "models": [{
+          "id": "\(legacyRouteID.uuidString)",
+          "upstreamModelID": "legacy-model",
+          "alias": "legacy-model"
+        }]
+      }],
+      "localKeys": []
+    }
+    """.utf8).write(to: store.fileURL)
+    expect(
+        (try? store.load().providers.first?.models.first?.capability.imageInput) == .unknown,
+        "旧模型路由缺少能力字段时兼容解码为能力未知"
+    )
     try! Data("{broken".utf8).write(to: store.fileURL)
     do {
         _ = try store.load()
@@ -1139,6 +1163,301 @@ func testModelRelayUpstreamProxy() async {
         expect(!text.hasSuffix("0\r\n\r\n"), "截断流不伪造正常终止 chunk")
     } catch {
         expect(false, "截断流应结束而非拼接重试：\(error)")
+    }
+}
+
+func testModelRelayCapabilityDetectionAndRefreshBoundaries() async {
+    let expectedDigits = "314159"
+    let challenge = ModelRelayImageProbeChallenge(
+        expectedDigits: expectedDigits,
+        dataURL: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB"
+    )
+    let client = ModelRelayUpstreamClient(
+        sessionConfiguration: modelRelayTestSessionConfiguration(),
+        maximumConcurrentProbes: 3,
+        challengeFactory: { challenge },
+        now: { Date(timeIntervalSince1970: 1_800_000_000) }
+    )
+    let completion: (String) -> Data = { text in
+        try! JSONSerialization.data(withJSONObject: [
+            "choices": [[
+                "message": ["role": "assistant", "content": text]
+            ]]
+        ])
+    }
+    ModelRelayURLProtocol.reset { request in
+        if request.httpMethod == "GET" {
+            return ModelRelayStubResponse(
+                status: 200,
+                chunks: [Data("""
+                {"data":[
+                  {"id":"catalog-text","input_modalities":["text"]},
+                  {"id":"vision","input_modalities":["text","image"]},
+                  {"id":"reject"},
+                  {"id":"auth401"},
+                  {"id":"auth403"},
+                  {"id":"server"},
+                  {"id":"rate"},
+                  {"id":"timeout"},
+                  {"id":"wrong"}
+                ]}
+                """.utf8)]
+            )
+        }
+        let bodyData = modelRelayURLRequestBody(request)
+        let bodyText = String(data: bodyData, encoding: .utf8) ?? ""
+        expect(bodyText.contains(#""type":"image_url""#), "能力探针使用真实 image_url 请求形状")
+        expect(!bodyText.contains(expectedDigits), "能力探针文字不泄露验证码答案")
+        let body = try! JSONSerialization.jsonObject(with: bodyData) as! [String: Any]
+        switch body["model"] as? String {
+        case "vision":
+            return ModelRelayStubResponse(status: 200, chunks: [completion(expectedDigits)])
+        case "reject":
+            return ModelRelayStubResponse(
+                status: 400,
+                chunks: [Data(#"{"error":{"message":"This model does not support image input"}}"#.utf8)]
+            )
+        case "auth401":
+            return ModelRelayStubResponse(status: 401, chunks: [Data()])
+        case "auth403":
+            return ModelRelayStubResponse(status: 403, chunks: [Data()])
+        case "server":
+            return ModelRelayStubResponse(status: 503, chunks: [Data()])
+        case "rate":
+            return ModelRelayStubResponse(status: 429, chunks: [Data()])
+        case "timeout":
+            throw URLError(.timedOut)
+        default:
+            return ModelRelayStubResponse(status: 200, chunks: [completion("000000")])
+        }
+    }
+
+    do {
+        let discovery = try await client.discoverModels(
+            baseURL: "https://capability.example/v1",
+            secret: "secret",
+            cachedCapabilities: [:],
+            probeCapabilities: true
+        )
+        expect(discovery.modelIDs.count == 9, "显式探测保留完整模型目录")
+        expect(
+            discovery.capabilities["catalog-text"]?.imageInput == .textOnly
+                && discovery.capabilities["catalog-text"]?.evidence == .catalogMetadata,
+            "目录明确只含 text 时直接标记纯文本"
+        )
+        expect(
+            discovery.capabilities["vision"]?.imageInput == .multimodal
+                && discovery.capabilities["vision"]?.evidence == .imageProbe,
+            "正确读取合成图片才标记多模态"
+        )
+        expect(
+            discovery.capabilities["reject"]?.imageInput == .textOnly
+                && discovery.capabilities["reject"]?.evidence == .explicitImageRejection,
+            "明确拒绝图片时标记纯文本"
+        )
+        expect(
+            ["auth401", "auth403", "server", "rate", "timeout", "wrong"].allSatisfy {
+                discovery.capabilities[$0]?.imageInput == .unknown
+            },
+            "鉴权、服务端、限流、超时和错误答案均保持能力未知"
+        )
+        let posts = ModelRelayURLProtocol.requests.filter { $0.httpMethod == "POST" }
+        expect(posts.count == 8, "显式操作对每个未确认模型最多发送一个图片探针")
+        expect(
+            Set(posts.compactMap { request -> String? in
+                guard let object = try? JSONSerialization.jsonObject(
+                    with: modelRelayURLRequestBody(request)
+                ) as? [String: Any] else {
+                    return nil
+                }
+                return object["model"] as? String
+            }).count == posts.count,
+            "单次显式操作不会重复探测同一模型"
+        )
+    } catch {
+        expect(false, "三态能力探测不应整体失败：\(error)")
+    }
+
+    let concurrentLock = NSLock()
+    var activeProbes = 0
+    var maximumActiveProbes = 0
+    ModelRelayURLProtocol.reset { request in
+        if request.httpMethod == "GET" {
+            let models = (0..<9).map { ["id": "parallel-\($0)"] }
+            return ModelRelayStubResponse(
+                status: 200,
+                chunks: [try! JSONSerialization.data(withJSONObject: ["data": models])]
+            )
+        }
+        concurrentLock.lock()
+        activeProbes += 1
+        maximumActiveProbes = max(maximumActiveProbes, activeProbes)
+        concurrentLock.unlock()
+        Thread.sleep(forTimeInterval: 0.04)
+        concurrentLock.lock()
+        activeProbes -= 1
+        concurrentLock.unlock()
+        return ModelRelayStubResponse(status: 200, chunks: [completion(expectedDigits)])
+    }
+    do {
+        _ = try await client.discoverModels(
+            baseURL: "https://parallel.example/v1",
+            secret: "secret",
+            cachedCapabilities: [:],
+            probeCapabilities: true
+        )
+        expect(maximumActiveProbes <= 3, "图片能力探针并发数不超过固定上限")
+    } catch {
+        expect(false, "限并发探测应完成：\(error)")
+    }
+
+    ModelRelayBlockingURLProtocol.reset()
+    let cancellableClient = ModelRelayUpstreamClient(
+        sessionConfiguration: modelRelayBlockingSessionConfiguration(),
+        challengeFactory: { challenge }
+    )
+    let probeTask = Task {
+        try await cancellableClient.probeImageCapability(
+            modelID: "cancelled",
+            baseURL: "https://cancel.example/v1",
+            secret: "secret"
+        )
+    }
+    expect(
+        ModelRelayBlockingURLProtocol.waitUntilStarted(timeout: 2),
+        "可取消探针已发出请求"
+    )
+    probeTask.cancel()
+    do {
+        _ = try await probeTask.value
+        expect(false, "取消探针不应返回能力结论")
+    } catch is CancellationError {
+        expect(true, "取消显式传播且不伪造纯文本结论")
+    } catch {
+        expect(false, "取消探针应返回 CancellationError")
+    }
+    expect(
+        ModelRelayBlockingURLProtocol.waitUntilStopped(timeout: 2),
+        "取消探针会取消底层网络任务"
+    )
+
+    let key = ModelRelayUpstreamKeyReference(name: "默认")
+    let provider = ModelRelayProvider(
+        name: "capability-provider",
+        baseURL: "https://refresh.example/v1",
+        keys: [key],
+        models: [
+            ModelRelayModelRoute(upstreamModelID: "refresh-model", alias: "refresh-model")
+        ]
+    )
+    let metrics = MemoryModelRelayCallMetricsStore()
+    let service = ModelRelayService(
+        configStore: MemoryModelRelayConfigStore(
+            ModelRelayConfiguration(providers: [provider])
+        ),
+        upstreamKeyStore: MemoryModelRelayKeyStore([key.id: "stored-secret"]),
+        localKeyVault: ModelRelayLocalKeyVault(iterations: 1),
+        upstreamClient: client,
+        callMetrics: metrics
+    )
+    ModelRelayURLProtocol.reset { request in
+        if request.httpMethod == "GET" {
+            return ModelRelayStubResponse(
+                status: 200,
+                chunks: [Data(#"{"data":[{"id":"refresh-model"}]}"#.utf8)]
+            )
+        }
+        return ModelRelayStubResponse(status: 200, chunks: [completion(expectedDigits)])
+    }
+    func refresh(_ probes: Bool) async -> Result<[ModelRelayModelRoute], Error> {
+        await withCheckedContinuation { continuation in
+            service.fetchModels(
+                providerID: provider.id,
+                probeCapabilities: probes
+            ) {
+                continuation.resume(returning: $0)
+            }
+        }
+    }
+    if case .success(let routes) = await refresh(false) {
+        expect(routes.first?.capability.imageInput == .unknown, "自动目录刷新不推断新能力")
+        expect(
+            ModelRelayURLProtocol.requests.allSatisfy { $0.httpMethod == "GET" },
+            "自动与启动刷新不发送推理探针"
+        )
+    } else {
+        expect(false, "无探针目录刷新应成功")
+    }
+
+    ModelRelayURLProtocol.reset { request in
+        if request.httpMethod == "GET" {
+            return ModelRelayStubResponse(
+                status: 200,
+                chunks: [Data(#"{"data":[{"id":"refresh-model"}]}"#.utf8)]
+            )
+        }
+        return ModelRelayStubResponse(status: 200, chunks: [completion(expectedDigits)])
+    }
+    if case .success(let routes) = await refresh(true) {
+        expect(routes.first?.capability.imageInput == .multimodal, "手动刷新执行图片探针并保存能力")
+        expect(
+            ModelRelayURLProtocol.requests.filter { $0.httpMethod == "POST" }.count == 1,
+            "手动刷新仅探测一次未知模型"
+        )
+        expect(metrics.events.isEmpty, "能力探针不写普通调用次数或明细")
+        expect(
+            (try? service.router.resolve(alias: "refresh-model")) != nil,
+            "能力探针不会破坏 Router 健康状态"
+        )
+        expect(
+            service.togentRelayFingerprint().contains("refresh-model|multimodal"),
+            "能力变化进入 Relay/Togent 指纹并可触发旧 Pi 停止"
+        )
+    } else {
+        expect(false, "显式手动刷新应成功")
+    }
+
+    ModelRelayURLProtocol.reset { request in
+        expect(request.httpMethod == "GET", "已确认能力命中缓存时只读取模型目录")
+        return ModelRelayStubResponse(
+            status: 200,
+            chunks: [Data(#"{"data":[{"id":"refresh-model"}]}"#.utf8)]
+        )
+    }
+    _ = await refresh(true)
+    expect(ModelRelayURLProtocol.requests.count == 1, "当前连接和探针版本未变时复用确认结论")
+
+    ModelRelayURLProtocol.reset { request in
+        if request.httpMethod == "GET" {
+            return ModelRelayStubResponse(
+                status: 200,
+                chunks: [Data(#"{"data":[{"id":"refresh-model"}]}"#.utf8)]
+            )
+        }
+        expect(
+            request.value(forHTTPHeaderField: "Authorization") == "Bearer replacement-secret",
+            "候选 Key 更换后使用新连接重新探测"
+        )
+        return ModelRelayStubResponse(status: 200, chunks: [completion(expectedDigits)])
+    }
+    let retest: Result<ModelRelayProviderConnectionTest, Error> = await withCheckedContinuation {
+        continuation in
+        service.testProviderConnection(
+            providerID: provider.id,
+            baseURL: provider.baseURL,
+            candidateSecret: "replacement-secret"
+        ) {
+            continuation.resume(returning: $0)
+        }
+    }
+    if case .success(let tested) = retest {
+        expect(
+            tested.capabilities["refresh-model"]?.imageInput == .multimodal
+                && ModelRelayURLProtocol.requests.filter { $0.httpMethod == "POST" }.count == 1,
+            "连接或 Key 改变会失效旧能力并重新探测"
+        )
+    } else {
+        expect(false, "连接变更后的显式重测应成功")
     }
 }
 

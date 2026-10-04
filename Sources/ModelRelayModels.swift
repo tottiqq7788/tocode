@@ -83,15 +83,86 @@ struct ModelRelayUpstreamKeyReference: Codable, Equatable, Identifiable {
     }
 }
 
+enum ModelRelayImageInputCapability: String, Codable, Equatable, Sendable {
+    case multimodal
+    case textOnly
+    case unknown
+}
+
+enum ModelRelayCapabilityEvidence: String, Codable, Equatable, Sendable {
+    case catalogMetadata
+    case imageProbe
+    case explicitImageRejection
+}
+
+struct ModelRelayModelCapability: Codable, Equatable, Sendable {
+    static let currentProbeVersion = 1
+    static let unknown = ModelRelayModelCapability(imageInput: .unknown)
+
+    var imageInput: ModelRelayImageInputCapability
+    var evidence: ModelRelayCapabilityEvidence?
+    var checkedAt: Date?
+    var probeVersion: Int?
+
+    init(
+        imageInput: ModelRelayImageInputCapability,
+        evidence: ModelRelayCapabilityEvidence? = nil,
+        checkedAt: Date? = nil,
+        probeVersion: Int? = nil
+    ) {
+        self.imageInput = imageInput
+        self.evidence = evidence
+        self.checkedAt = checkedAt
+        self.probeVersion = probeVersion
+    }
+
+    var isCurrentAndConclusive: Bool {
+        imageInput != .unknown && probeVersion == Self.currentProbeVersion
+    }
+}
+
 struct ModelRelayModelRoute: Codable, Equatable, Identifiable {
     let id: UUID
     let upstreamModelID: String
     var alias: String
+    var capability: ModelRelayModelCapability
 
-    init(id: UUID = UUID(), upstreamModelID: String, alias: String) {
+    init(
+        id: UUID = UUID(),
+        upstreamModelID: String,
+        alias: String,
+        capability: ModelRelayModelCapability = .unknown
+    ) {
         self.id = id
         self.upstreamModelID = upstreamModelID
         self.alias = alias
+        self.capability = capability
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case upstreamModelID
+        case alias
+        case capability
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(UUID.self, forKey: .id)
+        upstreamModelID = try values.decode(String.self, forKey: .upstreamModelID)
+        alias = try values.decode(String.self, forKey: .alias)
+        capability = try values.decodeIfPresent(
+            ModelRelayModelCapability.self,
+            forKey: .capability
+        ) ?? .unknown
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(id, forKey: .id)
+        try values.encode(upstreamModelID, forKey: .upstreamModelID)
+        try values.encode(alias, forKey: .alias)
+        try values.encode(capability, forKey: .capability)
     }
 }
 
@@ -143,6 +214,61 @@ struct ModelRelayProviderConnectionTest {
     let secret: String
     let replacesKey: Bool
     let modelIDs: [String]
+    let capabilities: [String: ModelRelayModelCapability]
+
+    init(
+        providerID: UUID?,
+        baseURL: String,
+        secret: String,
+        replacesKey: Bool,
+        modelIDs: [String],
+        capabilities: [String: ModelRelayModelCapability] = [:]
+    ) {
+        self.providerID = providerID
+        self.baseURL = baseURL
+        self.secret = secret
+        self.replacesKey = replacesKey
+        self.modelIDs = modelIDs
+        self.capabilities = capabilities
+    }
+
+    var capabilitySummary: ModelRelayCapabilitySummary {
+        ModelRelayCapabilitySummary(modelIDs: modelIDs, capabilities: capabilities)
+    }
+}
+
+struct ModelRelayCapabilitySummary: Equatable {
+    let total: Int
+    let multimodal: Int
+    let textOnly: Int
+    let unknown: Int
+
+    init(
+        modelIDs: [String],
+        capabilities: [String: ModelRelayModelCapability]
+    ) {
+        total = modelIDs.count
+        multimodal = modelIDs.filter {
+            capabilities[$0]?.imageInput == .multimodal
+        }.count
+        textOnly = modelIDs.filter {
+            capabilities[$0]?.imageInput == .textOnly
+        }.count
+        unknown = max(0, total - multimodal - textOnly)
+    }
+
+    init(routes: [ModelRelayModelRoute]) {
+        self.init(
+            modelIDs: routes.map(\.upstreamModelID),
+            capabilities: Dictionary(
+                uniqueKeysWithValues: routes.map { ($0.upstreamModelID, $0.capability) }
+            )
+        )
+    }
+
+    var displayText: String {
+        "共 \(total) 个：多模态 \(multimodal)、纯文本 \(textOnly)、能力未知 \(unknown)"
+    }
 }
 
 enum ModelRelayRunState: Equatable {

@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 
 private final class TogentSynchronizedFlag: @unchecked Sendable {
     private let lock = NSLock()
@@ -43,7 +44,16 @@ func testTogentRelayInternalCredentialAndHealthModels() {
         baseURL: "https://example.invalid/v1",
         keys: [reference],
         models: [
-            ModelRelayModelRoute(upstreamModelID: "upstream", alias: "published")
+            ModelRelayModelRoute(
+                upstreamModelID: "upstream",
+                alias: "published",
+                capability: ModelRelayModelCapability(
+                    imageInput: .multimodal,
+                    evidence: .imageProbe,
+                    checkedAt: Date(),
+                    probeVersion: ModelRelayModelCapability.currentProbeVersion
+                )
+            )
         ]
     )
     let keyStore = MemoryModelRelayKeyStore([reference.id: "upstream-secret"])
@@ -62,8 +72,40 @@ func testTogentRelayInternalCredentialAndHealthModels() {
     expect(!router.authenticate("wrong"), "Relay 拒绝错误 Togent token")
     expect(
         router.availableTogentModels()
-            == [TogentModelOption(publishedModelID: "published", providerName: "厂家A")],
-        "Togent 模型列表只呈现健康厂家与发布模型名"
+            == [TogentModelOption(
+                publishedModelID: "published",
+                providerName: "厂家A",
+                imageInput: .multimodal
+            )],
+        "Togent 模型列表投影健康厂家、发布模型名与图片能力"
+    )
+    expect(
+        router.togentModelFingerprintsForHealthObservation() == ["published|multimodal"],
+        "Togent 健康指纹纳入图片输入能力"
+    )
+    let menuItem = TogentPrompts.modelMenuItem(
+        for: TogentModelOption(
+            publishedModelID: "published",
+            providerName: "厂家A",
+            imageInput: .multimodal
+        )
+    )
+    expect(
+        menuItem.title.contains("多模态")
+            && menuItem.image?.accessibilityDescription == "多模态",
+        "角色模型下拉以 photo 图标和明确文字标出多模态"
+    )
+    let unknownItem = TogentPrompts.modelMenuItem(
+        for: TogentModelOption(
+            publishedModelID: "unknown",
+            providerName: "厂家A",
+            imageInput: .unknown
+        )
+    )
+    expect(
+        unknownItem.title.contains("能力未知")
+            && unknownItem.image?.accessibilityDescription == "能力未知",
+        "角色模型下拉明确标出能力未知"
     )
     router.recordFailure(keyID: reference.id, statusCode: 401)
     expect(router.availableTogentModels().isEmpty, "厂家鉴权失败后模型立即从 Togent 列表消失")
@@ -128,7 +170,23 @@ func testTogentSandboxProfileAndEnvironment() {
     let access = TogentRelayAccess(
         baseURL: "http://127.0.0.1:27800/v1",
         bearerToken: "secret-in-memory",
-        models: [TogentModelOption(publishedModelID: "model-a", providerName: "厂家")]
+        models: [
+            TogentModelOption(
+                publishedModelID: "model-a",
+                providerName: "厂家",
+                imageInput: .multimodal
+            ),
+            TogentModelOption(
+                publishedModelID: "model-b",
+                providerName: "厂家",
+                imageInput: .textOnly
+            ),
+            TogentModelOption(
+                publishedModelID: "model-c",
+                providerName: "厂家",
+                imageInput: .unknown
+            )
+        ]
     )
     let layout = try! sandbox.prepare(role: role, bundledRuntime: bundle, relayAccess: access)
     let environment = TogentSandbox.safeEnvironment(layout: layout, relayToken: access.bearerToken)
@@ -138,6 +196,27 @@ func testTogentSandboxProfileAndEnvironment() {
     let models = try! String(contentsOf: layout.modelsFile, encoding: .utf8)
     expect(models.contains("${TOGENT_RELAY_KEY}"), "models.json 只引用环境变量 token")
     expect(!models.contains(access.bearerToken), "models.json 不落临时 token 明文")
+    let modelObject = try! JSONSerialization.jsonObject(
+        with: Data(models.utf8)
+    ) as! [String: Any]
+    let providers = modelObject["providers"] as! [String: Any]
+    let tocode = providers["tocode"] as! [String: Any]
+    let entries = tocode["models"] as! [[String: Any]]
+    let inputs = Dictionary(uniqueKeysWithValues: entries.map {
+        ($0["id"] as! String, $0["input"] as! [String])
+    })
+    expect(inputs["model-a"] == ["text", "image"], "确认多模态模型在 models.json 声明图片输入")
+    expect(inputs["model-b"] == ["text"], "纯文本模型在 models.json 仅声明文本输入")
+    expect(inputs["model-c"] == ["text"], "能力未知模型按纯文本安全降级")
+    let settings = try! String(contentsOf: layout.settingsFile, encoding: .utf8)
+    expect(
+        settings.contains("\"autoResize\" : false"),
+        "受管单文件 Pi 禁用不可用的图片缩放 worker，避免 read 静默丢图"
+    )
+    let settingsMode = (try? FileManager.default.attributesOfItem(
+        atPath: layout.settingsFile.path
+    )[.posixPermissions] as? NSNumber)?.intValue
+    expect(settingsMode == 0o600, "受管 Pi 图片设置文件权限为 0600")
 
     let outside = canonicalRoot.appendingPathComponent("outside-secret.txt")
     try! "secret".write(to: outside, atomically: true, encoding: .utf8)

@@ -122,7 +122,7 @@ enum ModelRelayPrompts {
             @escaping (Result<ModelRelayProviderConnectionTest, Error>) -> Void
         ) -> Void,
         performRefresh: ((
-            @escaping (Result<Int, Error>) -> Void
+            @escaping (Result<ModelRelayCapabilitySummary, Error>) -> Void
         ) -> Void)? = nil
     ) -> ProviderFormAction {
         let draft = initialDraft ?? initialProviderDraft(existing: existing)
@@ -143,7 +143,7 @@ enum ModelRelayPrompts {
         if let existing {
             modelHint = existing.models.isEmpty
                 ? "已保存厂家。修改地址或 Key 后需重新测试；也可刷新上游模型目录。"
-                : "已保存厂家，当前同步 \(existing.models.count) 个模型。修改地址或 Key 后需重新测试。"
+                : "已保存厂家，\(ModelRelayCapabilitySummary(routes: existing.models).displayText)。修改地址或 Key 后需重新测试。"
         } else {
             modelHint = "选择预设或自定义地址，连接测试通过后才能保存。"
         }
@@ -537,7 +537,9 @@ private final class ModelRelayProviderFormBridge: NSObject, NSTextFieldDelegate 
         ModelRelayPrompts.ProviderDraft,
         @escaping (Result<ModelRelayProviderConnectionTest, Error>) -> Void
     ) -> Void
-    private let performRefresh: ((@escaping (Result<Int, Error>) -> Void) -> Void)?
+    private let performRefresh: ((
+        @escaping (Result<ModelRelayCapabilitySummary, Error>) -> Void
+    ) -> Void)?
     private var isBusy = false
 
     init(
@@ -562,7 +564,9 @@ private final class ModelRelayProviderFormBridge: NSObject, NSTextFieldDelegate 
             ModelRelayPrompts.ProviderDraft,
             @escaping (Result<ModelRelayProviderConnectionTest, Error>) -> Void
         ) -> Void,
-        performRefresh: ((@escaping (Result<Int, Error>) -> Void) -> Void)?
+        performRefresh: ((
+            @escaping (Result<ModelRelayCapabilitySummary, Error>) -> Void
+        ) -> Void)?
     ) {
         self.alert = alert
         self.fieldStack = fieldStack
@@ -707,7 +711,7 @@ private final class ModelRelayProviderFormBridge: NSObject, NSTextFieldDelegate 
             switch result {
             case .success(let test):
                 self.currentTest = test
-                self.statusLabel.stringValue = "连接成功，发现 \(test.modelIDs.count) 个模型，可以保存。"
+                self.statusLabel.stringValue = "连接成功，\(test.capabilitySummary.displayText)，可以保存。能力未知可能由限流、超时、服务错误或识图答案不符导致。"
             case .failure(let error):
                 self.currentTest = nil
                 self.statusLabel.stringValue = "连接失败：\(error.localizedDescription)"
@@ -725,8 +729,8 @@ private final class ModelRelayProviderFormBridge: NSObject, NSTextFieldDelegate 
             guard let self else { return }
             self.isBusy = false
             switch result {
-            case .success(let count):
-                self.statusLabel.stringValue = "已刷新，同步 \(count) 个模型。"
+            case .success(let summary):
+                self.statusLabel.stringValue = "已刷新，\(summary.displayText)。能力未知可能由限流、超时、服务错误或识图答案不符导致。"
             case .failure(let error):
                 self.statusLabel.stringValue = "刷新失败：\(error.localizedDescription)"
             }

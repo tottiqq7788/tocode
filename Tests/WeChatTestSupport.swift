@@ -215,16 +215,18 @@ final class MockWeChatArchiver: WeChatArchiving {
     var receivedDates: [Date] = []
     var roots: [URL] = []
     var error: Error?
+    var receipt: WeChatArchiveReceipt = .empty
 
     func archive(
         _ message: WeChatMessage,
         receivedAt: Date,
         root: URL
-    ) async throws {
+    ) async throws -> WeChatArchiveReceipt {
         if let error { throw error }
         messages.append(message)
         receivedDates.append(receivedAt)
         roots.append(root)
+        return receipt
     }
 }
 

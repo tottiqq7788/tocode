@@ -170,19 +170,28 @@ final class TogentService {
         message: WeChatMessage,
         deduplicationKey: String,
         receivedAt: Date,
-        lease: TogentInboundLease
+        lease: TogentInboundLease,
+        archiveReceipt: WeChatArchiveReceipt = .empty
     ) throws {
         try checkStartup()
         guard let leasedRole = inboundLeaseRoles[lease.id],
               leasedRole.id == lease.roleID else {
             throw TogentError.unavailable("微信入站角色租约已失效")
         }
+        let attachmentPaths = try validatedAttachmentPaths(
+            archiveReceipt,
+            role: leasedRole,
+            lease: lease
+        )
         _ = try store.stageJob(
             deduplicationKey: deduplicationKey,
             roleID: leasedRole.id,
             fromUserID: message.fromUserID,
             contextToken: message.contextToken,
-            messageText: Self.normalizedMessage(message),
+            messageText: Self.normalizedMessage(
+                message,
+                attachmentPaths: attachmentPaths
+            ),
             receivedAt: receivedAt
         )
     }
@@ -395,7 +404,67 @@ final class TogentService {
         }
     }
 
-    private static func normalizedMessage(_ message: WeChatMessage) -> String {
+    private func validatedAttachmentPaths(
+        _ receipt: WeChatArchiveReceipt,
+        role: TogentRole,
+        lease: TogentInboundLease
+    ) throws -> [String] {
+        let workspaceRoot = URL(
+            fileURLWithPath: role.workspacePath,
+            isDirectory: true
+        ).standardizedFileURL
+        let expectedArchiveRoot = workspaceRoot
+            .appendingPathComponent("wechat", isDirectory: true)
+            .standardizedFileURL
+        guard lease.archiveRoot.standardizedFileURL == expectedArchiveRoot else {
+            throw TogentError.workspaceOutsideBoundary
+        }
+        let resolvedArchiveRoot = expectedArchiveRoot
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+        let archivePrefix = expectedArchiveRoot.path + "/"
+        let resolvedPrefix = resolvedArchiveRoot.path + "/"
+
+        return try receipt.attachmentRelativePaths.map { relative in
+            let components = relative.split(
+                separator: "/",
+                omittingEmptySubsequences: false
+            )
+            guard !relative.hasPrefix("/"),
+                  components.count >= 3,
+                  components.first == "wechat",
+                  components.allSatisfy({
+                      !$0.isEmpty && $0 != "." && $0 != ".."
+                  }) else {
+                throw TogentError.workspaceOutsideBoundary
+            }
+            let file = workspaceRoot
+                .appendingPathComponent(relative, isDirectory: false)
+                .standardizedFileURL
+            guard file.path.hasPrefix(archivePrefix) else {
+                throw TogentError.workspaceOutsideBoundary
+            }
+            let attributes = try FileManager.default.attributesOfItem(
+                atPath: file.path
+            )
+            let values = try file.resourceValues(
+                forKeys: [.isRegularFileKey, .isSymbolicLinkKey]
+            )
+            let resolvedFile = file.resolvingSymlinksInPath().standardizedFileURL
+            guard attributes[.type] as? FileAttributeType == .typeRegular,
+                  values.isRegularFile == true,
+                  values.isSymbolicLink != true,
+                  resolvedFile.path.hasPrefix(resolvedPrefix) else {
+                throw TogentError.workspaceOutsideBoundary
+            }
+            return relative
+        }
+    }
+
+    private static func normalizedMessage(
+        _ message: WeChatMessage,
+        attachmentPaths: [String]
+    ) -> String {
         var parts: [String] = []
         for item in message.items {
             if let text = item.textItem?.text.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -413,6 +482,11 @@ final class TogentService {
             } else {
                 parts.append("（非文本消息，详情见微信归档）")
             }
+        }
+        if !attachmentPaths.isEmpty {
+            parts.append("归档附件（当前角色工作区相对路径，只读）：")
+            parts.append(contentsOf: attachmentPaths.map { "- \($0)" })
+            parts.append("如需查看图片，必须调用 read 工具读取上述准确路径；不要猜测文件名，也不要改写归档。")
         }
         let normalized = parts.joined(separator: "\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)

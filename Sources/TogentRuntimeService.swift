@@ -10,6 +10,7 @@ actor TogentRuntimeService: TogentRuntimeExecuting {
     private struct Signature: Equatable {
         let workspacePath: String
         let modelID: String
+        let imageInput: TogentImageInputCapability
         let relayBaseURL: String
     }
 
@@ -58,7 +59,7 @@ actor TogentRuntimeService: TogentRuntimeExecuting {
             throw TogentError.modelNotConfigured
         }
         let access = relayAccess()
-        guard access.models.contains(where: {
+        guard let selectedModel = access.models.first(where: {
             $0.publishedModelID == role.publishedModelID
         }) else {
             await stop(roleID: role.id)
@@ -67,6 +68,7 @@ actor TogentRuntimeService: TogentRuntimeExecuting {
         let signature = Signature(
             workspacePath: role.workspacePath,
             modelID: role.publishedModelID,
+            imageInput: selectedModel.imageInput,
             relayBaseURL: access.baseURL
         )
         let entry: Entry

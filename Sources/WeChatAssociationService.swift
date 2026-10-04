@@ -377,7 +377,7 @@ final class WeChatAssociationService: WeChatAssociationControlling {
         }
         defer { togent.endInbound(lease) }
 
-        try await archiver.archive(
+        let archiveReceipt = try await archiver.archive(
             message,
             receivedAt: receivedAt,
             root: lease.archiveRoot
@@ -390,7 +390,8 @@ final class WeChatAssociationService: WeChatAssociationControlling {
                 message: message,
                 deduplicationKey: key,
                 receivedAt: receivedAt,
-                lease: lease
+                lease: lease,
+                archiveReceipt: archiveReceipt
             )
         } catch {
             stagingError = error

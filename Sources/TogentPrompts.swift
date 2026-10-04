@@ -96,14 +96,18 @@ enum TogentPrompts {
         if draft.publishedModelID.isEmpty {
             modelPopup.addItem(withTitle: "未配置")
             modelPopup.lastItem?.representedObject = ""
+            modelPopup.lastItem?.image = NSImage(
+                systemSymbolName: "minus.circle",
+                accessibilityDescription: "未配置"
+            )
             modelPopup.select(modelPopup.lastItem)
             hasCurrentModel = true
         }
         for model in models {
-            modelPopup.addItem(withTitle: model.displayName)
-            modelPopup.lastItem?.representedObject = model.publishedModelID
+            let item = modelMenuItem(for: model)
+            modelPopup.menu?.addItem(item)
             if model.publishedModelID == draft.publishedModelID {
-                modelPopup.select(modelPopup.lastItem)
+                modelPopup.select(item)
                 hasCurrentModel = true
             }
         }
@@ -113,6 +117,10 @@ enum TogentPrompts {
                 at: 0
             )
             modelPopup.item(at: 0)?.representedObject = draft.publishedModelID
+            modelPopup.item(at: 0)?.image = NSImage(
+                systemSymbolName: "exclamationmark.triangle",
+                accessibilityDescription: "模型已失效"
+            )
             modelPopup.selectItem(at: 0)
         }
         modelPopup.isEnabled = !models.isEmpty
@@ -150,6 +158,20 @@ enum TogentPrompts {
             return .openWorkspace(candidate)
         }
         return .save(candidate)
+    }
+
+    static func modelMenuItem(for model: TogentModelOption) -> NSMenuItem {
+        let item = NSMenuItem(
+            title: model.displayName,
+            action: nil,
+            keyEquivalent: ""
+        )
+        item.representedObject = model.publishedModelID
+        item.image = NSImage(
+            systemSymbolName: model.capabilitySymbolName,
+            accessibilityDescription: model.capabilityTitle
+        )
+        return item
     }
 
     static func showError(_ error: Error, title: String = "Togent 设置未保存") {
