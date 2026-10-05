@@ -167,6 +167,70 @@ struct TogentJob: Codable, Equatable, Identifiable {
     var updatedAt: Date
 }
 
+struct TogentReply: Equatable {
+    static let openingTag = "<tocode_wechat_files>"
+    static let closingTag = "</tocode_wechat_files>"
+    static let maximumFileCount = 5
+
+    let text: String
+    let relativeFilePaths: [String]
+
+    init(text: String, relativeFilePaths: [String] = []) {
+        self.text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.relativeFilePaths = relativeFilePaths
+    }
+
+    static func parse(_ raw: String) throws -> TogentReply {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let openingCount = value.components(separatedBy: openingTag).count - 1
+        let closingCount = value.components(separatedBy: closingTag).count - 1
+        if openingCount == 0, closingCount == 0 {
+            guard !value.isEmpty else { throw TogentError.emptyReply }
+            return TogentReply(text: value)
+        }
+        guard openingCount == 1,
+              closingCount == 1,
+              value.hasSuffix(closingTag),
+              let openingRange = value.range(of: openingTag),
+              let closingRange = value.range(
+                of: closingTag,
+                range: openingRange.upperBound..<value.endIndex
+              ) else {
+            throw TogentError.invalidReplyProtocol
+        }
+
+        let payloadText = String(value[openingRange.upperBound..<closingRange.lowerBound])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let payloadData = payloadText.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: payloadData),
+              let dictionary = object as? [String: Any],
+              Set(dictionary.keys) == Set(["files"]),
+              let paths = dictionary["files"] as? [String],
+              !paths.isEmpty,
+              paths.count <= maximumFileCount,
+              Set(paths).count == paths.count,
+              paths.allSatisfy(isValidRelativeFilePath) else {
+            throw TogentError.invalidReplyProtocol
+        }
+        let text = String(value[..<openingRange.lowerBound])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return TogentReply(text: text, relativeFilePaths: paths)
+    }
+
+    private static func isValidRelativeFilePath(_ path: String) -> Bool {
+        guard !path.isEmpty,
+              path.count <= 1_024,
+              !path.hasPrefix("/"),
+              !path.contains("\0") else {
+            return false
+        }
+        let components = path.split(separator: "/", omittingEmptySubsequences: false)
+        return !components.isEmpty && components.allSatisfy {
+            !$0.isEmpty && $0 != "." && $0 != ".."
+        }
+    }
+}
+
 enum TogentError: Error, Equatable, LocalizedError {
     case unavailable(String)
     case invalidRoleName
@@ -188,6 +252,8 @@ enum TogentError: Error, Equatable, LocalizedError {
     case rpcTimeout
     case noActiveRole
     case emptyReply
+    case invalidReplyProtocol
+    case replyFileRejected(String)
     case gitOperationDenied
     case gitFailed(String)
 
@@ -233,6 +299,10 @@ enum TogentError: Error, Equatable, LocalizedError {
             return "尚未激活 Togent 角色，请在 Tocode 的“微信 → togent”中配置并勾选角色。"
         case .emptyReply:
             return "Agent 已结束，但没有生成可发送的文本回复。"
+        case .invalidReplyProtocol:
+            return "Agent 生成的微信文件回复格式无效，未发送任何文件。"
+        case .replyFileRejected(let message):
+            return "Agent 请求发送的文件被拒绝：\(message)"
         case .gitOperationDenied:
             return "该远程 Git 操作不在 Togent 允许范围内。"
         case .gitFailed(let message):

@@ -114,7 +114,7 @@ func testTogentWeChatArchiveQueueReplyIntegration() async {
         imageCaptionTimeout: 0.5
     )
     var imageReplies: [String] = []
-    imageTogent.replyHandler = { _, text in imageReplies.append(text) }
+    imageTogent.replyHandler = { _, _, reply in imageReplies.append(reply.text) }
     var imageRoleDraft = imageTogent.newRoleDraft()
     imageRoleDraft.name = "图片等待角色"
     imageRoleDraft.publishedModelID = "model-a"
@@ -677,7 +677,7 @@ func testTogentTwoPhaseRecoveryAndStateFailure() async {
         waitsForText: true
     )
     var replies: [String] = []
-    togent.replyHandler = { _, text in replies.append(text) }
+    togent.replyHandler = { _, _, reply in replies.append(reply.text) }
     togent.recover(
         committedDeduplicationKeys: [
             "committed",
@@ -941,7 +941,7 @@ func testTogentArchiveReplyModelAndCrashFaults() async {
     replyDraft.publishedModelID = "model-a"
     _ = try! replyTogent.createRole(from: replyDraft)
     var replyAttempts = 0
-    replyTogent.replyHandler = { _, _ in
+    replyTogent.replyHandler = { _, _, _ in
         replyAttempts += 1
         throw TestWeChatError.forced
     }
@@ -982,7 +982,7 @@ func testTogentArchiveReplyModelAndCrashFaults() async {
     modelDraft.publishedModelID = "model-a"
     _ = try! modelTogent.createRole(from: modelDraft)
     var modelReplies: [String] = []
-    modelTogent.replyHandler = { _, text in modelReplies.append(text) }
+    modelTogent.replyHandler = { _, _, reply in modelReplies.append(reply.text) }
     let modelLease = try! modelTogent.beginInbound()!
     try! modelTogent.stageInbound(
         message: message,
@@ -1019,7 +1019,7 @@ func testTogentArchiveReplyModelAndCrashFaults() async {
     crashDraft.publishedModelID = "model-a"
     _ = try! crashTogent.createRole(from: crashDraft)
     var crashReplies: [String] = []
-    crashTogent.replyHandler = { _, text in crashReplies.append(text) }
+    crashTogent.replyHandler = { _, _, reply in crashReplies.append(reply.text) }
     let crashLease = try! crashTogent.beginInbound()!
     try! crashTogent.stageInbound(
         message: message,
@@ -1056,7 +1056,7 @@ func testTogentArchiveReplyModelAndCrashFaults() async {
     shutdownDraft.name = "退出恢复"
     shutdownDraft.publishedModelID = "model-a"
     _ = try! shutdownTogent.createRole(from: shutdownDraft)
-    shutdownTogent.replyHandler = { _, _ in }
+    shutdownTogent.replyHandler = { _, _, _ in }
     let shutdownLease = try! shutdownTogent.beginInbound()!
     try! shutdownTogent.stageInbound(
         message: message,
@@ -1212,7 +1212,12 @@ func testTogentWeChatRealPiEndToEnd() async {
         if containsImage
             || (upstreamModel == "wechat-text-upstream" && containsToolResult) {
             let answer = containsImage
-                ? "微信图片识别链路完成"
+                ? """
+                微信图片识别链路完成
+                <tocode_wechat_files>
+                {"files":["AGENTS.md"]}
+                </tocode_wechat_files>
+                """
                 : "纯文本模型安全降级完成"
             chunks = [
                 [
@@ -1495,7 +1500,18 @@ func testTogentWeChatRealPiEndToEnd() async {
     expect(
         transport.sentTexts.first?.text == "微信图片识别链路完成"
             && transport.sentTexts.first?.contextToken == "wechat-e2e-caption-context",
-        "连续图片与文字只向最后会话上下文回复一次真 Pi 最终文本"
+        "真 Pi 文件控制块不外显且最终文本只回复最后会话上下文"
+    )
+    expect(
+        transport.uploaded.first?.fileName == "AGENTS.md"
+            && transport.uploaded.first?.kind == .file
+            && transport.sentItems.count == 2
+            && transport.sentItems[0].items.first.map {
+                if case .file(name: "AGENTS.md", media: _) = $0 { return true }
+                return false
+            } == true
+            && transport.sentItems[1].items == [.text("微信图片识别链路完成")],
+        "真 Pi 最终回复经解析后先上传发送工作区文件再发送文本"
     )
     let completedJobs = (try? store.jobs()) ?? []
     expect(
@@ -1570,4 +1586,228 @@ func testTogentWeChatRealPiEndToEnd() async {
         "真 Pi 完成识图后持久会话不保留图片正文/base64"
     )
     await runtime.stopAll()
+}
+
+private struct TogentFileReplyScenarioResult {
+    var state: TogentJobState?
+    var uploadedNames: [String]
+    var uploadedKinds: [WeChatOutboundMediaKind]
+    var uploadedPayloads: [Data]
+    var outboundKinds: [String]
+    var visibleTexts: [String]
+}
+
+@MainActor
+private func runTogentFileReplyScenario(
+    _ label: String,
+    reply: String,
+    prepareWorkspace: (URL) -> Void,
+    configureTransport: (MockWeChatTransport) -> Void = { _ in }
+) async -> TogentFileReplyScenarioResult {
+    let root = makeTogentTemporaryDirectory("file-reply-\(label)")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = TogentStore(databaseURL: root.appendingPathComponent("togent.sqlite"))
+    let runtime = StubTogentRuntime()
+    runtime.result = .success(reply)
+    let togent = TogentService(
+        store: store,
+        workspace: TogentWorkspaceService(homeDirectory: root),
+        runtime: runtime,
+        availableModelOptions: {
+            [TogentModelOption(publishedModelID: "model-a", providerName: "厂家")]
+        },
+        bootstrapDefaultRole: false
+    )
+    var draft = togent.newRoleDraft()
+    draft.name = "文件回复角色"
+    draft.publishedModelID = "model-a"
+    let role = try! togent.createRole(from: draft)
+    let workspaceURL = URL(fileURLWithPath: role.workspacePath, isDirectory: true)
+    prepareWorkspace(workspaceURL)
+
+    let transport = MockWeChatTransport()
+    configureTransport(transport)
+    let association = WeChatAssociationService(
+        transport: transport,
+        credentialStore: MemoryWeChatCredentialStore(
+            WeChatCredential(token: "bound", baseURL: WeChatILinkClient.officialBaseURL)
+        ),
+        stateStore: MemoryWeChatStateStore(),
+        archiver: MockWeChatArchiver(),
+        pageWriter: MockWeChatBindingPage(),
+        opener: MockWeChatOpener(),
+        notifier: MockWeChatNotifier(),
+        sleeper: MockWeChatSleeper(),
+        togent: togent
+    )
+    let lease = try! togent.beginInbound()!
+    let deduplicationKey = "file-reply-\(label)"
+    try! togent.stageInbound(
+        message: WeChatMessage(
+            fromUserID: "wechat-user",
+            contextToken: "file-context",
+            messageID: deduplicationKey,
+            items: [WeChatItem(type: 1, textItem: WeChatTextItem(text: "把文件发给我"))]
+        ),
+        deduplicationKey: deduplicationKey,
+        receivedAt: Date(),
+        lease: lease
+    )
+    togent.endInbound(lease)
+    try! togent.commitStagedInbound(deduplicationKey: deduplicationKey)
+    _ = await waitForTogentCondition(timeout: 5) {
+        guard let state = try? store.jobs().first?.state else { return false }
+        return state == .completed || state == .failed
+    }
+    _ = association
+    let state = try? store.jobs().first?.state
+    let outboundKinds = transport.sentItems.flatMap(\.items).map { item in
+        switch item {
+        case .text: return "text"
+        case .image: return "image"
+        case .file: return "file"
+        }
+    }
+    let result = TogentFileReplyScenarioResult(
+        state: state,
+        uploadedNames: transport.uploaded.map(\.fileName),
+        uploadedKinds: transport.uploaded.map(\.kind),
+        uploadedPayloads: transport.uploaded.map(\.data),
+        outboundKinds: outboundKinds,
+        visibleTexts: transport.sentTexts.map(\.text)
+    )
+    togent.stop()
+    return result
+}
+
+@MainActor
+func testTogentWorkspaceFileReplyAndFaults() async {
+    let success = await runTogentFileReplyScenario(
+        "success",
+        reply: """
+        文件已发送。
+        <tocode_wechat_files>
+        {"files":["project/report.txt","project/pixel.png"]}
+        </tocode_wechat_files>
+        """,
+        prepareWorkspace: { workspace in
+            try! Data("report-body".utf8).write(
+                to: workspace.appendingPathComponent("project/report.txt")
+            )
+            try! Data("image-body".utf8).write(
+                to: workspace.appendingPathComponent("project/pixel.png")
+            )
+        }
+    )
+    expect(success.state == .completed, "工作区文件与文本全部发出后任务才标记完成")
+    expect(
+        success.uploadedNames == ["report.txt", "pixel.png"]
+            && success.uploadedKinds == [.file, .image]
+            && success.uploadedPayloads == [
+                Data("report-body".utf8),
+                Data("image-body".utf8)
+            ],
+        "Togent 按声明顺序上传文件并沿用图片类型识别"
+    )
+    expect(
+        success.outboundKinds == ["file", "image", "text"]
+            && success.visibleTexts == ["文件已发送。"]
+            && success.visibleTexts.allSatisfy {
+                !$0.contains("tocode_wechat_files")
+            },
+        "Togent 先发送全部文件再发送剥离控制块的用户可见文本"
+    )
+
+    let symlink = await runTogentFileReplyScenario(
+        "symlink",
+        reply: """
+        <tocode_wechat_files>
+        {"files":["project/link.txt"]}
+        </tocode_wechat_files>
+        """,
+        prepareWorkspace: { workspace in
+            let target = workspace.appendingPathComponent("project/target.txt")
+            try! Data("target".utf8).write(to: target)
+            try! FileManager.default.createSymbolicLink(
+                at: workspace.appendingPathComponent("project/link.txt"),
+                withDestinationURL: target
+            )
+        }
+    )
+    expect(
+        symlink.state == .failed && symlink.uploadedNames.isEmpty,
+        "Togent 拒绝符号链接且文件失败不误标 completed"
+    )
+
+    let directory = await runTogentFileReplyScenario(
+        "directory",
+        reply: """
+        <tocode_wechat_files>
+        {"files":["project/folder"]}
+        </tocode_wechat_files>
+        """,
+        prepareWorkspace: { workspace in
+            try! FileManager.default.createDirectory(
+                at: workspace.appendingPathComponent("project/folder"),
+                withIntermediateDirectories: true
+            )
+        }
+    )
+    expect(
+        directory.state == .failed && directory.uploadedNames.isEmpty,
+        "Togent 拒绝把目录作为微信文件发送"
+    )
+
+    let oversized = await runTogentFileReplyScenario(
+        "oversized",
+        reply: """
+        <tocode_wechat_files>
+        {"files":["project/large.bin"]}
+        </tocode_wechat_files>
+        """,
+        prepareWorkspace: { workspace in
+            let url = workspace.appendingPathComponent("project/large.bin")
+            FileManager.default.createFile(atPath: url.path, contents: nil)
+            let handle = try! FileHandle(forWritingTo: url)
+            try! handle.truncate(atOffset: UInt64(20 * 1_024 * 1_024 + 1))
+            try! handle.close()
+        }
+    )
+    expect(
+        oversized.state == .failed && oversized.uploadedNames.isEmpty,
+        "Togent 在上传前拒绝超过 20MB 的文件"
+    )
+
+    let escaped = await runTogentFileReplyScenario(
+        "escape",
+        reply: """
+        <tocode_wechat_files>
+        {"files":["../other-role/secret.txt"]}
+        </tocode_wechat_files>
+        """,
+        prepareWorkspace: { _ in }
+    )
+    expect(
+        escaped.state == .failed && escaped.uploadedNames.isEmpty,
+        "Togent 拒绝越出固定角色工作区的回复路径"
+    )
+
+    let uploadFailure = await runTogentFileReplyScenario(
+        "upload-failure",
+        reply: """
+        <tocode_wechat_files>
+        {"files":["project/report.txt"]}
+        </tocode_wechat_files>
+        """,
+        prepareWorkspace: { workspace in
+            try! Data("report".utf8).write(
+                to: workspace.appendingPathComponent("project/report.txt")
+            )
+        },
+        configureTransport: { $0.uploadError = TestWeChatError.forced }
+    )
+    expect(
+        uploadFailure.state == .failed,
+        "微信上传失败时 Togent durable job 保持失败语义"
+    )
 }

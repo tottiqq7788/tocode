@@ -35,6 +35,56 @@ func testTogentJSONLFramingAndReplyChunks() {
     expect(chunks.count == 3, "微信 Agent 长回复按上限分块")
     expect(chunks.allSatisfy { $0.count <= 1_800 }, "微信 Agent 每块不超过字符上限")
     expect(chunks.joined() == text, "微信 Agent 分块不丢字符")
+
+    let plainReply = try! TogentReply.parse("普通文本回复")
+    expect(
+        plainReply == TogentReply(text: "普通文本回复"),
+        "Togent 纯文本最终回复保持向后兼容"
+    )
+    let fileReply = try! TogentReply.parse(
+        """
+        文件已准备好。
+        <tocode_wechat_files>
+        {"files":["AGENTS.md","project/demo/说明.txt"]}
+        </tocode_wechat_files>
+        """
+    )
+    expect(fileReply.text == "文件已准备好。", "文件控制块不进入用户可见文本")
+    expect(
+        fileReply.relativeFilePaths == ["AGENTS.md", "project/demo/说明.txt"],
+        "文件控制块保留工作区相对路径顺序"
+    )
+    let fileOnlyReply = try! TogentReply.parse(
+        """
+        <tocode_wechat_files>
+        {"files":["AGENTS.md"]}
+        </tocode_wechat_files>
+        """
+    )
+    expect(fileOnlyReply.text.isEmpty, "只发送文件时允许空文本")
+
+    let invalidReplies = [
+        "<tocode_wechat_files>{\"files\":[\"/tmp/a\"]}</tocode_wechat_files>",
+        "<tocode_wechat_files>{\"files\":[\"../a\"]}</tocode_wechat_files>",
+        "<tocode_wechat_files>{\"files\":[\"a\",\"a\"]}</tocode_wechat_files>",
+        "<tocode_wechat_files>{\"files\":[\"1\",\"2\",\"3\",\"4\",\"5\",\"6\"]}</tocode_wechat_files>",
+        "<tocode_wechat_files>{\"files\":[\"a\"],\"extra\":true}</tocode_wechat_files>",
+        "<tocode_wechat_files>{\"files\":[\"a\"]}</tocode_wechat_files>尾随文字",
+        "<tocode_wechat_files>{broken}</tocode_wechat_files>"
+    ]
+    expect(
+        invalidReplies.allSatisfy {
+            do {
+                _ = try TogentReply.parse($0)
+                return false
+            } catch TogentError.invalidReplyProtocol {
+                return true
+            } catch {
+                return false
+            }
+        },
+        "文件控制块拒绝绝对路径、穿越、重复、超量、额外字段、非终态和损坏 JSON"
+    )
 }
 
 func testTogentRelayInternalCredentialAndHealthModels() {

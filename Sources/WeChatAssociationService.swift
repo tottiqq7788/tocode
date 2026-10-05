@@ -1,5 +1,6 @@
 import Foundation
 import UserNotifications
+import Darwin
 
 @MainActor
 protocol WeChatAssociationControlling: AnyObject {
@@ -131,11 +132,11 @@ final class WeChatAssociationService: WeChatAssociationControlling {
 
     func attachTogent(_ service: TogentService) {
         togent = service
-        service.replyHandler = { [weak self] job, text in
+        service.replyHandler = { [weak self] job, role, reply in
             guard let self else {
                 throw TogentError.unavailable("微信服务已停止")
             }
-            try await self.sendTogentReply(job: job, text: text)
+            try await self.sendTogentReply(job: job, role: role, reply: reply)
         }
     }
 
@@ -582,14 +583,49 @@ final class WeChatAssociationService: WeChatAssociationControlling {
         return .success(TocodeCommandOutput(sent == 1 ? "已发送" : "已发送 \(sent) 条消息"))
     }
 
-    private func sendTogentReply(job: TogentJob, text: String) async throws {
+    private func sendTogentReply(
+        job: TogentJob,
+        role: TogentRole?,
+        reply: TogentReply
+    ) async throws {
         guard let credential else {
             throw TogentError.unavailable("微信绑定已失效")
         }
-        let chunks = TogentReplyChunker.chunks(text)
-        guard !chunks.isEmpty else {
+        guard !reply.relativeFilePaths.isEmpty || !reply.text.isEmpty else {
             throw TogentError.emptyReply
         }
+        if !reply.relativeFilePaths.isEmpty, role == nil {
+            throw TogentError.replyFileRejected("任务角色不可用")
+        }
+        if let role {
+            for relativePath in reply.relativeFilePaths {
+                let file = try Self.readTogentReplyFile(
+                    relativePath,
+                    workspacePath: role.workspacePath
+                )
+                let uploaded = try await transport.uploadMedia(
+                    credential: credential,
+                    toUserID: job.fromUserID,
+                    fileName: file.name,
+                    data: file.data,
+                    kind: file.kind
+                )
+                let item: WeChatOutboundMessageItem
+                switch file.kind {
+                case .image:
+                    item = .image(uploaded)
+                case .file:
+                    item = .file(name: file.name, media: uploaded)
+                }
+                try await transport.sendItems(
+                    credential: credential,
+                    toUserID: job.fromUserID,
+                    contextToken: job.contextToken,
+                    items: [item]
+                )
+            }
+        }
+        let chunks = TogentReplyChunker.chunks(reply.text)
         for chunk in chunks {
             try await transport.sendText(
                 credential: credential,
@@ -598,6 +634,107 @@ final class WeChatAssociationService: WeChatAssociationControlling {
                 text: chunk
             )
         }
+    }
+
+    private struct TogentReplyFile {
+        let name: String
+        let data: Data
+        let kind: WeChatOutboundMediaKind
+    }
+
+    private static func readTogentReplyFile(
+        _ relativePath: String,
+        workspacePath: String
+    ) throws -> TogentReplyFile {
+        let components = relativePath.split(
+            separator: "/",
+            omittingEmptySubsequences: false
+        ).map(String.init)
+        guard !components.isEmpty,
+              components.allSatisfy({
+                  !$0.isEmpty && $0 != "." && $0 != ".."
+              }) else {
+            throw TogentError.replyFileRejected("文件路径无效")
+        }
+
+        var directoryDescriptor = workspacePath.withCString {
+            Darwin.open(
+                $0,
+                O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+            )
+        }
+        guard directoryDescriptor >= 0 else {
+            throw TogentError.replyFileRejected("角色工作区不可安全打开")
+        }
+        defer { Darwin.close(directoryDescriptor) }
+
+        var directoryMetadata = stat()
+        guard Darwin.fstat(directoryDescriptor, &directoryMetadata) == 0,
+              directoryMetadata.st_mode & S_IFMT == S_IFDIR else {
+            throw TogentError.replyFileRejected("角色工作区不是安全目录")
+        }
+
+        for component in components.dropLast() {
+            let nextDescriptor = component.withCString {
+                Darwin.openat(
+                    directoryDescriptor,
+                    $0,
+                    O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+                )
+            }
+            guard nextDescriptor >= 0 else {
+                throw TogentError.replyFileRejected("文件路径包含不可访问目录")
+            }
+            Darwin.close(directoryDescriptor)
+            directoryDescriptor = nextDescriptor
+        }
+
+        let name = components.last!
+        let fileDescriptor = name.withCString {
+            Darwin.openat(
+                directoryDescriptor,
+                $0,
+                O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC
+            )
+        }
+        guard fileDescriptor >= 0 else {
+            throw TogentError.replyFileRejected("找不到安全的普通文件：\(relativePath)")
+        }
+        defer { Darwin.close(fileDescriptor) }
+
+        var metadata = stat()
+        let maximumBytes = TocodeWechatSendPayload.maximumFileBytes
+        guard Darwin.fstat(fileDescriptor, &metadata) == 0,
+              metadata.st_mode & S_IFMT == S_IFREG else {
+            throw TogentError.replyFileRejected("只允许发送普通文件")
+        }
+        guard metadata.st_size >= 0,
+              UInt64(metadata.st_size) <= UInt64(maximumBytes) else {
+            throw TogentError.replyFileRejected("文件超过 20MB：\(name)")
+        }
+
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        while true {
+            let count = buffer.withUnsafeMutableBytes {
+                Darwin.read(fileDescriptor, $0.baseAddress, $0.count)
+            }
+            if count > 0 {
+                data.append(contentsOf: buffer.prefix(count))
+                guard data.count <= maximumBytes else {
+                    throw TogentError.replyFileRejected("文件超过 20MB：\(name)")
+                }
+                continue
+            }
+            if count == 0 { break }
+            if errno == EINTR { continue }
+            throw TogentError.replyFileRejected("读取文件失败：\(name)")
+        }
+        return TogentReplyFile(
+            name: name,
+            data: data,
+            kind: WeChatOutboundMediaKind.classify(path: name)
+        )
     }
 
     private func sendImmediateTogentError(_ error: Error, for message: WeChatMessage) async {

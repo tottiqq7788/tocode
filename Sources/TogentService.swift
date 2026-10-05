@@ -2,7 +2,11 @@ import Foundation
 
 @MainActor
 final class TogentService {
-    typealias ReplyHandler = @MainActor (TogentJob, String) async throws -> Void
+    typealias ReplyHandler = @MainActor (
+        TogentJob,
+        TogentRole?,
+        TogentReply
+    ) async throws -> Void
 
     private struct ScheduledBatchTask {
         let id: UUID
@@ -402,6 +406,7 @@ final class TogentService {
     }
 
     private func process(_ job: TogentJob) async {
+        var replyRole: TogentRole?
         do {
             guard let roleID = job.roleID else {
                 throw TogentError.noActiveRole
@@ -409,6 +414,7 @@ final class TogentService {
             guard let role = try store.role(id: roleID) else {
                 throw TogentError.roleNotFound
             }
+            replyRole = role
             guard !role.publishedModelID.isEmpty else {
                 throw TogentError.modelNotConfigured
             }
@@ -428,7 +434,8 @@ final class TogentService {
             guard let replyHandler else {
                 throw TogentError.unavailable("微信回复通道未就绪")
             }
-            try await replyHandler(job, answer)
+            let reply = try TogentReply.parse(answer)
+            try await replyHandler(job, role, reply)
             try store.markCompleted(id: job.id)
         } catch {
             if Task.isCancelled {
@@ -439,7 +446,11 @@ final class TogentService {
                 ?? error.localizedDescription
             do {
                 if let replyHandler {
-                    try await replyHandler(job, "❌ Togent：\(message)")
+                    try await replyHandler(
+                        job,
+                        replyRole,
+                        TogentReply(text: "❌ Togent：\(message)")
+                    )
                 }
             } catch {
                 let combined = "\(message)；微信错误回复发送失败：\(error.localizedDescription)"
@@ -637,7 +648,14 @@ final class TogentService {
         用户消息：
         \(job.messageText)
 
-        请遵循工作区 AGENTS.md。需要历史上下文时，仅按需只读查询微信归档；完成实际工作后给出适合直接回复微信的最终文本。
+        请遵循工作区 AGENTS.md。需要历史上下文时，仅按需只读查询微信归档。
+
+        完成实际工作后给出适合直接回复微信的最终文本。如果用户明确要求把当前角色工作区里的一个或多个文件发送到微信，必须在最终回复末尾追加且只追加一个以下控制块，`files` 只能填写当前工作区相对路径，按发送顺序最多五个；不要使用绝对路径、目录、symlink 或工作区外路径，也不要加 Markdown 代码围栏：
+        <tocode_wechat_files>
+        {"files":["AGENTS.md"]}
+        </tocode_wechat_files>
+
+        控制块由 Tocode 宿主处理，不会作为文字发给用户。只需文字回复时不要输出控制块。
         """
     }
 }

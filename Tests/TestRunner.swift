@@ -6630,6 +6630,7 @@ struct TestRunnerMain {
         await testTogentDefaultRoleModelGateAndRoleArchiveRouting()
         await testTogentTwoPhaseRecoveryAndStateFailure()
         await testTogentArchiveReplyModelAndCrashFaults()
+        await testTogentWorkspaceFileReplyAndFaults()
         await testTogentWeChatRealPiEndToEnd()
         testTocodeCommandParser()
         testTocodeWeChatCommandGate()
