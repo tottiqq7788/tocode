@@ -46,7 +46,7 @@ func makeTogentTemporaryDirectory(_ label: String) -> URL {
 }
 
 func makeTogentRole(
-    name: String = "角色",
+    name: String = "Role",
     workspace: URL,
     modelID: String = "model-a",
     active: Bool = true

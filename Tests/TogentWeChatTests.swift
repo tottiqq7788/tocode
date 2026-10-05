@@ -22,7 +22,7 @@ func testTogentWeChatArchiveQueueReplyIntegration() async {
         imageCaptionTimeout: 0.2
     )
     var roleDraft = togent.newRoleDraft()
-    roleDraft.name = "微信角色"
+    roleDraft.name = "WeChatRole"
     roleDraft.publishedModelID = "model-a"
     let role = try! togent.createRole(from: roleDraft)
 
@@ -116,7 +116,7 @@ func testTogentWeChatArchiveQueueReplyIntegration() async {
     var imageReplies: [String] = []
     imageTogent.replyHandler = { _, _, reply in imageReplies.append(reply.text) }
     var imageRoleDraft = imageTogent.newRoleDraft()
-    imageRoleDraft.name = "图片等待角色"
+    imageRoleDraft.name = "ImageWaitRole"
     imageRoleDraft.publishedModelID = "model-a"
     let imageRole = try! imageTogent.createRole(from: imageRoleDraft)
 
@@ -383,11 +383,11 @@ func testTogentDefaultRoleModelGateAndRoleArchiveRouting() async {
         bootstrapDefaultRole: false
     )
     var firstDraft = routingTogent.newRoleDraft()
-    firstDraft.name = "角色A"
+    firstDraft.name = "RoleA"
     firstDraft.publishedModelID = model.publishedModelID
     let firstRole = try! routingTogent.createRole(from: firstDraft)
     var secondDraft = routingTogent.newRoleDraft()
-    secondDraft.name = "角色B"
+    secondDraft.name = "RoleB"
     secondDraft.publishedModelID = model.publishedModelID
     let secondRole = try! routingTogent.createRole(from: secondDraft)
     let archiveTransport = MockWeChatTransport()
@@ -635,7 +635,7 @@ func testTogentTwoPhaseRecoveryAndStateFailure() async {
         imageCaptionTimeout: 0.15
     )
     var draft = togent.newRoleDraft()
-    draft.name = "恢复角色"
+    draft.name = "RecoveryRole"
     draft.publishedModelID = "model-a"
     let role = try! togent.createRole(from: draft)
 
@@ -726,7 +726,7 @@ func testTogentTwoPhaseRecoveryAndStateFailure() async {
         imageCaptionTimeout: 0.2
     )
     var failureDraft = failureService.newRoleDraft()
-    failureDraft.name = "失败角色"
+    failureDraft.name = "FailureRole"
     failureDraft.publishedModelID = "model-a"
     let failureRole = try! failureService.createRole(from: failureDraft)
     let priorMessage = WeChatMessage(
@@ -839,7 +839,7 @@ func testTogentArchiveReplyModelAndCrashFaults() async {
         imageCaptionTimeout: 0.2
     )
     var archiveDraft = archiveTogent.newRoleDraft()
-    archiveDraft.name = "归档故障"
+    archiveDraft.name = "ArchiveFailure"
     archiveDraft.publishedModelID = "model-a"
     let archiveRole = try! archiveTogent.createRole(from: archiveDraft)
     let archivePriorMessage = WeChatMessage(
@@ -937,7 +937,7 @@ func testTogentArchiveReplyModelAndCrashFaults() async {
         bootstrapDefaultRole: false
     )
     var replyDraft = replyTogent.newRoleDraft()
-    replyDraft.name = "回复故障"
+    replyDraft.name = "ReplyFailure"
     replyDraft.publishedModelID = "model-a"
     _ = try! replyTogent.createRole(from: replyDraft)
     var replyAttempts = 0
@@ -978,7 +978,7 @@ func testTogentArchiveReplyModelAndCrashFaults() async {
         bootstrapDefaultRole: false
     )
     var modelDraft = modelTogent.newRoleDraft()
-    modelDraft.name = "模型故障"
+    modelDraft.name = "ModelFailure"
     modelDraft.publishedModelID = "model-a"
     _ = try! modelTogent.createRole(from: modelDraft)
     var modelReplies: [String] = []
@@ -1015,7 +1015,7 @@ func testTogentArchiveReplyModelAndCrashFaults() async {
         bootstrapDefaultRole: false
     )
     var crashDraft = crashTogent.newRoleDraft()
-    crashDraft.name = "崩溃故障"
+    crashDraft.name = "CrashFailure"
     crashDraft.publishedModelID = "model-a"
     _ = try! crashTogent.createRole(from: crashDraft)
     var crashReplies: [String] = []
@@ -1053,7 +1053,7 @@ func testTogentArchiveReplyModelAndCrashFaults() async {
         bootstrapDefaultRole: false
     )
     var shutdownDraft = shutdownTogent.newRoleDraft()
-    shutdownDraft.name = "退出恢复"
+    shutdownDraft.name = "ShutdownRecovery"
     shutdownDraft.publishedModelID = "model-a"
     _ = try! shutdownTogent.createRole(from: shutdownDraft)
     shutdownTogent.replyHandler = { _, _, _ in }
@@ -1344,7 +1344,7 @@ func testTogentWeChatRealPiEndToEnd() async {
         imageCaptionTimeout: 5
     )
     var roleDraft = togent.newRoleDraft()
-    roleDraft.name = "微信真 Pi 角色"
+    roleDraft.name = "WeChatRealPi"
     roleDraft.prompt = "只完成当前微信测试任务。"
     roleDraft.publishedModelID = model.publishedModelID
     let role: TogentRole
@@ -1619,7 +1619,7 @@ private func runTogentFileReplyScenario(
         bootstrapDefaultRole: false
     )
     var draft = togent.newRoleDraft()
-    draft.name = "文件回复角色"
+    draft.name = "FileReplyRole"
     draft.publishedModelID = "model-a"
     let role = try! togent.createRole(from: draft)
     let workspaceURL = URL(fileURLWithPath: role.workspacePath, isDirectory: true)

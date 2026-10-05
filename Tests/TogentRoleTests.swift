@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 private final class MockTogentWorkspaceOpener: TogentWorkspaceOpening {
@@ -117,22 +118,96 @@ func testTogentWorkspaceNumberingAndManagedAgents() {
     let service = TogentWorkspaceService(homeDirectory: home)
     let parent = home.appendingPathComponent("Documents/togent", isDirectory: true)
     try! FileManager.default.createDirectory(
-        at: parent.appendingPathComponent("角色1"),
+        at: parent.appendingPathComponent("role1"),
         withIntermediateDirectories: true
     )
     try! FileManager.default.createDirectory(
-        at: parent.appendingPathComponent("角色3"),
+        at: parent.appendingPathComponent("role3"),
         withIntermediateDirectories: true
     )
-    let registered = [parent.appendingPathComponent("角色2").path]
+    let registered = [parent.appendingPathComponent("role2").path]
     expect(
-        service.defaultWorkspacePath(registeredPaths: registered)
-            == parent.appendingPathComponent("角色4").path,
-        "默认角色目录编号同时避开注册表与磁盘"
+        service.nextDefaultRoleName(
+            registeredNames: ["role2"],
+            registeredPaths: registered
+        ) == "role4",
+        "默认英文角色名同时避开注册表与磁盘"
+    )
+    expect(
+        service.defaultWorkspacePath(forRoleName: "Developer")
+            == parent.appendingPathComponent("Developer").path,
+        "默认工作区末级目录精确使用角色名称"
+    )
+    expect(
+        service.nextCopyRoleName(
+            sourceName: "Developer",
+            registeredNames: ["role2"],
+            registeredPaths: registered
+        ) == "Developer-copy",
+        "复制角色默认使用英文 source-copy 名称"
+    )
+    try! FileManager.default.createDirectory(
+        at: parent.appendingPathComponent("Developer-copy"),
+        withIntermediateDirectories: true
+    )
+    expect(
+        service.nextCopyRoleName(
+            sourceName: "Developer",
+            registeredNames: ["role2"],
+            registeredPaths: registered
+        ) == "Developer-copy2",
+        "复制角色名称冲突时递增 copy 序号"
+    )
+    let longSource = "A" + String(repeating: "b", count: 79)
+    let longFirstCopy = String(longSource.prefix(75)) + "-copy"
+    let longNextCopy = service.nextCopyRoleName(
+        sourceName: longSource,
+        registeredNames: [longFirstCopy],
+        registeredPaths: []
+    )
+    expect(
+        longNextCopy.count == TogentRoleName.maximumLength
+            && longNextCopy.hasSuffix("-copy2")
+            && TogentRoleName.isValid(longNextCopy),
+        "长角色复制名保留完整 copyN 后缀并满足长度限制"
+    )
+    expect(
+        service.nextCopyRoleName(
+            sourceName: "旧角色",
+            registeredNames: ["role2"],
+            registeredPaths: registered
+        ) == "role4",
+        "旧中文源角色复制时回退到新的英文 roleN"
+    )
+    var pathBinding = TogentRolePathBinding(
+        workspacePath: parent.appendingPathComponent("role4").path,
+        automatic: true
+    )
+    expect(
+        pathBinding.workspacePath(afterNameChange: "Designer")
+            == parent.appendingPathComponent("Designer").path,
+        "新增角色改名同步尚未脱离管理的默认路径"
+    )
+    pathBinding.detach()
+    expect(
+        pathBinding.workspacePath(afterNameChange: "Writer") == nil,
+        "用户自定义路径后名称变化不再覆盖路径"
+    )
+    expect(
+        TogentRolePathBinding.isManagedDefaultWorkspace(
+            roleName: "Designer",
+            workspacePath: parent.appendingPathComponent("Designer").path,
+            homeDirectory: home
+        ),
+        "名称路径策略识别受管默认工作区"
+    )
+    expect(
+        TogentPrompts.creationTabTitles == ["从零新增", "拷贝角色"],
+        "新增角色弹窗提供从零与拷贝页签"
     )
 
-    let workspace = parent.appendingPathComponent("角色4")
-    var role = makeTogentRole(name: "开发", workspace: workspace)
+    let workspace = parent.appendingPathComponent("role4")
+    var role = makeTogentRole(name: "Developer", workspace: workspace)
     let receipt = try! service.provision(role: role)
     expect(FileManager.default.fileExists(atPath: workspace.appendingPathComponent("project").path),
            "角色保存创建 project 文件夹")
@@ -171,7 +246,7 @@ func testTogentWorkspaceCanonicalIsolation() {
     let workspace = TogentWorkspaceService(homeDirectory: root)
     let firstURL = root.appendingPathComponent("first", isDirectory: true)
     try! FileManager.default.createDirectory(at: firstURL, withIntermediateDirectories: true)
-    let first = makeTogentRole(name: "一", workspace: firstURL)
+    let first = makeTogentRole(name: "One", workspace: firstURL)
 
     do {
         try workspace.validateIsolation(
@@ -197,7 +272,7 @@ func testTogentWorkspaceCanonicalIsolation() {
     }
 
     let archiveRole = makeTogentRole(
-        name: "归档",
+        name: "Archive",
         workspace: root.appendingPathComponent("archive-role")
     )
     _ = try! workspace.provision(role: archiveRole)
@@ -228,6 +303,212 @@ func testTogentWorkspaceCanonicalIsolation() {
     } catch {
         expect(false, "工作区补齐 symlink 返回明确边界错误")
     }
+}
+
+@MainActor
+func testTogentRoleNamingAndCopyIsolation() async {
+    let root = makeTogentTemporaryDirectory("role-copy")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = TogentStore(databaseURL: root.appendingPathComponent("togent.sqlite"))
+    let workspace = TogentWorkspaceService(homeDirectory: root)
+    let model = TogentModelOption(publishedModelID: "healthy", providerName: "Provider")
+    let alternateModel = TogentModelOption(
+        publishedModelID: "alternate",
+        providerName: "Alternate"
+    )
+    let service = TogentService(
+        store: store,
+        workspace: workspace,
+        runtime: StubTogentRuntime(),
+        availableModelOptions: { [model, alternateModel] },
+        bootstrapDefaultRole: false
+    )
+
+    expect(
+        ["Alpha", "qa-agent", "Role_2", "z9"].allSatisfy(TogentRoleName.isValid),
+        "角色名接受英文字母开头及后续字母数字连字符下划线"
+    )
+    expect(
+        [
+            "",
+            "9role",
+            "-role",
+            "_role",
+            "角色",
+            "two words",
+            "a/b",
+            "A.B",
+            "🙂",
+            String(repeating: "a", count: 81)
+        ]
+            .allSatisfy { !TogentRoleName.isValid($0) },
+        "角色名拒绝空值、非字母开头、中文、空格、点、路径字符、emoji 与超长值"
+    )
+    let initial = service.newRoleDraft()
+    expect(
+        initial.name == "role1"
+            && initial.workspacePath.hasSuffix("/Documents/togent/role1"),
+        "从零新增预填最小未占用英文 roleN 及同名默认路径"
+    )
+
+    var invalid = initial
+    invalid.name = "中文角色"
+    do {
+        _ = try service.createRole(from: invalid)
+        expect(false, "服务边界拒绝非英文角色名")
+    } catch TogentError.invalidRoleName {
+        expect(true, "非英文角色名返回明确错误")
+    } catch {
+        expect(false, "非英文角色名错误类型正确")
+    }
+
+    var sourceDraft = initial
+    sourceDraft.name = "Developer"
+    sourceDraft.workspacePath = workspace.defaultWorkspacePath(forRoleName: sourceDraft.name)
+    sourceDraft.prompt = "Source prompt"
+    sourceDraft.publishedModelID = model.publishedModelID
+    sourceDraft.isActive = true
+    let source = try! service.createRole(from: sourceDraft)
+    let sourceRoot = URL(fileURLWithPath: source.workspacePath)
+    let sourceProject = sourceRoot.appendingPathComponent("project/source-only.txt")
+    try! Data("source".utf8).write(to: sourceProject)
+    try! Data("source-wechat".utf8).write(
+        to: sourceRoot.appendingPathComponent("wechat/source-history.md")
+    )
+    let sourceAgents = sourceRoot.appendingPathComponent("AGENTS.md")
+    var sourceAgentsText = try! String(contentsOf: sourceAgents, encoding: .utf8)
+    sourceAgentsText += "\nsource-private-memory\n"
+    try! sourceAgentsText.write(to: sourceAgents, atomically: true, encoding: .utf8)
+    let sourceSession = root
+        .appendingPathComponent("runtime/\(source.id.uuidString)/sessions", isDirectory: true)
+        .appendingPathComponent("source.jsonl")
+    try! FileManager.default.createDirectory(
+        at: sourceSession.deletingLastPathComponent(),
+        withIntermediateDirectories: true
+    )
+    try! Data("source-session".utf8).write(to: sourceSession)
+    let sourceJob = try! store.stageJob(
+        deduplicationKey: "source-job",
+        roleID: source.id,
+        fromUserID: "source-user",
+        contextToken: "source-context",
+        messageText: "source-message",
+        receivedAt: Date()
+    )
+    try! store.markCompleted(id: sourceJob.id)
+
+    var duplicate = service.newRoleDraft()
+    duplicate.name = "developer"
+    duplicate.workspacePath = workspace.defaultWorkspacePath(forRoleName: "developer-other")
+    duplicate.publishedModelID = model.publishedModelID
+    do {
+        _ = try service.createRole(from: duplicate)
+        expect(false, "角色名大小写不敏感唯一")
+    } catch TogentError.duplicateRoleName {
+        expect(true, "角色名大小写不敏感唯一")
+    } catch {
+        expect(false, "大小写重复名称返回明确错误")
+    }
+
+    var writerDraft = service.newRoleDraft()
+    writerDraft.name = "Writer"
+    writerDraft.workspacePath = workspace.defaultWorkspacePath(forRoleName: writerDraft.name)
+    writerDraft.prompt = "Writer prompt"
+    writerDraft.publishedModelID = alternateModel.publishedModelID
+    writerDraft.isActive = false
+    let writer = try! service.createRole(from: writerDraft)
+
+    let options = service.roleCopyOptions()
+    expect(options.count == 2,
+           "复制页签按现有角色提供来源")
+    let sourceOption = options.first(where: { $0.sourceRoleID == source.id })!
+    let writerOption = options.first(where: { $0.sourceRoleID == writer.id })!
+    expect(
+        writerOption.draft.prompt == writer.prompt
+            && writerOption.draft.publishedModelID == writer.publishedModelID,
+        "切换复制源可回显对应提示词与模型选择"
+    )
+    let popup = NSPopUpButton(
+        frame: NSRect(x: 0, y: 0, width: 300, height: 28),
+        pullsDown: false
+    )
+    for option in options {
+        popup.addItem(withTitle: option.sourceRoleName)
+    }
+    let fields = TogentRoleFormFields(
+        draft: sourceOption.draft,
+        models: [model, alternateModel],
+        automaticPath: true
+    )
+    let sourceController = TogentRoleCopySourceController(
+        popup: popup,
+        options: options,
+        fields: fields
+    )
+    popup.selectItem(at: options.firstIndex(of: writerOption)!)
+    sourceController.sourceChanged(popup)
+    expect(
+        fields.draft == writerOption.draft,
+        "复制页签切换源角色后完整回显该源的复制草稿"
+    )
+
+    let copiedDraft = sourceOption.draft
+    expect(
+        copiedDraft.name == "Developer-copy"
+            && copiedDraft.workspacePath.hasSuffix(
+                "/Documents/togent/Developer-copy"
+            )
+            && copiedDraft.prompt == source.prompt
+            && copiedDraft.publishedModelID == source.publishedModelID
+            && !copiedDraft.isActive,
+        "复制模板只继承提示词和模型并生成新名称、新路径、非激活状态"
+    )
+
+    let copied = try! service.createRole(from: copiedDraft)
+    let copiedRoot = URL(fileURLWithPath: copied.workspacePath)
+    expect(
+        copied.id != source.id
+            && copied.createdAt != source.createdAt
+            && !copied.isActive
+            && service.roles.first(where: { $0.id == source.id })?.isActive == true,
+        "复制保存生成新身份且不改变源角色激活状态"
+    )
+    expect(
+        FileManager.default.fileExists(
+            atPath: copiedRoot.appendingPathComponent("AGENTS.md").path
+        )
+            && FileManager.default.fileExists(
+                atPath: copiedRoot.appendingPathComponent("project").path
+            )
+            && FileManager.default.fileExists(
+                atPath: copiedRoot.appendingPathComponent("wechat").path
+            )
+            && !FileManager.default.fileExists(
+                atPath: copiedRoot.appendingPathComponent("project/source-only.txt").path
+            )
+            && !FileManager.default.fileExists(
+                atPath: copiedRoot.appendingPathComponent("wechat/source-history.md").path
+            ),
+        "复制角色只初始化独立工作区三件套且不复制源 project 或微信归档"
+    )
+    let copiedAgents = try! String(
+        contentsOf: copiedRoot.appendingPathComponent("AGENTS.md"),
+        encoding: .utf8
+    )
+    expect(
+        !copiedAgents.contains("source-private-memory")
+            && !FileManager.default.fileExists(
+                atPath: root
+                    .appendingPathComponent(
+                        "runtime/\(copied.id.uuidString)/sessions/source.jsonl"
+                    )
+                    .path
+            )
+            && (try! store.jobs()).contains(where: { $0.roleID == source.id })
+            && !(try! store.jobs()).contains(where: { $0.roleID == copied.id }),
+        "复制角色不复制 AGENTS 记忆、session、任务或去重状态"
+    )
+    service.stop()
 }
 
 @MainActor
@@ -274,8 +555,8 @@ func testTogentDefaultRoleBootstrap() async {
         "角色编辑弹窗的数据源回显 default 内置提示词"
     )
     expect(role.publishedModelID.isEmpty, "默认角色模型初始为未配置")
-    expect(role.workspacePath.hasSuffix("/Documents/togent/角色1"),
-           "默认角色使用最小未占用角色编号")
+    expect(role.workspacePath.hasSuffix("/Documents/togent/default"),
+           "default 角色工作区末级目录使用角色名称")
     expect(FileManager.default.fileExists(
         atPath: URL(fileURLWithPath: role.workspacePath)
             .appendingPathComponent("project")
@@ -386,7 +667,7 @@ func testTogentRoleServiceModelGate() async {
         bootstrapDefaultRole: false
     )
     var draft = service.newRoleDraft()
-    draft.name = "主角色"
+    draft.name = "MainRole"
     draft.publishedModelID = "healthy"
     let role = try! service.createRole(from: draft)
     expect(role.isActive, "Togent 服务创建首角色后激活")
@@ -424,7 +705,7 @@ func testTogentBusyRoleAndRelayBoundary() async {
         bootstrapDefaultRole: false
     )
     var draft = service.newRoleDraft()
-    draft.name = "忙碌角色"
+    draft.name = "BusyRole"
     draft.publishedModelID = "healthy"
     let role = try! service.createRole(from: draft)
     _ = try! store.stageJob(

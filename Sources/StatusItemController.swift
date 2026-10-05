@@ -1323,7 +1323,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             switch TogentPrompts.roleForm(
                 draft: draft,
                 models: togent.models,
-                isEditing: roleID != nil
+                isEditing: roleID != nil,
+                copyOptions: roleID == nil ? togent.roleCopyOptions() : []
             ) {
             case .cancel:
                 return

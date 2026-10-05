@@ -89,15 +89,39 @@ final class TogentService {
 
     func newRoleDraft() -> TogentRoleDraft {
         let existing = roles
-        let defaultPath = workspace.defaultWorkspacePath(
+        let name = workspace.nextDefaultRoleName(
+            registeredNames: existing.map(\.name),
             registeredPaths: existing.map(\.workspacePath)
         )
         let options = models
         return TogentRoleDraft(
-            workspacePath: defaultPath,
+            name: name,
+            workspacePath: workspace.defaultWorkspacePath(forRoleName: name),
             publishedModelID: options.first?.publishedModelID ?? "",
             isActive: existing.isEmpty
         )
+    }
+
+    func roleCopyOptions() -> [TogentRoleCopyOption] {
+        let existing = roles
+        return existing.map { source in
+            let name = workspace.nextCopyRoleName(
+                sourceName: source.name,
+                registeredNames: existing.map(\.name),
+                registeredPaths: existing.map(\.workspacePath)
+            )
+            return TogentRoleCopyOption(
+                sourceRoleID: source.id,
+                sourceRoleName: source.name,
+                draft: TogentRoleDraft(
+                    name: name,
+                    workspacePath: workspace.defaultWorkspacePath(forRoleName: name),
+                    prompt: source.prompt,
+                    publishedModelID: source.publishedModelID,
+                    isActive: false
+                )
+            )
+        }
     }
 
     @discardableResult
@@ -466,20 +490,20 @@ final class TogentService {
         excluding roleID: UUID?,
         allowUnconfiguredModel: Bool
     ) throws -> TogentRoleDraft {
-        let name = draft.name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty, name.count <= 80 else {
+        let name = draft.name
+        guard TogentRoleName.isValid(name) else {
             throw TogentError.invalidRoleName
         }
         let currentRoles = try store.roles()
         let foldedName = name.folding(
             options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
-            locale: .current
+            locale: Locale(identifier: "en_US_POSIX")
         )
         if currentRoles.contains(where: {
             $0.id != roleID
                 && $0.name.folding(
                     options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
-                    locale: .current
+                    locale: Locale(identifier: "en_US_POSIX")
                 ) == foldedName
         }) {
             throw TogentError.duplicateRoleName
@@ -523,7 +547,7 @@ final class TogentService {
         let role = TogentRole(
             name: Self.defaultRoleName,
             workspacePath: try workspace.canonicalPath(
-                workspace.defaultWorkspacePath(registeredPaths: [])
+                workspace.defaultWorkspacePath(forRoleName: Self.defaultRoleName)
             ),
             prompt: Self.defaultRolePrompt,
             publishedModelID: "",

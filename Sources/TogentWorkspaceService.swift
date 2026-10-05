@@ -29,32 +29,57 @@ final class TogentWorkspaceService {
         self.homeDirectory = homeDirectory ?? fileManager.homeDirectoryForCurrentUser
     }
 
-    func defaultWorkspacePath(registeredPaths: [String]) -> String {
-        let parent = homeDirectory
-            .appendingPathComponent("Documents", isDirectory: true)
-            .appendingPathComponent("togent", isDirectory: true)
-        var occupied = Set<Int>()
-        for path in registeredPaths {
-            if let number = Self.roleNumber(from: URL(fileURLWithPath: path).lastPathComponent) {
-                occupied.insert(number)
+    func defaultWorkspacePath(forRoleName roleName: String) -> String {
+        defaultWorkspaceRoot
+            .appendingPathComponent(roleName, isDirectory: true)
+            .path
+    }
+
+    func nextDefaultRoleName(
+        registeredNames: [String],
+        registeredPaths: [String]
+    ) -> String {
+        var number = 1
+        while true {
+            let candidate = "role\(number)"
+            if isDefaultIdentityAvailable(
+                candidate,
+                registeredNames: registeredNames,
+                registeredPaths: registeredPaths
+            ) {
+                return candidate
             }
+            number += 1
         }
-        if let entries = try? fileManager.contentsOfDirectory(
-            at: parent,
-            includingPropertiesForKeys: [.isDirectoryKey],
-            options: [.skipsHiddenFiles]
-        ) {
-            for entry in entries {
-                if let number = Self.roleNumber(from: entry.lastPathComponent) {
-                    occupied.insert(number)
-                }
+    }
+
+    func nextCopyRoleName(
+        sourceName: String,
+        registeredNames: [String],
+        registeredPaths: [String]
+    ) -> String {
+        guard TogentRoleName.isValid(sourceName) else {
+            return nextDefaultRoleName(
+                registeredNames: registeredNames,
+                registeredPaths: registeredPaths
+            )
+        }
+        var number = 1
+        while true {
+            let suffix = number == 1 ? "" : String(number)
+            let copySuffix = "-copy\(suffix)"
+            let candidate = String(
+                sourceName.prefix(TogentRoleName.maximumLength - copySuffix.count)
+            ) + copySuffix
+            if isDefaultIdentityAvailable(
+                candidate,
+                registeredNames: registeredNames,
+                registeredPaths: registeredPaths
+            ) {
+                return candidate
             }
+            number += 1
         }
-        var candidate = 1
-        while occupied.contains(candidate) {
-            candidate += 1
-        }
-        return parent.appendingPathComponent("角色\(candidate)", isDirectory: true).path
     }
 
     func canonicalPath(_ rawPath: String) throws -> String {
@@ -328,14 +353,45 @@ final class TogentWorkspaceService {
         }
     }
 
-    private static func roleNumber(from name: String) -> Int? {
-        guard name.hasPrefix("角色") else { return nil }
-        let suffix = name.dropFirst(2)
-        guard !suffix.isEmpty, suffix.allSatisfy(\.isNumber),
-              let number = Int(suffix), number > 0 else {
-            return nil
+    private var defaultWorkspaceRoot: URL {
+        homeDirectory
+            .appendingPathComponent("Documents", isDirectory: true)
+            .appendingPathComponent("togent", isDirectory: true)
+    }
+
+    private func isDefaultIdentityAvailable(
+        _ candidate: String,
+        registeredNames: [String],
+        registeredPaths: [String]
+    ) -> Bool {
+        let folded = Self.folded(candidate)
+        guard !registeredNames.contains(where: { Self.folded($0) == folded }) else {
+            return false
         }
-        return number
+        let candidatePath = defaultWorkspacePath(forRoleName: candidate)
+        guard !registeredPaths.contains(where: {
+            Self.foldedPath($0) == Self.foldedPath(candidatePath)
+        }) else {
+            return false
+        }
+        if fileManager.fileExists(atPath: candidatePath) {
+            return false
+        }
+        let siblingNames = (try? fileManager.contentsOfDirectory(
+            atPath: defaultWorkspaceRoot.path
+        )) ?? []
+        return !siblingNames.contains(where: { Self.folded($0) == folded })
+    }
+
+    private static func folded(_ value: String) -> String {
+        value.folding(
+            options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
+            locale: Locale(identifier: "en_US_POSIX")
+        )
+    }
+
+    private static func foldedPath(_ path: String) -> String {
+        folded((path as NSString).standardizingPath)
     }
 
     static func isDescendant(_ path: String, of parent: String) -> Bool {

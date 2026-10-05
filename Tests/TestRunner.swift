@@ -5084,7 +5084,7 @@ func testWeChatAssociationAndFaults() async {
             bootstrapDefaultRole: false
         )
         var draft = togent.newRoleDraft()
-        draft.name = "关联测试角色"
+        draft.name = "AssociationTestRole"
         draft.publishedModelID = model.publishedModelID
         _ = try! togent.createRole(from: draft)
         return (togent, root)
@@ -5459,7 +5459,7 @@ func testWeChatBindingToArchiveIntegration() async {
         bootstrapDefaultRole: false
     )
     var roleDraft = togent.newRoleDraft()
-    roleDraft.name = "归档集成角色"
+    roleDraft.name = "ArchiveIntegrationRole"
     roleDraft.workspacePath = roleWorkspace.path
     roleDraft.publishedModelID = "integration-model"
     _ = try! togent.createRole(from: roleDraft)
@@ -6561,6 +6561,7 @@ struct TestRunnerMain {
         testTogentPersistedWorkspaceOpening()
         testTogentWorkspaceNumberingAndManagedAgents()
         testTogentWorkspaceCanonicalIsolation()
+        await testTogentRoleNamingAndCopyIsolation()
         await testTogentDefaultRoleBootstrap()
         await testTogentRoleServiceModelGate()
         await testTogentBusyRoleAndRelayBoundary()

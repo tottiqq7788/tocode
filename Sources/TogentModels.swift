@@ -138,6 +138,38 @@ struct TogentRoleDraft: Equatable {
     }
 }
 
+enum TogentRoleName {
+    static let maximumLength = 80
+
+    static func isValid(_ value: String) -> Bool {
+        guard !value.isEmpty, value.count <= maximumLength else { return false }
+        let scalars = Array(value.unicodeScalars)
+        guard let first = scalars.first, isASCIILetter(first) else { return false }
+        return scalars.dropFirst().allSatisfy {
+            isASCIILetter($0)
+                || (48...57).contains($0.value)
+                || $0 == "_"
+                || $0 == "-"
+        }
+    }
+
+    static func isValidPartial(_ value: String) -> Bool {
+        value.isEmpty || isValid(value)
+    }
+
+    private static func isASCIILetter(_ scalar: UnicodeScalar) -> Bool {
+        (65...90).contains(scalar.value) || (97...122).contains(scalar.value)
+    }
+}
+
+struct TogentRoleCopyOption: Equatable, Identifiable {
+    let sourceRoleID: UUID
+    let sourceRoleName: String
+    let draft: TogentRoleDraft
+
+    var id: UUID { sourceRoleID }
+}
+
 struct TogentInboundLease: Equatable {
     let id: UUID
     let roleID: UUID
@@ -262,7 +294,7 @@ enum TogentError: Error, Equatable, LocalizedError {
         case .unavailable(let message):
             return "Togent 不可用：\(message)"
         case .invalidRoleName:
-            return "角色名称不能为空，且最多 80 个字符。"
+            return "角色名称须以英文字母开头，只能包含英文字母、数字、连字符或下划线，且最多 80 个字符。"
         case .duplicateRoleName:
             return "角色名称已存在（不区分大小写）。"
         case .invalidWorkspacePath:
