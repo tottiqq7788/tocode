@@ -11,6 +11,7 @@ final class MockWeChatTransport: WeChatILinkTransporting, @unchecked Sendable {
     var statuses: [Result<WeChatQRCodeStatus, Error>] = []
     var updates: [Result<WeChatUpdates, Error>] = []
     var mediaResult: Result<Data, Error> = .success(Data("media".utf8))
+    var mediaHandler: (@Sendable (WeChatMediaDescriptor) async throws -> Data)?
     var fetchedQRCodes = 0
     var statusQRCodes: [String] = []
     var updateCredentials: [WeChatCredential] = []
@@ -48,6 +49,9 @@ final class MockWeChatTransport: WeChatILinkTransporting, @unchecked Sendable {
 
     func downloadMedia(_ descriptor: WeChatMediaDescriptor) async throws -> Data {
         record(descriptor)
+        if let mediaHandler {
+            return try await mediaHandler(descriptor)
+        }
         return try mediaResult.get()
     }
 
@@ -94,6 +98,35 @@ final class MockWeChatTransport: WeChatILinkTransporting, @unchecked Sendable {
         mediaLock.lock()
         defer { mediaLock.unlock() }
         mediaDescriptors.append(descriptor)
+    }
+}
+
+actor WeChatDownloadGate {
+    private var started = false
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var startContinuations: [CheckedContinuation<Void, Never>] = []
+
+    func waitUntilReleased() async {
+        started = true
+        for continuation in startContinuations {
+            continuation.resume()
+        }
+        startContinuations.removeAll()
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func waitForStart() async {
+        if started { return }
+        await withCheckedContinuation { continuation in
+            startContinuations.append(continuation)
+        }
+    }
+
+    func release() {
+        continuation?.resume()
+        continuation = nil
     }
 }
 
@@ -283,36 +316,41 @@ final class FailingWeChatFileSystem: WeChatFileSystem {
     var failWrite = false
     var failMove = false
 
-    func createDirectory(at url: URL) throws {
+    func openArchiveDirectory(
+        root: URL,
+        dateName: String
+    ) throws -> WeChatArchiveDirectoryHandle {
         if failCreate { throw TestWeChatError.forced }
-        try base.createDirectory(at: url)
+        return try base.openArchiveDirectory(root: root, dateName: dateName)
     }
 
-    func fileExists(at url: URL) -> Bool {
-        base.fileExists(at: url)
+    func verifyArchiveDirectory(_ directory: WeChatArchiveDirectoryHandle) throws {
+        try base.verifyArchiveDirectory(directory)
     }
 
-    func append(_ data: Data, to url: URL) throws {
+    func writeExclusive(
+        _ data: Data,
+        named name: String,
+        in directory: WeChatArchiveDirectoryHandle
+    ) throws -> Bool {
+        if failWrite || failMove { throw TestWeChatError.forced }
+        return try base.writeExclusive(data, named: name, in: directory)
+    }
+
+    func append(
+        _ data: Data,
+        named name: String,
+        in directory: WeChatArchiveDirectoryHandle
+    ) throws {
         if failAppend { throw TestWeChatError.forced }
-        try base.append(data, to: url)
+        try base.append(data, named: name, in: directory)
     }
 
-    func write(_ data: Data, to url: URL) throws {
-        if failWrite { throw TestWeChatError.forced }
-        try base.write(data, to: url)
-    }
-
-    func moveItem(at source: URL, to destination: URL) throws {
-        if failMove { throw TestWeChatError.forced }
-        try base.moveItem(at: source, to: destination)
-    }
-
-    func removeItemIfPresent(at url: URL) {
-        base.removeItemIfPresent(at: url)
-    }
-
-    func setPermissions(_ permissions: Int, at url: URL) throws {
-        try base.setPermissions(permissions, at: url)
+    func removeFileIfPresent(
+        named name: String,
+        in directory: WeChatArchiveDirectoryHandle
+    ) {
+        base.removeFileIfPresent(named: name, in: directory)
     }
 }
 

@@ -5,13 +5,17 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VENDOR="$ROOT/Vendor/pi-agent"
 OUTPUT="$ROOT/build/togent-runtime"
 SOURCE_MARKER="$VENDOR/TOCODE_VENDOR_SOURCE"
+PATCH_MARKER="$VENDOR/TOCODE_VENDOR_PATCHES"
 MODEL_MANIFEST="$VENDOR/packages/ai/src/providers/data/.manifest.json"
+SESSION_MANAGER="$VENDOR/packages/coding-agent/src/core/session-manager.ts"
 BUN_VERSION="1.3.13"
 BUN_BIN="$VENDOR/node_modules/.bin/bun"
 
 if [[ ! -f "$SOURCE_MARKER" \
+      || ! -f "$PATCH_MARKER" \
       || ! -f "$VENDOR/package-lock.json" \
-      || ! -f "$MODEL_MANIFEST" ]]; then
+      || ! -f "$MODEL_MANIFEST" \
+      || ! -f "$SESSION_MANAGER" ]]; then
   echo "Vendored Pi source, lockfile, or offline model data is missing." >&2
   exit 1
 fi
@@ -25,7 +29,13 @@ case "$(uname -s)-$(uname -m)" in
     ;;
 esac
 
-FINGERPRINT="$PLATFORM:$(shasum -a 256 "$SOURCE_MARKER" "$VENDOR/package-lock.json" "$MODEL_MANIFEST" | shasum -a 256 | awk '{print $1}')"
+FINGERPRINT="$PLATFORM:$(shasum -a 256 \
+  "$SOURCE_MARKER" \
+  "$PATCH_MARKER" \
+  "$VENDOR/package-lock.json" \
+  "$MODEL_MANIFEST" \
+  "$SESSION_MANAGER" \
+  | shasum -a 256 | awk '{print $1}')"
 if [[ "${TOGENT_REBUILD:-0}" != "1" \
       && -x "$OUTPUT/pi" \
       && -f "$OUTPUT/.tocode-runtime-fingerprint" \

@@ -196,6 +196,31 @@ export type SessionEntry =
 /** Raw file entry (includes header) */
 export type FileEntry = SessionHeader | SessionEntry;
 
+const TOGENT_REDACT_PERSISTED_IMAGES = "TOGENT_REDACT_PERSISTED_IMAGES";
+const TOGENT_IMAGE_PLACEHOLDER =
+	"[已从持久会话移除归档图片正文；如仍需识图，请重新读取原工作区相对路径。]";
+
+function serializeSessionEntry(entry: FileEntry): string {
+	if (process.env[TOGENT_REDACT_PERSISTED_IMAGES] !== "1") {
+		return JSON.stringify(entry);
+	}
+	return JSON.stringify(entry, (_key, value: unknown) => {
+		if (
+			typeof value === "object" &&
+			value !== null &&
+			!Array.isArray(value) &&
+			(value as Record<string, unknown>).type === "image" &&
+			typeof (value as Record<string, unknown>).data === "string"
+		) {
+			return {
+				type: "text",
+				text: TOGENT_IMAGE_PLACEHOLDER,
+			};
+		}
+		return value;
+	});
+}
+
 /** Tree node for getTree() - defensive copy of session structure */
 export interface SessionTreeNode {
 	entry: SessionEntry;
@@ -1126,7 +1151,7 @@ export class SessionManager {
 		const fd = openSync(this.sessionFile, "w");
 		try {
 			for (const entry of this.fileEntries) {
-				writeFileSync(fd, `${JSON.stringify(entry)}\n`);
+				writeFileSync(fd, `${serializeSessionEntry(entry)}\n`);
 			}
 		} finally {
 			closeSync(fd);
@@ -1177,14 +1202,14 @@ export class SessionManager {
 			const fd = openSync(this.sessionFile, "wx");
 			try {
 				for (const e of this.fileEntries) {
-					writeFileSync(fd, `${JSON.stringify(e)}\n`);
+					writeFileSync(fd, `${serializeSessionEntry(e)}\n`);
 				}
 			} finally {
 				closeSync(fd);
 			}
 			this.flushed = true;
 		} else {
-			appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+			appendFileSync(this.sessionFile, `${serializeSessionEntry(entry)}\n`);
 		}
 	}
 
@@ -1853,12 +1878,12 @@ export class SessionManager {
 			cwd: resolvedTargetCwd,
 			parentSession: resolvedSourcePath,
 		};
-		writeFileSync(newSessionFile, `${JSON.stringify(newHeader)}\n`, { flag: "wx" });
+		writeFileSync(newSessionFile, `${serializeSessionEntry(newHeader)}\n`, { flag: "wx" });
 
 		// Copy all non-header entries from source
 		for (const entry of sourceEntries) {
 			if (entry.type !== "session") {
-				appendFileSync(newSessionFile, `${JSON.stringify(entry)}\n`);
+				appendFileSync(newSessionFile, `${serializeSessionEntry(entry)}\n`);
 			}
 		}
 

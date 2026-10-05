@@ -457,14 +457,34 @@ final class ModelRelayUpstreamClient: ModelRelayCatalogFetching {
 
     private static func isExplicitImageRejection(status: Int, data: Data) -> Bool {
         guard status == 400 || status == 422 else { return false }
-        let message = upstreamErrorMessage(from: data).lowercased()
+        let message = upstreamErrorMessage(from: data)
+            .lowercased()
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !message.isEmpty else { return false }
+        let parameterErrorMarkers = [
+            "image_url.detail",
+            "detail:",
+            " detail ",
+            "invalid value",
+            "unsupported value",
+            "must be one of",
+            "base64",
+            "mime",
+            "width",
+            "height",
+            "too large",
+            "file format"
+        ]
+        guard !parameterErrorMarkers.contains(where: message.contains) else {
+            return false
+        }
         let patterns = [
-            #"(?:does not|doesn't|doesnt|do not) support (?:the )?(?:image input|image_url|vision input|vision|multimodal input|multimodal)(?![._])"#,
-            #"(?:does not|doesn't|doesnt|do not) support (?:the )?images?\s*[.!]?$"#,
-            #"(?:image input|image_url|vision input|multimodal input)(?![._])(?: is| are)? (?:not supported|unsupported)"#,
-            #"unsupported (?:image input|image_url|vision input|multimodal input)(?![._])"#,
-            #"(?:only supports?|supports only) text(?: input)?\b"#,
-            #"\btext[- ]only(?: model)?\b"#
+            #"^(?:this |the )?(?:model )?(?:does not|doesn't|doesnt|does not currently|cannot) support (?:the )?(?:image input|images?|vision input|vision|visual input|multimodal input|multimodal)[.!]?$"#,
+            #"^(?:image input|images?|vision input|vision|visual input|multimodal input)(?: is| are)? (?:not supported|unsupported)(?: by (?:this|the) model)?[.!]?$"#,
+            #"^(?:this |the )?model (?:only supports?|supports only) text(?: input)?[.!]?$"#,
+            #"^(?:this |the )?model (?:is |is a )?text[- ]only[.!]?$"#
         ]
         return patterns.contains {
             message.range(of: $0, options: .regularExpression) != nil

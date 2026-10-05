@@ -1092,7 +1092,7 @@ func testTogentWeChatRealPiEndToEnd() async {
     guard FileManager.default.isExecutableFile(
         atPath: runtimeDirectory.appendingPathComponent("pi").path
     ) else {
-        print("SKIP: 假微信 + 真 Pi E2E（先运行 scripts/build_togent_runtime.sh）")
+        expect(false, "假微信 + 真 Pi E2E 缺少受管 runtime")
         return
     }
 
@@ -1139,12 +1139,30 @@ func testTogentWeChatRealPiEndToEnd() async {
     var initialPromptCount = 0
     var sawImageURL = false
     var textModelOmittedImage = false
+    var persistedImageRedactedBeforeSecondRequest = false
+    func persistedSessionSnapshot() -> String {
+        let runtimeRoot = root.appendingPathComponent("runtime", isDirectory: true)
+        guard let enumerator = FileManager.default.enumerator(
+            at: runtimeRoot,
+            includingPropertiesForKeys: [.isRegularFileKey]
+        ) else {
+            return ""
+        }
+        return enumerator.compactMap { element -> String? in
+            guard let file = element as? URL,
+                  file.pathExtension == "jsonl" else {
+                return nil
+            }
+            return try? String(contentsOf: file, encoding: .utf8)
+        }.joined(separator: "\n")
+    }
     func observationSnapshot() -> (
         promptPathOK: Bool,
         batchOrderOK: Bool,
         initialCount: Int,
         imageForwarded: Bool,
-        textOmitted: Bool
+        textOmitted: Bool,
+        persistedRedactedBeforeSecondRequest: Bool
     ) {
         observationLock.lock()
         defer { observationLock.unlock() }
@@ -1153,7 +1171,8 @@ func testTogentWeChatRealPiEndToEnd() async {
             initialPromptUsedBatchOrder,
             initialPromptCount,
             sawImageURL,
-            textModelOmittedImage
+            textModelOmittedImage,
+            persistedImageRedactedBeforeSecondRequest
         )
     }
     ModelRelayURLProtocol.reset { request in
@@ -1167,6 +1186,10 @@ func testTogentWeChatRealPiEndToEnd() async {
         observationLock.lock()
         if containsImage {
             sawImageURL = true
+            let persisted = persistedSessionSnapshot()
+            persistedImageRedactedBeforeSecondRequest =
+                persisted.contains("已从持久会话移除归档图片正文")
+                && !persisted.contains(#""type":"image""#)
         } else if upstreamModel == "wechat-text-upstream" && containsToolResult {
             textModelOmittedImage = true
         } else if upstreamModel == "wechat-upstream-model" && !containsToolResult {
@@ -1504,6 +1527,10 @@ func testTogentWeChatRealPiEndToEnd() async {
         "连续两图加文字按接收顺序形成一个真 Pi 初始 prompt"
     )
     expect(imageObservation.imageForwarded, "真 Pi 调用 read 后 Relay 透明转发 image_url")
+    expect(
+        imageObservation.persistedRedactedBeforeSecondRequest,
+        "第二次模型请求到达且 Agent 未收口时，真 Pi JSONL 已不含图片正文"
+    )
 
     let textRole = TogentRole(
         id: role.id,

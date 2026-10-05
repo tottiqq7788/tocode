@@ -7,6 +7,13 @@ final class ModelRelayService: @unchecked Sendable {
         let secretDigest: Data
     }
 
+    private struct ModelFetchFailure: Error {
+        let underlying: Error
+        let keyID: UUID
+        let secretDigest: Data?
+        let statusCode: Int?
+    }
+
     private let configStore: ModelRelayConfigStoring
     private let upstreamKeyStore: ModelRelayUpstreamKeyStoring
     private let localKeyVault: ModelRelayLocalKeyVault
@@ -621,32 +628,15 @@ final class ModelRelayService: @unchecked Sendable {
                     let reference = try self.storeUpstreamKey(
                         providerID: providerID,
                         name: normalizedName,
-                        secret: secret
+                        secret: secret,
+                        modelIDs: modelIDs
                     )
-                    do {
-                        guard let storedProvider = self.configurationSnapshot().providers.first(where: {
-                            $0.id == providerID
-                        }) else {
-                            throw ModelRelayError.providerNotFound
-                        }
-                        _ = try self.mergeModels(
-                            provider: storedProvider,
-                            modelIDs: modelIDs,
-                            capabilities: Self.unknownCapabilities(for: modelIDs),
-                            expectedKeyID: reference.id,
-                            expectedSecretDigest: ModelRelayLocalKeyVault.digest(secret)
-                        )
-                        self.router.recordSuccess(keyID: reference.id)
-                        return reference
-                    } catch {
-                        let originalError = error
-                        do {
-                            try self.deleteUpstreamKey(providerID: providerID, keyID: reference.id)
-                        } catch {
-                            throw ModelRelayError.persistenceRollback("模型同步失败后的厂家密钥清理失败。")
-                        }
-                        throw originalError
-                    }
+                    self.recordSuccessIfCurrent(
+                        provider: provider,
+                        keyID: reference.id,
+                        secretDigest: ModelRelayLocalKeyVault.digest(secret)
+                    )
+                    return reference
                 }
                 self.completeOnMain(completion, result: .success(reference))
             } catch {
@@ -655,12 +645,21 @@ final class ModelRelayService: @unchecked Sendable {
         }
     }
 
-    private func storeUpstreamKey(providerID: UUID, name: String, secret: String) throws -> ModelRelayUpstreamKeyReference {
+    private func storeUpstreamKey(
+        providerID: UUID,
+        name: String,
+        secret: String,
+        modelIDs: [String]
+    ) throws -> ModelRelayUpstreamKeyReference {
         persistenceLock.lock()
         defer { persistenceLock.unlock() }
         let normalizedName = try ModelRelayValidation.normalizedName(name)
         guard !secret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw ModelRelayError.keyNotFound
+        }
+        let uniqueModelIDs = Array(Set(modelIDs)).sorted()
+        guard !uniqueModelIDs.isEmpty else {
+            throw ModelRelayError.noModels
         }
         let reference = ModelRelayUpstreamKeyReference(name: normalizedName)
         let snapshot = configurationSnapshot()
@@ -689,7 +688,16 @@ final class ModelRelayService: @unchecked Sendable {
                       configuration.providers[index].keys.isEmpty else {
                     throw ModelRelayError.providerNotFound
                 }
-                configuration.providers[index].keys.append(reference)
+                let current = configuration.providers[index]
+                configuration.providers[index].keys = [reference]
+                configuration.providers[index].models = mergedModelRoutes(
+                    providerID: providerID,
+                    providerName: current.name,
+                    modelIDs: uniqueModelIDs,
+                    existing: current.models,
+                    capabilities: Self.unknownCapabilities(for: uniqueModelIDs),
+                    configuration: configuration
+                )
                 configuration.pendingUpstreamKeyDeletions.removeAll { $0 == reference.id }
             }
         } catch {
@@ -700,7 +708,6 @@ final class ModelRelayService: @unchecked Sendable {
             )
             throw originalError
         }
-        router.resetHealth(keyIDs: [reference.id])
         return reference
     }
 
@@ -728,15 +735,7 @@ final class ModelRelayService: @unchecked Sendable {
             completeOnMain(completion, result: .failure(ModelRelayError.providerNotFound))
             return
         }
-        let loadedPreviousSecret: String?
-        do {
-            loadedPreviousSecret = try upstreamKeyStore.load(id: keyID)
-        } catch {
-            completeOnMain(completion, result: .failure(error))
-            return
-        }
-        guard let previousReference = provider.keys.first(where: { $0.id == keyID }),
-              let previousSecret = loadedPreviousSecret else {
+        guard provider.keys.contains(where: { $0.id == keyID }) else {
             completeOnMain(completion, result: .failure(ModelRelayError.keyNotFound))
             return
         }
@@ -747,37 +746,20 @@ final class ModelRelayService: @unchecked Sendable {
                     baseURL: provider.baseURL,
                     secret: secret
                 )
-                try self.withPersistenceTransaction {
+                let replacement = try self.withPersistenceTransaction {
                     try self.storeReplacement(
                         providerID: providerID,
                         keyID: keyID,
                         name: normalizedName,
-                        secret: secret
+                        secret: secret,
+                        modelIDs: modelIDs
                     )
-                    do {
-                        _ = try self.mergeModels(
-                            provider: provider,
-                            modelIDs: modelIDs,
-                            capabilities: Self.unknownCapabilities(for: modelIDs),
-                            expectedKeyID: keyID,
-                            expectedSecretDigest: ModelRelayLocalKeyVault.digest(secret)
-                        )
-                    } catch {
-                        let originalError = error
-                        do {
-                            try self.storeReplacement(
-                                providerID: providerID,
-                                keyID: keyID,
-                                name: previousReference.name,
-                                secret: previousSecret
-                            )
-                        } catch {
-                            throw ModelRelayError.persistenceRollback("模型同步失败后的厂家密钥恢复失败。")
-                        }
-                        throw originalError
-                    }
-                    self.router.recordSuccess(keyID: keyID)
                 }
+                self.recordSuccessIfCurrent(
+                    provider: provider,
+                    keyID: replacement.id,
+                    secretDigest: ModelRelayLocalKeyVault.digest(secret)
+                )
                 self.completeOnMain(completion, result: .success(()))
             } catch {
                 self.completeOnMain(completion, result: .failure(error))
@@ -785,12 +767,22 @@ final class ModelRelayService: @unchecked Sendable {
         }
     }
 
-    private func storeReplacement(providerID: UUID, keyID: UUID, name: String, secret: String) throws {
+    private func storeReplacement(
+        providerID: UUID,
+        keyID: UUID,
+        name: String,
+        secret: String,
+        modelIDs: [String]
+    ) throws -> ModelRelayUpstreamKeyReference {
         persistenceLock.lock()
         defer { persistenceLock.unlock() }
         let normalizedName = try ModelRelayValidation.normalizedName(name)
         guard !secret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw ModelRelayError.keyNotFound
+        }
+        let uniqueModelIDs = Array(Set(modelIDs)).sorted()
+        guard !uniqueModelIDs.isEmpty else {
+            throw ModelRelayError.noModels
         }
         let snapshot = configurationSnapshot()
         guard let provider = snapshot.providers.first(where: { $0.id == providerID }) else {
@@ -804,32 +796,47 @@ final class ModelRelayService: @unchecked Sendable {
         }) else {
             throw ModelRelayError.duplicateKeyName
         }
-        let previousSecret = try upstreamKeyStore.load(id: keyID)
-        try upstreamKeyStore.save(secret, id: keyID)
+        let replacement = ModelRelayUpstreamKeyReference(name: normalizedName)
+        try stageUpstreamKeyForDeletion(replacement.id)
+        do {
+            try upstreamKeyStore.save(secret, id: replacement.id)
+        } catch {
+            let originalError = error
+            cleanupPendingUpstreamKeys()
+            throw originalError
+        }
         do {
             try mutateConfiguration { configuration in
                 guard let providerIndex = configuration.providers.firstIndex(where: { $0.id == providerID }),
-                      let keyIndex = configuration.providers[providerIndex].keys.firstIndex(where: { $0.id == keyID }) else {
+                      configuration.providers[providerIndex].keys.count == 1,
+                      configuration.providers[providerIndex].upstreamKey?.id == keyID else {
                     throw ModelRelayError.keyNotFound
                 }
-                configuration.providers[providerIndex].keys[keyIndex].name = normalizedName
+                let current = configuration.providers[providerIndex]
+                configuration.providers[providerIndex].keys = [replacement]
+                configuration.providers[providerIndex].models = mergedModelRoutes(
+                    providerID: providerID,
+                    providerName: current.name,
+                    modelIDs: uniqueModelIDs,
+                    existing: current.models,
+                    capabilities: Self.unknownCapabilities(for: uniqueModelIDs),
+                    configuration: configuration
+                )
+                configuration.pendingUpstreamKeyDeletions.removeAll { $0 == replacement.id }
+                if !configuration.pendingUpstreamKeyDeletions.contains(keyID) {
+                    configuration.pendingUpstreamKeyDeletions.append(keyID)
+                }
             }
         } catch {
             let originalError = error
-            let rollbackAction: () throws -> Void = {
-                if let previousSecret {
-                    try self.upstreamKeyStore.save(previousSecret, id: keyID)
-                } else {
-                    try self.upstreamKeyStore.delete(id: keyID)
-                }
-            }
-            try performPersistenceRollback(
-                "厂家密钥更新失败后的恢复失败。",
-                actions: [rollbackAction]
+            try discardStagedUpstreamKey(
+                replacement.id,
+                rollbackMessage: "厂家密钥更新失败后的候选密钥清理失败。"
             )
             throw originalError
         }
-        router.resetHealth(keyIDs: [keyID])
+        cleanupPendingUpstreamKeys()
+        return replacement
     }
 
     func deleteUpstreamKey(providerID: UUID, keyID: UUID) throws {
@@ -866,7 +873,6 @@ final class ModelRelayService: @unchecked Sendable {
         let references: [ModelRelayUpstreamKeyReference]
         let entityKeys = Array(provider.keys.prefix(1))
         if resetAuthenticationFailures {
-            router.resetHealth(keyIDs: entityKeys.map(\.id))
             references = entityKeys
         } else {
             let eligible = Set(router.keyIDsEligibleForAutomaticRefresh(entityKeys.map(\.id)))
@@ -889,10 +895,22 @@ final class ModelRelayService: @unchecked Sendable {
                         expectedKeyID: fetched.keyID,
                         expectedSecretDigest: fetched.secretDigest
                     )
+                    self.recordSuccessIfCurrent(
+                        provider: provider,
+                        keyID: fetched.keyID,
+                        secretDigest: fetched.secretDigest
+                    )
                     self.completeOnMain(completion, result: .success(routes))
                 } catch {
                     self.completeOnMain(completion, result: .failure(error))
                 }
+            } catch let failure as ModelFetchFailure {
+                if !Task.isCancelled {
+                    self.recordFailureIfCurrent(provider: provider, failure: failure)
+                }
+                self.completeOnMain(completion, result: .failure(
+                    Task.isCancelled ? CancellationError() : failure.underlying
+                ))
             } catch {
                 self.completeOnMain(completion, result: .failure(error))
             }
@@ -953,24 +971,24 @@ final class ModelRelayService: @unchecked Sendable {
             }
         )
         for reference in references {
+            var secretDigest: Data?
             do {
                 guard let secret = try upstreamKeyStore.load(id: reference.id) else {
-                    router.recordFailure(keyID: reference.id, statusCode: nil)
                     lastError = ModelRelayError.keyNotFound
                     continue
                 }
+                secretDigest = ModelRelayLocalKeyVault.digest(secret)
                 let discovery = try await upstreamClient.discoverModels(
                     baseURL: provider.baseURL,
                     secret: secret,
                     cachedCapabilities: cachedCapabilities,
                     probeCapabilities: probeCapabilities
                 )
-                router.recordSuccess(keyID: reference.id)
                 if firstSuccessfulCatalog == nil {
                     firstSuccessfulCatalog = FetchedModels(
                         discovery: discovery,
                         keyID: reference.id,
-                        secretDigest: ModelRelayLocalKeyVault.digest(secret)
+                        secretDigest: secretDigest!
                     )
                 }
             } catch is CancellationError {
@@ -982,14 +1000,91 @@ final class ModelRelayService: @unchecked Sendable {
                 } else {
                     statusCode = nil
                 }
-                router.recordFailure(keyID: reference.id, statusCode: statusCode)
-                lastError = error
+                lastError = ModelFetchFailure(
+                    underlying: error,
+                    keyID: reference.id,
+                    secretDigest: secretDigest,
+                    statusCode: statusCode
+                )
             }
         }
         if let firstSuccessfulCatalog {
             return firstSuccessfulCatalog
         }
-        throw lastError
+        if let failure = lastError as? ModelFetchFailure {
+            throw failure
+        }
+        let reference = references.first
+        throw ModelFetchFailure(
+            underlying: lastError,
+            keyID: reference?.id ?? UUID(),
+            secretDigest: nil,
+            statusCode: nil
+        )
+    }
+
+    private func recordSuccessIfCurrent(
+        provider: ModelRelayProvider,
+        keyID: UUID,
+        secretDigest: Data
+    ) {
+        persistenceLock.lock()
+        defer { persistenceLock.unlock() }
+        guard currentConnectionMatches(
+            providerID: provider.id,
+            baseURL: provider.baseURL,
+            keyID: keyID,
+            secretDigest: secretDigest
+        ) else {
+            return
+        }
+        router.recordSuccess(keyID: keyID)
+    }
+
+    private func recordFailureIfCurrent(
+        provider: ModelRelayProvider,
+        failure: ModelFetchFailure
+    ) {
+        persistenceLock.lock()
+        defer { persistenceLock.unlock() }
+        guard currentConnectionMatches(
+            providerID: provider.id,
+            baseURL: provider.baseURL,
+            keyID: failure.keyID,
+            secretDigest: failure.secretDigest
+        ) else {
+            return
+        }
+        router.recordFailure(keyID: failure.keyID, statusCode: failure.statusCode)
+    }
+
+    private func currentConnectionMatches(
+        providerID: UUID,
+        baseURL: String,
+        keyID: UUID,
+        secretDigest: Data?
+    ) -> Bool {
+        let snapshot = configurationSnapshot()
+        guard let current = snapshot.providers.first(where: { $0.id == providerID }),
+              current.baseURL == baseURL,
+              current.upstreamKey?.id == keyID else {
+            return false
+        }
+        do {
+            let currentSecret = try upstreamKeyStore.load(id: keyID)
+            guard let secretDigest else {
+                return currentSecret == nil
+            }
+            guard let currentSecret else {
+                return false
+            }
+            return ModelRelayLocalKeyVault.constantTimeEqual(
+                ModelRelayLocalKeyVault.digest(currentSecret),
+                secretDigest
+            )
+        } catch {
+            return secretDigest == nil
+        }
     }
 
     private func normalizedUpstreamSecret(_ raw: String) throws -> String {

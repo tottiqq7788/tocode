@@ -110,6 +110,71 @@ func testModelRelayPromptFormLayout() {
     )
     expect(!busyItem.isEnabled, "厂家测试或刷新期间菜单项禁用")
 
+    let bridgeKey = ModelRelayUpstreamKeyReference(name: "默认")
+    let bridgeProvider = ModelRelayProvider(
+        name: "取消刷新厂家",
+        baseURL: presets[0].baseURL,
+        keys: [bridgeKey],
+        models: [ModelRelayModelRoute(upstreamModelID: "bridge-model", alias: "bridge-model")]
+    )
+    let bridgeDraft = ModelRelayPrompts.initialProviderDraft(existing: bridgeProvider)
+    let bridgeName = NSTextField(string: bridgeDraft.name)
+    let bridgeProviderSelector = NSPopUpButton()
+    bridgeProviderSelector.addItems(withTitles: presets.map(\.title) + ["自定义…"])
+    bridgeProviderSelector.selectItem(at: bridgeDraft.presetIndex!)
+    let bridgeURL = NSTextField(string: bridgeDraft.customBaseURL)
+    let bridgeSecret = NSSecureTextField()
+    let bridgeFields = ModelRelayPrompts.formAccessory(controls: [
+        ("名称", bridgeName),
+        ("厂商", bridgeProviderSelector),
+        ("自定义 URL", bridgeURL),
+        ("API Key", bridgeSecret)
+    ]) as! NSStackView
+    let bridgeStatus = NSTextField(labelWithString: "初始状态")
+    let bridgeContent = NSStackView(frame: NSRect(x: 0, y: 0, width: 420, height: 220))
+    let bridgeSave = ModelRelayPrompts.formActionButton("保存")
+    let bridgeTest = ModelRelayPrompts.formActionButton("测试连接")
+    let bridgeRefresh = ModelRelayPrompts.formActionButton("刷新模型")
+    let bridgeDelete = ModelRelayPrompts.formActionButton("删除")
+    let bridgeCancel = ModelRelayPrompts.formActionButton("取消")
+    var refreshCancellationCount = 0
+    var delayedRefreshCompletion: ((Result<ModelRelayCapabilitySummary, Error>) -> Void)?
+    let bridge = ModelRelayProviderFormBridge(
+        alert: NSAlert(),
+        fieldStack: bridgeFields,
+        statusLabel: bridgeStatus,
+        content: bridgeContent,
+        name: bridgeName,
+        provider: bridgeProviderSelector,
+        customURL: bridgeURL,
+        secret: bridgeSecret,
+        saveButton: bridgeSave,
+        testButton: bridgeTest,
+        refreshButton: bridgeRefresh,
+        deleteButton: bridgeDelete,
+        cancelButton: bridgeCancel,
+        initial: bridgeDraft,
+        tested: nil,
+        presetCount: presets.count,
+        defaultStatus: "初始状态",
+        performTest: { _, _ in {} },
+        performRefresh: { completion in
+            delayedRefreshCompletion = completion
+            return { refreshCancellationCount += 1 }
+        }
+    )
+    bridge.refresh()
+    bridgeRefresh.performClick(nil)
+    expect(bridgeStatus.stringValue == "正在刷新模型…", "厂家弹窗真实刷新动作进入忙碌状态")
+    bridgeCancel.performClick(nil)
+    expect(refreshCancellationCount == 1, "厂家弹窗取消会调用真实刷新取消句柄")
+    delayedRefreshCompletion?(.success(ModelRelayCapabilitySummary(routes: [])))
+    expect(
+        bridgeStatus.stringValue != "已刷新，0 个多模态，0 个纯文本，0 个能力未知。能力未知可能由限流、超时、服务错误或识图答案不符导致。",
+        "厂家弹窗取消后忽略晚到刷新回调"
+    )
+    bridge.detach()
+
     let local = try! ModelRelayLocalKeyVault(iterations: 1)
         .create(name: "本地客户端", viewingPassword: "password-123")
     let localItem = ModelRelayPrompts.localKeyMenuItem(
@@ -1195,6 +1260,8 @@ func testModelRelayCapabilityDetectionAndRefreshBoundaries() async {
                   {"id":"vision","input_modalities":["text","image"]},
                   {"id":"reject"},
                   {"id":"detail-reject"},
+                  {"id":"detail-space"},
+                  {"id":"endpoint-text"},
                   {"id":"auth401"},
                   {"id":"auth403"},
                   {"id":"server"},
@@ -1223,6 +1290,16 @@ func testModelRelayCapabilityDetectionAndRefreshBoundaries() async {
                 status: 400,
                 chunks: [Data(#"{"error":{"message":"Unsupported value low for image_url.detail"}}"#.utf8)]
             )
+        case "detail-space":
+            return ModelRelayStubResponse(
+                status: 400,
+                chunks: [Data(#"{"error":{"message":"Unsupported image_url detail: low"}}"#.utf8)]
+            )
+        case "endpoint-text":
+            return ModelRelayStubResponse(
+                status: 400,
+                chunks: [Data(#"{"error":{"message":"This endpoint supports only text requests"}}"#.utf8)]
+            )
         case "auth401":
             return ModelRelayStubResponse(status: 401, chunks: [Data()])
         case "auth403":
@@ -1245,7 +1322,7 @@ func testModelRelayCapabilityDetectionAndRefreshBoundaries() async {
             cachedCapabilities: [:],
             probeCapabilities: true
         )
-        expect(discovery.modelIDs.count == 10, "显式探测保留完整模型目录")
+        expect(discovery.modelIDs.count == 12, "显式探测保留完整模型目录")
         expect(
             discovery.capabilities["catalog-text"]?.imageInput == .textOnly
                 && discovery.capabilities["catalog-text"]?.evidence == .catalogMetadata,
@@ -1263,7 +1340,7 @@ func testModelRelayCapabilityDetectionAndRefreshBoundaries() async {
         )
         expect(
             [
-                "detail-reject", "auth401", "auth403",
+                "detail-reject", "detail-space", "endpoint-text", "auth401", "auth403",
                 "server", "rate", "timeout", "wrong"
             ].allSatisfy {
                 discovery.capabilities[$0]?.imageInput == .unknown
@@ -1271,7 +1348,7 @@ func testModelRelayCapabilityDetectionAndRefreshBoundaries() async {
             "参数不兼容、鉴权、服务端、限流、超时和错误答案均保持能力未知"
         )
         let posts = ModelRelayURLProtocol.requests.filter { $0.httpMethod == "POST" }
-        expect(posts.count == 9, "显式操作对每个未确认模型最多发送一个图片探针")
+        expect(posts.count == 11, "显式操作对每个未确认模型最多发送一个图片探针")
         expect(
             Set(posts.compactMap { request -> String? in
                 guard let object = try? JSONSerialization.jsonObject(
@@ -1407,10 +1484,11 @@ func testModelRelayCapabilityDetectionAndRefreshBoundaries() async {
             ModelRelayModelRoute(upstreamModelID: "cancel-model", alias: "cancel-model")
         ]
     )
+    let cancellationConfigStore = MemoryModelRelayConfigStore(
+        ModelRelayConfiguration(providers: [cancelProvider])
+    )
     let cancellationService = ModelRelayService(
-        configStore: MemoryModelRelayConfigStore(
-            ModelRelayConfiguration(providers: [cancelProvider])
-        ),
+        configStore: cancellationConfigStore,
         upstreamKeyStore: MemoryModelRelayKeyStore([cancelKey.id: "cancel-secret"]),
         localKeyVault: ModelRelayLocalKeyVault(iterations: 1),
         upstreamClient: cancellableClient
@@ -1444,6 +1522,58 @@ func testModelRelayCapabilityDetectionAndRefreshBoundaries() async {
         expect(false, "Service 取消应返回 CancellationError")
     }
 
+    ModelRelayBlockingURLProtocol.reset()
+    cancellationService.router.recordFailure(keyID: cancelKey.id, statusCode: 401)
+    let savesBeforeCancelledRefresh = cancellationConfigStore.saveCount
+    var refreshOperation: Task<Void, Never>?
+    let refreshCancellationResults = AsyncStream<Result<[ModelRelayModelRoute], Error>> {
+        continuation in
+        refreshOperation = cancellationService.fetchModels(
+            providerID: cancelProvider.id,
+            probeCapabilities: true
+        ) { result in
+            continuation.yield(result)
+            continuation.finish()
+        }
+    }
+    expect(
+        ModelRelayBlockingURLProtocol.waitUntilStarted(timeout: 2),
+        "手动刷新已发出可取消目录请求"
+    )
+    do {
+        _ = try cancellationService.router.resolve(alias: "cancel-model")
+        expect(false, "手动刷新进行中不得提前清除既有 401 状态")
+    } catch {
+        expect(
+            error as? ModelRelayError == .noHealthyUpstream,
+            "刷新进行中保持原鉴权失败"
+        )
+    }
+    refreshOperation?.cancel()
+    expect(
+        ModelRelayBlockingURLProtocol.waitUntilStopped(timeout: 2),
+        "取消手动刷新会取消底层目录请求"
+    )
+    var refreshCancellationIterator = refreshCancellationResults.makeAsyncIterator()
+    if case .some(.failure(let error)) = await refreshCancellationIterator.next() {
+        expect(error is CancellationError, "手动刷新取消显式返回 CancellationError")
+    } else {
+        expect(false, "手动刷新取消应返回失败结果")
+    }
+    expect(
+        cancellationConfigStore.saveCount == savesBeforeCancelledRefresh,
+        "取消手动刷新不持久化模型或能力"
+    )
+    do {
+        _ = try cancellationService.router.resolve(alias: "cancel-model")
+        expect(false, "取消手动刷新后仍保持原 401 状态")
+    } catch {
+        expect(
+            error as? ModelRelayError == .noHealthyUpstream,
+            "取消不会把鉴权失败 Key 重新发布为健康"
+        )
+    }
+
     let key = ModelRelayUpstreamKeyReference(name: "默认")
     let provider = ModelRelayProvider(
         name: "capability-provider",
@@ -1454,10 +1584,11 @@ func testModelRelayCapabilityDetectionAndRefreshBoundaries() async {
         ]
     )
     let metrics = MemoryModelRelayCallMetricsStore()
+    let capabilityConfigStore = MemoryModelRelayConfigStore(
+        ModelRelayConfiguration(providers: [provider])
+    )
     let service = ModelRelayService(
-        configStore: MemoryModelRelayConfigStore(
-            ModelRelayConfiguration(providers: [provider])
-        ),
+        configStore: capabilityConfigStore,
         upstreamKeyStore: MemoryModelRelayKeyStore([key.id: "stored-secret"]),
         localKeyVault: ModelRelayLocalKeyVault(iterations: 1),
         upstreamClient: client,
@@ -1591,6 +1722,18 @@ func testModelRelayCapabilityDetectionAndRefreshBoundaries() async {
         waitForModelRelaySignal(staleRefreshStarted, timeout: 2),
         "旧 Key 的手动刷新已进入飞行中状态"
     )
+    var replacementExposedStaleCapability = false
+    capabilityConfigStore.saveObserver = { candidate in
+        guard let savedProvider = candidate.providers.first(where: { $0.id == provider.id }),
+              savedProvider.upstreamKey?.id != key.id else {
+            return
+        }
+        if savedProvider.models.contains(where: {
+            $0.capability.effectiveImageInput == .multimodal
+        }) {
+            replacementExposedStaleCapability = true
+        }
+    }
     let replacementResult: Result<Void, Error> = await withCheckedContinuation {
         continuation in
         service.replaceUpstreamKey(
@@ -1603,19 +1746,120 @@ func testModelRelayCapabilityDetectionAndRefreshBoundaries() async {
         }
     }
     if case .success = replacementResult {
+        let replacementReference = service.snapshot().providers.first?.upstreamKey
         expect(
             service.snapshot().providers.first?.models.first?.capability.imageInput == .unknown,
-            "同 UUID Key 替换后旧模型能力立即失效为未知"
+            "Key 替换后旧模型能力立即失效为未知"
+        )
+        expect(
+            replacementReference?.id != key.id,
+            "Key 替换轮换连接 UUID 以隔离旧飞行请求"
+        )
+        expect(
+            !replacementExposedStaleCapability,
+            "候选 Key 与 unknown 能力在同一次活跃配置转换中发布"
         )
     } else {
-        expect(false, "同 UUID Key 替换应成功")
+        expect(false, "Key 替换应成功")
     }
+    let activeReplacementKey = service.snapshot().providers.first!.upstreamKey!
+    service.router.recordFailure(keyID: activeReplacementKey.id, statusCode: 401)
     releaseStaleRefresh.signal()
     if case .failure(let error) = await staleRefresh.value,
        case ModelRelayError.providerNotFound = error {
         expect(true, "旧 Key 的飞行中刷新不能覆盖替换后的能力")
     } else {
         expect(false, "旧 Key 的飞行中刷新应因连接身份变化被拒绝")
+    }
+    do {
+        _ = try service.router.resolve(alias: "refresh-model")
+        expect(false, "旧连接晚到成功不得清除新连接的 401 状态")
+    } catch {
+        expect(
+            error as? ModelRelayError == .noHealthyUpstream,
+            "旧连接成功结果与新连接健康隔离"
+        )
+    }
+
+    let stale401Key = ModelRelayUpstreamKeyReference(name: "旧连接")
+    let stale401Provider = ModelRelayProvider(
+        name: "stale-401-provider",
+        baseURL: "https://stale-401.example/v1",
+        keys: [stale401Key],
+        models: [
+            ModelRelayModelRoute(
+                upstreamModelID: "stale-401-model",
+                alias: "stale-401-model"
+            )
+        ]
+    )
+    let stale401Service = ModelRelayService(
+        configStore: MemoryModelRelayConfigStore(
+            ModelRelayConfiguration(providers: [stale401Provider])
+        ),
+        upstreamKeyStore: MemoryModelRelayKeyStore([stale401Key.id: "old-401-secret"]),
+        localKeyVault: ModelRelayLocalKeyVault(iterations: 1),
+        upstreamClient: client
+    )
+    let stale401Started = DispatchSemaphore(value: 0)
+    let releaseStale401 = DispatchSemaphore(value: 0)
+    ModelRelayURLProtocol.reset { request in
+        if request.value(forHTTPHeaderField: "Authorization") == "Bearer old-401-secret" {
+            stale401Started.signal()
+            _ = releaseStale401.wait(timeout: .now() + 3)
+            return ModelRelayStubResponse(status: 401, chunks: [Data()])
+        }
+        return ModelRelayStubResponse(
+            status: 200,
+            chunks: [Data(#"{"data":[{"id":"stale-401-model"}]}"#.utf8)]
+        )
+    }
+    let stale401Refresh = Task {
+        await withCheckedContinuation { continuation in
+            stale401Service.fetchModels(
+                providerID: stale401Provider.id,
+                probeCapabilities: false
+            ) {
+                continuation.resume(returning: $0)
+            }
+        }
+    }
+    expect(
+        waitForModelRelaySignal(stale401Started, timeout: 2),
+        "旧 secret 的 401 刷新已进入飞行中状态"
+    )
+    let stale401Replacement: Result<Void, Error> = await withCheckedContinuation {
+        continuation in
+        stale401Service.replaceUpstreamKey(
+            providerID: stale401Provider.id,
+            keyID: stale401Key.id,
+            name: stale401Key.name,
+            secret: "new-401-secret"
+        ) {
+            continuation.resume(returning: $0)
+        }
+    }
+    if case .failure(let error) = stale401Replacement {
+        releaseStale401.signal()
+        expect(false, "401 飞行请求期间新 Key 应可完成替换：\(error)")
+        _ = await stale401Refresh.value
+    } else {
+        let current401Key = stale401Service.snapshot().providers.first!.upstreamKey!
+        expect(current401Key.id != stale401Key.id, "401 场景替换同样轮换 Key UUID")
+        releaseStale401.signal()
+        if case .failure(let error) = await stale401Refresh.value {
+            expect(
+                error as? ModelRelayError == .upstreamHTTP(401),
+                "旧连接仍向调用方返回原始 401"
+            )
+        } else {
+            expect(false, "旧连接 401 刷新不得成功")
+        }
+        expect(
+            (try? stale401Service.router.resolve(alias: "stale-401-model"))?
+                .candidates.first?.keyID == current401Key.id,
+            "旧 secret 晚到 401 不得把新 Key 标记为鉴权失败"
+        )
     }
 
     let keylessProvider = ModelRelayProvider(
@@ -1634,10 +1878,24 @@ func testModelRelayCapabilityDetectionAndRefreshBoundaries() async {
             )
         ]
     )
+    let keylessConfigStore = MemoryModelRelayConfigStore(
+        ModelRelayConfiguration(providers: [keylessProvider])
+    )
+    var addExposedStaleCapability = false
+    keylessConfigStore.saveObserver = { candidate in
+        guard let savedProvider = candidate.providers.first(where: {
+            $0.id == keylessProvider.id
+        }), savedProvider.upstreamKey != nil else {
+            return
+        }
+        if savedProvider.models.contains(where: {
+            $0.capability.effectiveImageInput == .multimodal
+        }) {
+            addExposedStaleCapability = true
+        }
+    }
     let keylessService = ModelRelayService(
-        configStore: MemoryModelRelayConfigStore(
-            ModelRelayConfiguration(providers: [keylessProvider])
-        ),
+        configStore: keylessConfigStore,
         upstreamKeyStore: MemoryModelRelayKeyStore(),
         localKeyVault: ModelRelayLocalKeyVault(iterations: 1),
         upstreamClient: client
@@ -1664,6 +1922,10 @@ func testModelRelayCapabilityDetectionAndRefreshBoundaries() async {
             keylessService.snapshot().providers.first?.models.first?.capability.imageInput
                 == .unknown,
             "新增 Key 后不会沿用无连接来源的旧多模态结论"
+        )
+        expect(
+            !addExposedStaleCapability,
+            "新增 Key 引用与 unknown 能力在同一次活跃配置转换中发布"
         )
     } else {
         expect(false, "无 Key 厂家新增 Key 应成功")

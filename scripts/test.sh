@@ -2,6 +2,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+./scripts/build_togent_runtime.sh
+
 mkdir -p build
 swiftc Tests/TestRunner.swift \
   Tests/WeChatTestSupport.swift \

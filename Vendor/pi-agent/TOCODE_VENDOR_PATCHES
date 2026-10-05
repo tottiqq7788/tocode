@@ -14,3 +14,10 @@ credential. Bun is compiled into `pi` and is not installed at runtime.
 Trailing whitespace in a small set of upstream documentation, examples, and
 maintenance files is normalized so the enclosing Tocode repository passes its
 patch-integrity check. This does not alter the Pi runtime.
+
+`packages/coding-agent/src/core/session-manager.ts` centralizes JSONL
+serialization. When the Tocode host sets
+`TOGENT_REDACT_PERSISTED_IMAGES=1`, persisted image content is replaced with a
+text placeholder before every initial write, append, branch rewrite, or fork
+copy. Live in-memory messages retain their image data so the active turn can
+still use vision.

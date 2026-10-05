@@ -213,6 +213,10 @@ func testTogentSandboxProfileAndEnvironment() {
     expect(environment["SSH_AUTH_SOCK"] == nil, "Pi 环境不传 SSH_AUTH_SOCK")
     expect(environment["HOME"] != FileManager.default.homeDirectoryForCurrentUser.path,
            "Pi 环境不暴露用户 HOME")
+    expect(
+        environment["TOGENT_REDACT_PERSISTED_IMAGES"] == "1",
+        "受管 Pi 在写盘前启用图片正文脱敏"
+    )
     let models = try! String(contentsOf: layout.modelsFile, encoding: .utf8)
     expect(models.contains("${TOGENT_RELAY_KEY}"), "models.json 只引用环境变量 token")
     expect(!models.contains(access.bearerToken), "models.json 不落临时 token 明文")
@@ -255,6 +259,42 @@ func testTogentSandboxProfileAndEnvironment() {
         atPath: session.path
     )[.posixPermissions] as? NSNumber)?.intValue
     expect(sessionMode == 0o600, "脱敏后的 Pi 会话权限固定为 0600")
+
+    let otherRoleSessions = runtimeParent
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        .appendingPathComponent("sessions", isDirectory: true)
+    try! FileManager.default.createDirectory(
+        at: otherRoleSessions,
+        withIntermediateDirectories: true
+    )
+    let otherRoleSession = otherRoleSessions.appendingPathComponent("private.jsonl")
+    let otherRoleImage = "other-role-image-must-remain"
+    try! Data(
+        """
+        {"type":"message","message":{"content":[{"type":"image","data":"\(otherRoleImage)","mimeType":"image/png"}]}}
+
+        """.utf8
+    ).write(to: otherRoleSession)
+    try! FileManager.default.removeItem(at: layout.sessions)
+    try! FileManager.default.createSymbolicLink(
+        at: layout.sessions,
+        withDestinationURL: otherRoleSessions
+    )
+    var rejectedCrossRoleSessionLink = false
+    do {
+        try sandbox.redactPersistedSessionImages(in: layout.sessions)
+    } catch {
+        rejectedCrossRoleSessionLink = true
+    }
+    expect(rejectedCrossRoleSessionLink, "Pi 会话脱敏拒绝 sessions 跨角色 symlink")
+    let untouchedOtherRoleSession = try! String(
+        contentsOf: otherRoleSession,
+        encoding: .utf8
+    )
+    expect(
+        untouchedOtherRoleSession.contains(otherRoleImage),
+        "拒绝跨角色 sessions symlink 时不改写目标角色文件"
+    )
 
     let outside = canonicalRoot.appendingPathComponent("outside-secret.txt")
     try! "secret".write(to: outside, atomically: true, encoding: .utf8)
@@ -538,7 +578,7 @@ func testRealPiThroughSandboxAndRelay() async {
     guard FileManager.default.isExecutableFile(
         atPath: runtimeDirectory.appendingPathComponent("pi").path
     ) else {
-        print("SKIP: 真 Pi E2E（先运行 scripts/build_togent_runtime.sh）")
+        expect(false, "真 Pi E2E 缺少受管 runtime")
         return
     }
 

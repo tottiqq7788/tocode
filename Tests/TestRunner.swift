@@ -4727,6 +4727,54 @@ func testWeChatArchive() async {
         "跨过本机日期边界后写入新的日期目录与每日文件"
     )
 
+    let raceRoot = root.appendingPathComponent("date-race", isDirectory: true)
+    let outsideDirectory = root.appendingPathComponent("date-race-outside", isDirectory: true)
+    try! fm.createDirectory(at: outsideDirectory, withIntermediateDirectories: true)
+    let raceTransport = MockWeChatTransport()
+    let downloadGate = WeChatDownloadGate()
+    raceTransport.mediaHandler = { _ in
+        await downloadGate.waitUntilReleased()
+        return Data("must-not-escape".utf8)
+    }
+    let raceArchive = WeChatArchiveService(
+        root: raceRoot,
+        transport: raceTransport,
+        calendarProvider: makeArchiveCalendar
+    )
+    let raceTask = Task {
+        try await raceArchive.archive(
+            WeChatMessage(fromUserID: "sender", items: [
+                WeChatItem(type: 2, imageItem: WeChatImageItem(media: media))
+            ]),
+            receivedAt: receivedAt
+        )
+    }
+    await downloadGate.waitForStart()
+    let originalRaceDay = raceRoot.appendingPathComponent("260907", isDirectory: true)
+    let displacedRaceDay = root.appendingPathComponent("date-race-displaced", isDirectory: true)
+    try! fm.moveItem(at: originalRaceDay, to: displacedRaceDay)
+    try! fm.createSymbolicLink(
+        at: originalRaceDay,
+        withDestinationURL: outsideDirectory
+    )
+    await downloadGate.release()
+    do {
+        _ = try await raceTask.value
+        expect(false, "下载期间替换日期目录必须拒绝归档")
+    } catch WeChatArchiveError.invalidReceiptPath {
+        expect(true, "下载期间替换日期目录返回边界错误")
+    } catch {
+        expect(false, "下载期间替换日期目录应返回明确边界错误：\(error)")
+    }
+    expect(
+        ((try? fm.contentsOfDirectory(atPath: outsideDirectory.path)) ?? []).isEmpty,
+        "日期目录被替换为外部 symlink 时外部目录零写入"
+    )
+    expect(
+        ((try? fm.contentsOfDirectory(atPath: displacedRaceDay.path)) ?? []).isEmpty,
+        "日期目录身份失效后不向已移走目录提交附件或日志"
+    )
+
     let failingFS = FailingWeChatFileSystem()
     failingFS.failAppend = true
     let failingArchive = WeChatArchiveService(

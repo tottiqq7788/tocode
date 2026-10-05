@@ -133,57 +133,194 @@ final class TogentSandbox {
     }
 
     func redactPersistedSessionImages(in sessions: URL) throws {
-        guard let enumerator = fileManager.enumerator(
-            at: sessions,
-            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
-            options: []
-        ) else {
-            return
+        let managedRoot = applicationSupportRoot.standardizedFileURL
+        let requested = sessions.standardizedFileURL
+        let roleRoot = requested.deletingLastPathComponent()
+        guard requested.lastPathComponent == "sessions",
+              roleRoot.deletingLastPathComponent() == managedRoot,
+              UUID(uuidString: roleRoot.lastPathComponent) != nil else {
+            throw TogentError.runtimeLaunch("Pi 会话目录不属于受管角色边界")
         }
-        for case let file as URL in enumerator {
-            let values = try file.resourceValues(
-                forKeys: [.isRegularFileKey, .isSymbolicLinkKey]
-            )
-            guard values.isRegularFile == true, values.isSymbolicLink != true else {
+
+        let rootFD = try Self.openDirectory(path: managedRoot.path)
+        defer { Darwin.close(rootFD) }
+        let roleFD = try Self.openDirectory(
+            named: roleRoot.lastPathComponent,
+            relativeTo: rootFD
+        )
+        defer { Darwin.close(roleFD) }
+        let sessionsFD = try Self.openDirectory(named: "sessions", relativeTo: roleFD)
+        defer { Darwin.close(sessionsFD) }
+
+        for name in try Self.directoryEntryNames(descriptor: sessionsFD)
+        where name.lowercased().hasSuffix(".jsonl") {
+            let descriptor = name.withCString {
+                Darwin.openat(
+                    sessionsFD,
+                    $0,
+                    O_RDWR | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC
+                )
+            }
+            if descriptor < 0, errno == ELOOP {
                 continue
             }
-            guard file.pathExtension.lowercased() == "jsonl" else {
+            guard descriptor >= 0 else {
+                throw TogentError.runtimeLaunch("无法安全打开 Pi 会话文件")
+            }
+            defer { Darwin.close(descriptor) }
+
+            var metadata = stat()
+            guard Darwin.fstat(descriptor, &metadata) == 0,
+                  metadata.st_mode & S_IFMT == S_IFREG else {
                 continue
             }
             do {
-                let data = try Data(contentsOf: file)
-                guard let text = String(data: data, encoding: .utf8) else {
-                    throw TogentError.runtimeLaunch("Pi 会话不是 UTF-8 JSONL")
-                }
-                var changed = false
-                let lines = text.split(
-                    separator: "\n",
-                    omittingEmptySubsequences: false
-                )
-                let sanitized = try lines.map { line -> String in
-                    guard !line.isEmpty else { return "" }
-                    let object = try JSONSerialization.jsonObject(
-                        with: Data(line.utf8)
-                    )
-                    let result = Self.redactingImages(in: object)
-                    changed = changed || result.changed
-                    return String(
-                        data: try JSONSerialization.data(withJSONObject: result.value),
-                        encoding: .utf8
-                    )!
-                }.joined(separator: "\n")
-                guard changed else { continue }
-                try Data(sanitized.utf8).write(to: file, options: .atomic)
-                try fileManager.setAttributes(
-                    [.posixPermissions: NSNumber(value: 0o600)],
-                    ofItemAtPath: file.path
-                )
+                try Self.redactPersistedSessionImages(descriptor: descriptor)
             } catch {
-                try? fileManager.removeItem(at: file)
                 throw TogentError.runtimeLaunch(
-                    "Pi 会话图片正文脱敏失败，已删除受影响会话：\(error.localizedDescription)"
+                    "Pi 会话图片正文脱敏失败：\(error.localizedDescription)"
                 )
             }
+        }
+    }
+
+    private static func openDirectory(path: String) throws -> Int32 {
+        let descriptor = path.withCString {
+            Darwin.open($0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        }
+        guard descriptor >= 0 else {
+            throw TogentError.runtimeLaunch("无法安全打开 Pi 受管会话根目录")
+        }
+        var metadata = stat()
+        guard Darwin.fstat(descriptor, &metadata) == 0,
+              metadata.st_mode & S_IFMT == S_IFDIR else {
+            Darwin.close(descriptor)
+            throw TogentError.runtimeLaunch("Pi 受管会话根目录不是目录")
+        }
+        return descriptor
+    }
+
+    private static func openDirectory(named name: String, relativeTo parent: Int32) throws -> Int32 {
+        let descriptor = name.withCString {
+            Darwin.openat(
+                parent,
+                $0,
+                O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+            )
+        }
+        guard descriptor >= 0 else {
+            throw TogentError.runtimeLaunch("无法安全打开 Pi 角色会话目录")
+        }
+        var metadata = stat()
+        guard Darwin.fstat(descriptor, &metadata) == 0,
+              metadata.st_mode & S_IFMT == S_IFDIR else {
+            Darwin.close(descriptor)
+            throw TogentError.runtimeLaunch("Pi 角色会话路径不是目录")
+        }
+        return descriptor
+    }
+
+    private static func directoryEntryNames(descriptor: Int32) throws -> [String] {
+        let duplicate = Darwin.dup(descriptor)
+        guard duplicate >= 0 else {
+            throw TogentError.runtimeLaunch("无法枚举 Pi 角色会话目录")
+        }
+        guard let directory = Darwin.fdopendir(duplicate) else {
+            Darwin.close(duplicate)
+            throw TogentError.runtimeLaunch("无法枚举 Pi 角色会话目录")
+        }
+        defer { Darwin.closedir(directory) }
+
+        var names: [String] = []
+        errno = 0
+        while let entry = Darwin.readdir(directory) {
+            let name = withUnsafePointer(to: &entry.pointee.d_name) {
+                $0.withMemoryRebound(to: CChar.self, capacity: Int(NAME_MAX) + 1) {
+                    String(cString: $0)
+                }
+            }
+            if name != ".", name != ".." {
+                names.append(name)
+            }
+            errno = 0
+        }
+        guard errno == 0 else {
+            throw TogentError.runtimeLaunch("枚举 Pi 角色会话目录失败")
+        }
+        return names
+    }
+
+    private static func redactPersistedSessionImages(descriptor: Int32) throws {
+        guard Darwin.lseek(descriptor, 0, SEEK_SET) >= 0 else {
+            throw TogentError.runtimeLaunch("无法读取 Pi 会话")
+        }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        while true {
+            let count = buffer.withUnsafeMutableBytes {
+                Darwin.read(descriptor, $0.baseAddress, $0.count)
+            }
+            if count > 0 {
+                data.append(contentsOf: buffer.prefix(count))
+                continue
+            }
+            if count == 0 {
+                break
+            }
+            if errno == EINTR {
+                continue
+            }
+            throw TogentError.runtimeLaunch("无法读取 Pi 会话")
+        }
+
+        guard let text = String(data: data, encoding: .utf8) else {
+            throw TogentError.runtimeLaunch("Pi 会话不是 UTF-8 JSONL")
+        }
+        var changed = false
+        let sanitized = try text.split(
+            separator: "\n",
+            omittingEmptySubsequences: false
+        ).map { line -> String in
+            guard !line.isEmpty else { return "" }
+            let object = try JSONSerialization.jsonObject(with: Data(line.utf8))
+            let result = redactingImages(in: object)
+            changed = changed || result.changed
+            guard let value = String(
+                data: try JSONSerialization.data(withJSONObject: result.value),
+                encoding: .utf8
+            ) else {
+                throw TogentError.runtimeLaunch("无法编码已脱敏 Pi 会话")
+            }
+            return value
+        }.joined(separator: "\n")
+        guard changed else { return }
+
+        guard Darwin.fchmod(descriptor, mode_t(0o600)) == 0,
+              Darwin.ftruncate(descriptor, 0) == 0,
+              Darwin.lseek(descriptor, 0, SEEK_SET) >= 0 else {
+            throw TogentError.runtimeLaunch("无法重写已脱敏 Pi 会话")
+        }
+        let output = Data(sanitized.utf8)
+        try output.withUnsafeBytes { bytes in
+            var written = 0
+            while written < bytes.count {
+                let count = Darwin.write(
+                    descriptor,
+                    bytes.baseAddress!.advanced(by: written),
+                    bytes.count - written
+                )
+                if count > 0 {
+                    written += count
+                    continue
+                }
+                if count < 0, errno == EINTR {
+                    continue
+                }
+                throw TogentError.runtimeLaunch("无法重写已脱敏 Pi 会话")
+            }
+        }
+        guard Darwin.fsync(descriptor) == 0 else {
+            throw TogentError.runtimeLaunch("无法同步已脱敏 Pi 会话")
         }
     }
 
@@ -300,6 +437,7 @@ final class TogentSandbox {
             "TMPDIR": layout.temporaryDirectory.path + "/",
             "PI_CODING_AGENT_DIR": layout.agentDirectory.path,
             "TOGENT_RELAY_KEY": relayToken,
+            "TOGENT_REDACT_PERSISTED_IMAGES": "1",
             "TOGENT_GIT_SOCKET": layout.gitSocket.path,
             "PATH": [
                 layout.binDirectory.path,

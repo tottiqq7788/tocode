@@ -512,7 +512,7 @@ enum ModelRelayPrompts {
 }
 
 @MainActor
-private final class ModelRelayProviderFormBridge: NSObject, NSTextFieldDelegate {
+final class ModelRelayProviderFormBridge: NSObject, NSTextFieldDelegate {
     static let saveCode = 1_000
     static let deleteCode = 1_001
 

@@ -8,68 +8,297 @@ enum WeChatArchiveError: Error, Equatable {
     case invalidReceiptPath
 }
 
+private struct WeChatDirectoryIdentity: Equatable {
+    let device: dev_t
+    let inode: ino_t
+}
+
+final class WeChatArchiveDirectoryHandle {
+    fileprivate let parentDescriptor: Int32
+    fileprivate let rootDescriptor: Int32
+    fileprivate let dateDescriptor: Int32
+    fileprivate let rootName: String
+    fileprivate let dateName: String
+    fileprivate let rootIdentity: WeChatDirectoryIdentity
+    fileprivate let dateIdentity: WeChatDirectoryIdentity
+
+    fileprivate init(
+        parentDescriptor: Int32,
+        rootDescriptor: Int32,
+        dateDescriptor: Int32,
+        rootName: String,
+        dateName: String,
+        rootIdentity: WeChatDirectoryIdentity,
+        dateIdentity: WeChatDirectoryIdentity
+    ) {
+        self.parentDescriptor = parentDescriptor
+        self.rootDescriptor = rootDescriptor
+        self.dateDescriptor = dateDescriptor
+        self.rootName = rootName
+        self.dateName = dateName
+        self.rootIdentity = rootIdentity
+        self.dateIdentity = dateIdentity
+    }
+
+    deinit {
+        Darwin.close(dateDescriptor)
+        Darwin.close(rootDescriptor)
+        Darwin.close(parentDescriptor)
+    }
+}
+
 protocol WeChatFileSystem {
-    func createDirectory(at url: URL) throws
-    func fileExists(at url: URL) -> Bool
-    func append(_ data: Data, to url: URL) throws
-    func write(_ data: Data, to url: URL) throws
-    func moveItem(at source: URL, to destination: URL) throws
-    func removeItemIfPresent(at url: URL)
-    func setPermissions(_ permissions: Int, at url: URL) throws
+    func openArchiveDirectory(
+        root: URL,
+        dateName: String
+    ) throws -> WeChatArchiveDirectoryHandle
+    func verifyArchiveDirectory(_ directory: WeChatArchiveDirectoryHandle) throws
+    func writeExclusive(
+        _ data: Data,
+        named name: String,
+        in directory: WeChatArchiveDirectoryHandle
+    ) throws -> Bool
+    func append(
+        _ data: Data,
+        named name: String,
+        in directory: WeChatArchiveDirectoryHandle
+    ) throws
+    func removeFileIfPresent(
+        named name: String,
+        in directory: WeChatArchiveDirectoryHandle
+    )
 }
 
 struct SystemWeChatFileSystem: WeChatFileSystem {
-    private let manager = FileManager.default
+    func openArchiveDirectory(
+        root: URL,
+        dateName: String
+    ) throws -> WeChatArchiveDirectoryHandle {
+        let normalizedRoot = root.standardizedFileURL
+        let rootName = normalizedRoot.lastPathComponent
+        guard Self.isSafeComponent(rootName),
+              dateName.count == 6,
+              dateName.allSatisfy(\.isNumber) else {
+            throw WeChatArchiveError.createDirectory
+        }
+        let parent = normalizedRoot.deletingLastPathComponent()
+        let parentDescriptor = parent.path.withCString {
+            Darwin.open($0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        }
+        guard parentDescriptor >= 0 else {
+            throw WeChatArchiveError.createDirectory
+        }
 
-    func createDirectory(at url: URL) throws {
-        try manager.createDirectory(
-            at: url,
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: NSNumber(value: 0o700)]
+        var rootDescriptor: Int32 = -1
+        var dateDescriptor: Int32 = -1
+        do {
+            if rootName.withCString({
+                Darwin.mkdirat(parentDescriptor, $0, mode_t(0o700))
+            }) != 0, errno != EEXIST {
+                throw WeChatArchiveError.createDirectory
+            }
+            rootDescriptor = try Self.openDirectory(
+                named: rootName,
+                relativeTo: parentDescriptor
+            )
+            guard Darwin.fchmod(rootDescriptor, mode_t(0o700)) == 0 else {
+                throw WeChatArchiveError.createDirectory
+            }
+            if dateName.withCString({
+                Darwin.mkdirat(rootDescriptor, $0, mode_t(0o700))
+            }) != 0, errno != EEXIST {
+                throw WeChatArchiveError.createDirectory
+            }
+            dateDescriptor = try Self.openDirectory(
+                named: dateName,
+                relativeTo: rootDescriptor
+            )
+            guard Darwin.fchmod(dateDescriptor, mode_t(0o700)) == 0 else {
+                throw WeChatArchiveError.createDirectory
+            }
+            return WeChatArchiveDirectoryHandle(
+                parentDescriptor: parentDescriptor,
+                rootDescriptor: rootDescriptor,
+                dateDescriptor: dateDescriptor,
+                rootName: rootName,
+                dateName: dateName,
+                rootIdentity: try Self.identity(of: rootDescriptor),
+                dateIdentity: try Self.identity(of: dateDescriptor)
+            )
+        } catch {
+            if dateDescriptor >= 0 { Darwin.close(dateDescriptor) }
+            if rootDescriptor >= 0 { Darwin.close(rootDescriptor) }
+            Darwin.close(parentDescriptor)
+            throw error
+        }
+    }
+
+    func verifyArchiveDirectory(_ directory: WeChatArchiveDirectoryHandle) throws {
+        let root = try Self.openDirectory(
+            named: directory.rootName,
+            relativeTo: directory.parentDescriptor
         )
+        defer { Darwin.close(root) }
+        guard try Self.identity(of: root) == directory.rootIdentity else {
+            throw WeChatArchiveError.invalidReceiptPath
+        }
+        let date = try Self.openDirectory(
+            named: directory.dateName,
+            relativeTo: root
+        )
+        defer { Darwin.close(date) }
+        guard try Self.identity(of: date) == directory.dateIdentity else {
+            throw WeChatArchiveError.invalidReceiptPath
+        }
     }
 
-    func fileExists(at url: URL) -> Bool {
-        manager.fileExists(atPath: url.path)
+    func writeExclusive(
+        _ data: Data,
+        named name: String,
+        in directory: WeChatArchiveDirectoryHandle
+    ) throws -> Bool {
+        guard Self.isSafeComponent(name) else {
+            throw WeChatArchiveError.invalidReceiptPath
+        }
+        let descriptor = name.withCString {
+            Darwin.openat(
+                directory.dateDescriptor,
+                $0,
+                O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                mode_t(0o600)
+            )
+        }
+        if descriptor < 0, errno == EEXIST {
+            return false
+        }
+        guard descriptor >= 0 else {
+            throw WeChatArchiveError.invalidReceiptPath
+        }
+        do {
+            defer { Darwin.close(descriptor) }
+            guard Darwin.fchmod(descriptor, mode_t(0o600)) == 0 else {
+                throw WeChatArchiveError.invalidReceiptPath
+            }
+            try Self.writeAll(data, descriptor: descriptor)
+            guard Darwin.fsync(descriptor) == 0 else {
+                throw WeChatArchiveError.invalidReceiptPath
+            }
+            return true
+        } catch {
+            _ = name.withCString {
+                Darwin.unlinkat(directory.dateDescriptor, $0, 0)
+            }
+            throw error
+        }
     }
 
-    func append(_ data: Data, to url: URL) throws {
-        let descriptor = url.path.withCString {
-            Darwin.open(
+    func append(
+        _ data: Data,
+        named name: String,
+        in directory: WeChatArchiveDirectoryHandle
+    ) throws {
+        guard Self.isSafeComponent(name) else {
+            throw WeChatArchiveError.appendLog
+        }
+        let descriptor = name.withCString {
+            Darwin.openat(
+                directory.dateDescriptor,
                 $0,
                 O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW | O_CLOEXEC,
                 mode_t(0o600)
             )
         }
-        guard descriptor >= 0, Darwin.fchmod(descriptor, mode_t(0o600)) == 0 else {
-            if descriptor >= 0 {
-                Darwin.close(descriptor)
-            }
+        guard descriptor >= 0 else {
             throw WeChatArchiveError.appendLog
         }
-        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
-        defer { try? handle.close() }
-        try handle.write(contentsOf: data)
-        try handle.synchronize()
+        defer { Darwin.close(descriptor) }
+        var metadata = stat()
+        guard Darwin.fstat(descriptor, &metadata) == 0,
+              metadata.st_mode & S_IFMT == S_IFREG,
+              Darwin.fchmod(descriptor, mode_t(0o600)) == 0 else {
+            throw WeChatArchiveError.appendLog
+        }
+        do {
+            try Self.writeAll(data, descriptor: descriptor)
+            guard Darwin.fsync(descriptor) == 0 else {
+                throw WeChatArchiveError.appendLog
+            }
+        } catch {
+            throw WeChatArchiveError.appendLog
+        }
     }
 
-    func write(_ data: Data, to url: URL) throws {
-        try data.write(to: url, options: .atomic)
+    func removeFileIfPresent(
+        named name: String,
+        in directory: WeChatArchiveDirectoryHandle
+    ) {
+        guard Self.isSafeComponent(name) else { return }
+        _ = name.withCString {
+            Darwin.unlinkat(directory.dateDescriptor, $0, 0)
+        }
     }
 
-    func moveItem(at source: URL, to destination: URL) throws {
-        try manager.moveItem(at: source, to: destination)
+    private static func openDirectory(named name: String, relativeTo parent: Int32) throws -> Int32 {
+        guard isSafeComponent(name) else {
+            throw WeChatArchiveError.invalidReceiptPath
+        }
+        let descriptor = name.withCString {
+            Darwin.openat(
+                parent,
+                $0,
+                O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+            )
+        }
+        guard descriptor >= 0 else {
+            throw WeChatArchiveError.invalidReceiptPath
+        }
+        var metadata = stat()
+        guard Darwin.fstat(descriptor, &metadata) == 0,
+              metadata.st_mode & S_IFMT == S_IFDIR else {
+            Darwin.close(descriptor)
+            throw WeChatArchiveError.invalidReceiptPath
+        }
+        return descriptor
     }
 
-    func removeItemIfPresent(at url: URL) {
-        try? manager.removeItem(at: url)
-    }
-
-    func setPermissions(_ permissions: Int, at url: URL) throws {
-        try manager.setAttributes(
-            [.posixPermissions: NSNumber(value: permissions)],
-            ofItemAtPath: url.path
+    private static func identity(of descriptor: Int32) throws -> WeChatDirectoryIdentity {
+        var metadata = stat()
+        guard Darwin.fstat(descriptor, &metadata) == 0,
+              metadata.st_mode & S_IFMT == S_IFDIR else {
+            throw WeChatArchiveError.invalidReceiptPath
+        }
+        return WeChatDirectoryIdentity(
+            device: metadata.st_dev,
+            inode: metadata.st_ino
         )
+    }
+
+    private static func writeAll(_ data: Data, descriptor: Int32) throws {
+        try data.withUnsafeBytes { bytes in
+            var written = 0
+            while written < bytes.count {
+                let count = Darwin.write(
+                    descriptor,
+                    bytes.baseAddress!.advanced(by: written),
+                    bytes.count - written
+                )
+                if count > 0 {
+                    written += count
+                } else if count < 0, errno == EINTR {
+                    continue
+                } else {
+                    throw WeChatArchiveError.invalidReceiptPath
+                }
+            }
+        }
+    }
+
+    private static func isSafeComponent(_ value: String) -> Bool {
+        !value.isEmpty
+            && value != "."
+            && value != ".."
+            && !value.contains("/")
+            && !value.contains("\0")
     }
 }
 
@@ -130,40 +359,40 @@ actor WeChatArchiveService: WeChatArchiving {
         let headingTime = format(receivedAt, pattern: "HH:mm:ss", calendar: calendar)
         let dateDirectory = root.appendingPathComponent(dateName, isDirectory: true)
 
+        let archiveDirectory: WeChatArchiveDirectoryHandle
         do {
-            try fileSystem.createDirectory(at: dateDirectory)
-            try fileSystem.setPermissions(0o700, at: root)
-            try fileSystem.setPermissions(0o700, at: dateDirectory)
-            try Self.validateArchiveDirectory(dateDirectory, under: root)
+            archiveDirectory = try fileSystem.openArchiveDirectory(
+                root: root,
+                dateName: dateName
+            )
         } catch {
             throw WeChatArchiveError.createDirectory
         }
 
         let content = collectContent(from: message)
         let downloaded = await downloadAttachments(content.attachments)
+        do {
+            try fileSystem.verifyArchiveDirectory(archiveDirectory)
+        } catch {
+            throw WeChatArchiveError.invalidReceiptPath
+        }
         var attachmentLines = content.missingAttachmentLines
-        var savedAttachments: [URL] = []
+        var savedAttachmentNames: [String] = []
 
         for result in downloaded.sorted(by: { $0.plan.index < $1.plan.index }) {
             switch result.data {
             case .success(let data):
                 do {
-                    let finalURL = uniqueAttachmentURL(
-                        in: dateDirectory,
+                    let finalName = try writeUniqueAttachment(
+                        data,
+                        in: archiveDirectory,
                         prefix: timeName,
                         index: result.plan.index,
                         originalName: result.plan.originalName
                     )
-                    let partURL = dateDirectory.appendingPathComponent(
-                        ".\(finalURL.lastPathComponent).\(UUID().uuidString).part"
-                    )
-                    defer { fileSystem.removeItemIfPresent(at: partURL) }
-                    try fileSystem.write(data, to: partURL)
-                    try fileSystem.setPermissions(0o600, at: partURL)
-                    try fileSystem.moveItem(at: partURL, to: finalURL)
-                    savedAttachments.append(finalURL)
+                    savedAttachmentNames.append(finalName)
                     attachmentLines.append(
-                        "- \(result.plan.label)：[\(escapeLinkText(finalURL.lastPathComponent))](\(encodeLink(finalURL.lastPathComponent)))"
+                        "- \(result.plan.label)：[\(escapeLinkText(finalName))](\(encodeLink(finalName)))"
                     )
                 } catch {
                     attachmentLines.append("- \(result.plan.label)：保存失败")
@@ -181,31 +410,45 @@ actor WeChatArchiveService: WeChatArchiving {
             quotedParts: content.quotedParts,
             attachmentLines: attachmentLines
         )
-        let logURL = dateDirectory.appendingPathComponent("wechat\(dateName).md")
+        let logName = "wechat\(dateName).md"
+        let logURL = dateDirectory.appendingPathComponent(logName)
         do {
-            try fileSystem.append(Data(markdown.utf8), to: logURL)
+            try fileSystem.append(
+                Data(markdown.utf8),
+                named: logName,
+                in: archiveDirectory
+            )
         } catch {
-            for url in savedAttachments {
-                fileSystem.removeItemIfPresent(at: url)
+            for name in savedAttachmentNames {
+                fileSystem.removeFileIfPresent(
+                    named: name,
+                    in: archiveDirectory
+                )
             }
             throw WeChatArchiveError.appendLog
         }
         do {
-            return WeChatArchiveReceipt(
+            try fileSystem.verifyArchiveDirectory(archiveDirectory)
+            let receipt = WeChatArchiveReceipt(
                 logRelativePath: try Self.validatedWorkspaceRelativePath(
                     for: logURL,
                     archiveRoot: root
                 ),
-                attachmentRelativePaths: try savedAttachments.map {
+                attachmentRelativePaths: try savedAttachmentNames.map {
                     try Self.validatedWorkspaceRelativePath(
-                        for: $0,
+                        for: dateDirectory.appendingPathComponent($0),
                         archiveRoot: root
                     )
                 }
             )
+            try fileSystem.verifyArchiveDirectory(archiveDirectory)
+            return receipt
         } catch {
-            for url in savedAttachments {
-                fileSystem.removeItemIfPresent(at: url)
+            for name in savedAttachmentNames {
+                fileSystem.removeFileIfPresent(
+                    named: name,
+                    in: archiveDirectory
+                )
             }
             throw WeChatArchiveError.invalidReceiptPath
         }
@@ -252,31 +495,6 @@ actor WeChatArchiveService: WeChatArchiving {
             throw WeChatArchiveError.invalidReceiptPath
         }
         return relative
-    }
-
-    private static func validateArchiveDirectory(
-        _ directory: URL,
-        under archiveRoot: URL
-    ) throws {
-        let root = archiveRoot.standardizedFileURL
-        let candidate = directory.standardizedFileURL
-        let rootValues = try root.resourceValues(
-            forKeys: [.isDirectoryKey, .isSymbolicLinkKey]
-        )
-        let candidateValues = try candidate.resourceValues(
-            forKeys: [.isDirectoryKey, .isSymbolicLinkKey]
-        )
-        guard rootValues.isDirectory == true,
-              rootValues.isSymbolicLink != true,
-              candidateValues.isDirectory == true,
-              candidateValues.isSymbolicLink != true,
-              isDescendant(candidate.path, of: root.path),
-              isDescendant(
-                candidate.resolvingSymlinksInPath().path,
-                of: root.resolvingSymlinksInPath().path
-              ) else {
-            throw WeChatArchiveError.invalidReceiptPath
-        }
     }
 
     private static func isDescendant(_ candidate: String, of root: String) -> Bool {
@@ -505,12 +723,13 @@ actor WeChatArchiveService: WeChatArchiving {
         )
     }
 
-    private func uniqueAttachmentURL(
-        in directory: URL,
+    private func writeUniqueAttachment(
+        _ data: Data,
+        in directory: WeChatArchiveDirectoryHandle,
         prefix: String,
         index: Int,
         originalName: String
-    ) -> URL {
+    ) throws -> String {
         let fallback: String
         let lower = originalName.lowercased()
         if lower.contains("image") { fallback = "image.jpg" }
@@ -520,17 +739,24 @@ actor WeChatArchiveService: WeChatArchiving {
 
         let clean = Self.sanitizedFilename(originalName, fallback: fallback)
         let base = "\(prefix)_\(String(format: "%02d", index))_\(clean)"
-        var candidate = directory.appendingPathComponent(base)
+        var candidate = base
         var collision = 2
-        while fileSystem.fileExists(at: candidate) {
+        while true {
+            if try fileSystem.writeExclusive(
+                data,
+                named: candidate,
+                in: directory
+            ) {
+                return candidate
+            }
             let ns = base as NSString
             let ext = ns.pathExtension
             let stem = ns.deletingPathExtension
-            let name = ext.isEmpty ? "\(stem)_\(collision)" : "\(stem)_\(collision).\(ext)"
-            candidate = directory.appendingPathComponent(name)
+            candidate = ext.isEmpty
+                ? "\(stem)_\(collision)"
+                : "\(stem)_\(collision).\(ext)"
             collision += 1
         }
-        return candidate
     }
 
     private func makeMarkdown(
