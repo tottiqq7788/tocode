@@ -6,6 +6,7 @@ cd "$(dirname "$0")/.."
 
 mkdir -p build
 swiftc Tests/TestRunner.swift \
+  Tests/ApplicationEditMenuTests.swift \
   Tests/WeChatTestSupport.swift \
   Tests/TocodeCommandTestSupport.swift \
   Tests/AnkerCredentialTests.swift \
@@ -32,6 +33,7 @@ swiftc Tests/TestRunner.swift \
   Sources/ShortcutSettingsStore.swift \
   Sources/ShortcutMenuAppearance.swift \
   Sources/AlertFocus.swift \
+  Sources/ApplicationEditMenu.swift \
   Sources/DirectoryMenuMode.swift \
   Sources/DirectoryMenuResume.swift \
   Sources/TocodePreferences.swift \

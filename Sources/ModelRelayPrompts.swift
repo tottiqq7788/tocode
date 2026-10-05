@@ -133,7 +133,7 @@ enum ModelRelayPrompts {
         provider.selectItem(at: draft.presetIndex ?? providerPresets.count)
         let url = NSTextField(string: draft.customBaseURL)
         url.placeholderString = "https://api.example.com/v1"
-        let secret = ModelRelaySecureTextField(
+        let secret = NSSecureTextField(
             frame: NSRect(x: 0, y: 0, width: 330, height: 24)
         )
         secret.stringValue = draft.secret
@@ -312,9 +312,9 @@ enum ModelRelayPrompts {
     static func localKey() -> LocalKeyInput? {
         let name = NSTextField()
         name.placeholderString = "唯一显示名称"
-        let password = ModelRelaySecureTextField(frame: NSRect(x: 0, y: 0, width: 330, height: 24))
+        let password = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 330, height: 24))
         password.placeholderString = "至少 8 个字符"
-        let confirmation = ModelRelaySecureTextField(frame: NSRect(x: 0, y: 0, width: 330, height: 24))
+        let confirmation = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 330, height: 24))
         confirmation.placeholderString = "再次输入查看密码"
         let alert = formAlert(
             title: "新增本地 Key",
@@ -347,7 +347,7 @@ enum ModelRelayPrompts {
     }
 
     static func localKeyAction(name: String) -> LocalKeyAction? {
-        let password = ModelRelaySecureTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
+        let password = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
         password.placeholderString = "查看密码"
         let alert = NSAlert()
         alert.messageText = name
@@ -758,26 +758,6 @@ final class ModelRelayProviderFormBridge: NSObject, NSTextFieldDelegate {
         }
         if activeOperationID == operationID {
             activeCancellation = cancellation
-        }
-    }
-}
-
-/// 菜单栏应用没有 Edit 菜单，因此在安全输入框内显式支持粘贴和全选。
-@MainActor
-private final class ModelRelaySecureTextField: NSSecureTextField {
-    override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
-        guard flags == .command else { return super.performKeyEquivalent(with: event) }
-        switch event.charactersIgnoringModifiers?.lowercased() {
-        case "v":
-            guard let editor = currentEditor() else { return super.performKeyEquivalent(with: event) }
-            editor.paste(self)
-            return true
-        case "a":
-            selectText(self)
-            return true
-        default:
-            return super.performKeyEquivalent(with: event)
         }
     }
 }

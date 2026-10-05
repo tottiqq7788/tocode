@@ -10,7 +10,7 @@ enum AnkerCredentialPrompt {
         alert.informativeText = "输入新的 API 密钥，保存后替换 pi、Codex（通过 CC Switch）、Hermes 和 OpenCode 的密钥。\n\nHermes 将使用 DeepSeek V4 Pro。已打开的会话可能需要重新加载。"
         alert.addButton(withTitle: "保存")
         alert.addButton(withTitle: "取消")
-        let field = AnkerSecureTextField(frame: NSRect(x: 0, y: 0, width: 380, height: 26))
+        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 380, height: 26))
         field.placeholderString = "输入新的 AK 密钥"
         field.setAccessibilityLabel("新的 AK 密钥")
         alert.accessoryView = field
@@ -38,25 +38,5 @@ enum AnkerCredentialPrompt {
         alert.addButton(withTitle: "好")
         NSApp.activate(ignoringOtherApps: true)
         alert.runModal()
-    }
-}
-
-/// The accessory application has no Edit menu, so provide the two input shortcuts locally.
-@MainActor
-private final class AnkerSecureTextField: NSSecureTextField {
-    override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
-        guard flags == .command else { return super.performKeyEquivalent(with: event) }
-        switch event.charactersIgnoringModifiers?.lowercased() {
-        case "v":
-            guard let editor = currentEditor() else { return super.performKeyEquivalent(with: event) }
-            editor.paste(self)
-            return true
-        case "a":
-            selectText(self)
-            return true
-        default:
-            return super.performKeyEquivalent(with: event)
-        }
     }
 }
