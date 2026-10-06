@@ -114,6 +114,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         modelRelay.didChange = { [weak togent] in
             togent?.relayDidChange()
         }
+        executor.attachTogent(togent)
+        executor.attachModelRelay(modelRelay)
 
         let weChat = WeChatAssociationService()
         self.weChat = weChat

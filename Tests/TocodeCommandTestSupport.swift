@@ -161,3 +161,52 @@ final class MemoryTocodeTransport: TocodeIPCTransport {
         return .success(response)
     }
 }
+
+@MainActor
+final class MockTocodeModelRelay: TocodeModelRelayCommanding {
+    var status = TocodeModelRelayCLIStatus(
+        baseURL: "http://127.0.0.1:27800/v1",
+        port: 27800,
+        runStateText: "状态：运行中 · 127.0.0.1:27800",
+        lastUsedProviderName: "DeepSeek",
+        callCountLast6Hours: 3
+    )
+    var models: [TogentModelOption] = [
+        TogentModelOption(
+            publishedModelID: "deepseek-chat",
+            providerName: "DeepSeek",
+            imageInput: .multimodal
+        )
+    ]
+    var logURL: URL?
+    var updatedPorts: [Int] = []
+    var updateError: Error?
+
+    func cliStatus() -> TocodeModelRelayCLIStatus { status }
+    func availableTogentModels() -> [TogentModelOption] { models }
+    func todayCallLogURL() throws -> URL {
+        if let logURL { return logURL }
+        throw ModelRelayError.invalidPort
+    }
+    func updatePort(_ value: Int) async throws {
+        if let updateError { throw updateError }
+        updatedPorts.append(value)
+        status = TocodeModelRelayCLIStatus(
+            baseURL: "http://127.0.0.1:\(value)/v1",
+            port: UInt16(value),
+            runStateText: "状态：运行中 · 127.0.0.1:\(value)",
+            lastUsedProviderName: status.lastUsedProviderName,
+            callCountLast6Hours: status.callCountLast6Hours
+        )
+    }
+}
+
+final class MockTocodeWorkspaceOpener: TogentWorkspaceOpening {
+    var urls: [URL] = []
+    var result = true
+
+    func open(_ url: URL) -> Bool {
+        urls.append(url)
+        return result
+    }
+}

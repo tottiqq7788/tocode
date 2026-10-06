@@ -80,6 +80,10 @@ final class TogentService {
         availableModelOptions()
     }
 
+    func defaultWorkspacePath(forRoleName name: String) -> String {
+        workspace.defaultWorkspacePath(forRoleName: name)
+    }
+
     var isBusy: Bool {
         if workerTask != nil || !inboundLeaseRoles.isEmpty {
             return true

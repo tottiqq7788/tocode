@@ -146,11 +146,15 @@ CLI 通过本机 Unix domain socket 转发给**常驻 Tocode 进程**执行；To
 
 Tocode 首次启动后，会自动把 CLI 安装到 `~/.local/bin/tocode`（该目录已在 PATH 中），之后可直接在终端运行 `tocode ...`。
 
-主要命令：`help`（同 `commands`）、`status`、`root get|set|choose|reset|finder-follow|clipboard|open`、`finder copy`、`codex status|sync|model|model list|model set`、`wechat status|bind|send`、`blackout`、`login on|off|toggle`、`wheel vertical|horizontal on|off|toggle`、`hidden on|off|toggle`、`shortcut finder-move|double-cmdq|finder-cmdq on|off|toggle`、`quit`。开关类命令的 `on|off|toggle` 可互换使用；每条命令都会返回结果，不静默执行。
+主要命令：`help`（同 `commands`）、`status`、`root get|set|choose|reset|finder-follow|clipboard|open`、`finder copy`、`codex status|sync|model|model list|model set`、`wechat status|bind|send`、`togent list|show|models|create|copy|update|open`、`model status|port|models|log`、`blackout`、`login on|off|toggle`、`wheel vertical|horizontal on|off|toggle`、`hidden on|off|toggle`、`shortcut finder-move|double-cmdq|finder-cmdq on|off|toggle`、`quit`。开关类命令的 `on|off|toggle` 可互换使用；每条命令都会返回结果，不静默执行。
 
 `root clipboard`：剪贴板是不带「」的现有文件夹路径时设为固定根。`root open`：在访达打开固定根（不是跟随后的展示根）。`finder copy`：把访达恰好选中的一项绝对路径写入剪贴板并打印。
 
 `tocode wechat send [--to <user_id>] [--text <文字>] [文件...]` 通过**当前已绑定**的微信 Bot 主动发消息：默认发给最近一条入站会话；`--to` 只能指定曾经入站过的用户。文字先发，文件按参数顺序各发一条；`jpg/jpeg/png/gif/webp` 作为图片，其余作为附件。单文件不超过 20MB；失败即停，已发出的不回滚。出站内容不写入 `wechat*.md`。Tocode 未运行或未绑定时失败。
+
+`tocode togent ...` 只配置角色，不能提交 Agent 任务。`create` / `copy` / `update` 走与菜单相同的服务层校验：英文安全名称、路径隔离、健康模型门控与忙碌锁定。省略 `--path` 时默认 `~/Documents/togent/<角色名>`；`copy` 只继承提示词和模型，生成独立新工作区且默认不激活。
+
+`tocode model ...` 只提供非密钥面：`status` 返回 Base URL / 端口 / 运行状态 / 最近厂家 / 近六小时调用次数，`port` 读取或设置 1024…65535，`models` 列出健康 published 模型，`log` 打开今日调用日志。不返回上游 Key、本地 Key、查看密码或内部 Bearer。
 
 ### 微信 `.` 前缀命令
 

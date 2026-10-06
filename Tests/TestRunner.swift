@@ -5590,6 +5590,59 @@ func testTocodeCommandParser() {
     expect(TocodeCommandParser.parse("shortcut finder-cmdq on") == .success(.shortcut(.finderCmdQ, .on)), "shortcut finder-cmdq")
     expect(TocodeCommandParser.parse("quit") == .success(.quit), "quit")
 
+    expect(TocodeCommandParser.parse("togent list") == .success(.togent(.list)), "togent list")
+    expect(TocodeCommandParser.parse("togent models") == .success(.togent(.models)), "togent models")
+    expect(TocodeCommandParser.parse("togent show Developer") == .success(.togent(.show("Developer"))), "togent show")
+    expect(TocodeCommandParser.parse("togent open Developer") == .success(.togent(.open("Developer"))), "togent open")
+    expect(
+        TocodeCommandParser.parse(
+            "togent create --name Developer --model deepseek-chat --active on --prompt 你好 世界"
+        ) == .success(.togent(.create(TocodeTogentRoleOptions(
+            name: "Developer",
+            publishedModelID: "deepseek-chat",
+            isActive: true,
+            prompt: "你好 世界"
+        )))),
+        "togent create 解析名称模型激活与尾部提示词"
+    )
+    expect(
+        TocodeCommandParser.parse("togent copy Developer --name Developer-copy --active off")
+            == .success(.togent(.copy(
+                sourceName: "Developer",
+                options: TocodeTogentRoleOptions(name: "Developer-copy", isActive: false)
+            ))),
+        "togent copy 解析源名称与选项"
+    )
+    expect(
+        TocodeCommandParser.parse("togent update Developer --prompt 新提示词")
+            == .success(.togent(.update(
+                name: "Developer",
+                options: TocodeTogentRoleOptions(prompt: "新提示词")
+            ))),
+        "togent update 解析字段"
+    )
+    expect(TocodeCommandParser.parse("model status") == .success(.model(.status)), "model status")
+    expect(TocodeCommandParser.parse("model port") == .success(.model(.portGet)), "model port get")
+    expect(TocodeCommandParser.parse("model port 28080") == .success(.model(.portSet(28080))), "model port set")
+    expect(TocodeCommandParser.parse("model port 80").isFailure, "model 端口低于 1024 失败")
+    expect(TocodeCommandParser.parse("model models") == .success(.model(.models)), "model models")
+    expect(TocodeCommandParser.parse("model log") == .success(.model(.log)), "model log")
+    expect(TocodeCommandParser.helpText.contains("togent create"), "help 含 togent create")
+    expect(TocodeCommandParser.helpText.contains("model status"), "help 含 model status")
+    expect(TocodeCommandParser.helpText.contains("不能提交 Agent 任务"), "help 声明 CLI 不能提交 Agent 任务")
+    expect(
+        TocodeCommandParser.weChatHelpCommands.contains(where: { $0.command.hasPrefix("togent ") })
+            && TocodeCommandParser.weChatHelpCommands.contains(where: { $0.command.hasPrefix("model ") }),
+        "微信 help 含 togent 与 model 命令"
+    )
+    let secretHelp = TocodeCommandParser.helpText + TocodeCommandParser.weChatHelpText
+    expect(
+        !secretHelp.contains("Bearer")
+            && !secretHelp.contains("查看密码")
+            && !secretHelp.contains("tc_"),
+        "help 不暴露密钥或内部 token"
+    )
+
     if case .failure(.unknownCommand("nope")) = TocodeCommandParser.parse("nope") {
         expect(true, "未知命令")
     } else {
@@ -5600,6 +5653,160 @@ func testTocodeCommandParser() {
     } else {
         expect(false, "无效 toggle")
     }
+}
+
+@MainActor
+func testTocodeTogentAndModelCommands() async {
+    let root = makeTogentTemporaryDirectory("cli-togent")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = TogentStore(databaseURL: root.appendingPathComponent("togent.sqlite"))
+    let workspace = TogentWorkspaceService(homeDirectory: root)
+    let model = TogentModelOption(
+        publishedModelID: "deepseek-chat",
+        providerName: "DeepSeek",
+        imageInput: .multimodal
+    )
+    let togent = TogentService(
+        store: store,
+        workspace: workspace,
+        runtime: StubTogentRuntime(),
+        availableModelOptions: { [model] },
+        bootstrapDefaultRole: false
+    )
+    let relay = MockTocodeModelRelay()
+    let opener = MockTocodeWorkspaceOpener()
+    let logURL = root.appendingPathComponent("model-relay-calls.log")
+    try! Data("ts=1\n".utf8).write(to: logURL)
+    relay.logURL = logURL
+    let executor = TocodeCommandExecutor(
+        launchAtLogin: MockTocodeLaunchAtLogin(),
+        mouseWheel: MockTocodeWheel(),
+        shortcuts: MockTocodeShortcuts(),
+        codexModels: MockTocodeCodexModels(),
+        weChat: MockTocodeWeChat(),
+        togent: togent,
+        modelRelay: relay,
+        workspaceOpener: opener,
+        screenBlackout: ScreenBlackoutService(overlay: MockTocodeScreenBlackout())
+    )
+
+    let created = executor.execute(
+        "togent create --name Developer --model deepseek-chat --prompt Source prompt"
+    )
+    expect(created.isSuccess, "CLI 可创建 Togent 角色")
+    expect(
+        togent.roles.contains(where: {
+            $0.name == "Developer"
+                && $0.workspacePath.hasSuffix("/Documents/togent/Developer")
+                && $0.prompt == "Source prompt"
+        }),
+        "CLI 创建使用英文名与同名默认路径"
+    )
+
+    let chinese = executor.execute("togent create --name 中文角色 --model deepseek-chat")
+    expect(chinese.isFailure, "CLI 拒绝中文角色名")
+
+    let customPath = root.appendingPathComponent("custom-role").path
+    let custom = executor.execute(
+        "togent create --name Writer --path \(customPath) --model deepseek-chat --active off"
+    )
+    expect(custom.isSuccess, "CLI 支持自定义路径创建")
+    let expectedCustomPath = try! workspace.canonicalPath(customPath)
+    expect(
+        togent.roles.contains(where: {
+            $0.name == "Writer" && $0.workspacePath == expectedCustomPath && !$0.isActive
+        }),
+        "CLI 自定义路径写入 registry"
+    )
+
+    let developer = togent.roles.first(where: { $0.name == "Developer" })!
+    let sourceFile = URL(fileURLWithPath: developer.workspacePath)
+        .appendingPathComponent("project/source-only.txt")
+    try! Data("source".utf8).write(to: sourceFile)
+
+    let copied = executor.execute("togent copy Developer")
+    expect(copied.isSuccess, "CLI 可复制角色")
+    if let copyRole = togent.roles.first(where: { $0.name == "Developer-copy" }) {
+        expect(
+            copyRole.prompt == "Source prompt"
+                && copyRole.publishedModelID == "deepseek-chat"
+                && !copyRole.isActive
+                && copyRole.workspacePath.hasSuffix("/Documents/togent/Developer-copy"),
+            "CLI 复制只继承提示词与模型并生成新工作区"
+        )
+        expect(
+            !FileManager.default.fileExists(
+                atPath: URL(fileURLWithPath: copyRole.workspacePath)
+                    .appendingPathComponent("project/source-only.txt").path
+            ),
+            "CLI 复制不复制源工作区文件"
+        )
+    } else {
+        expect(false, "CLI 复制应生成 Developer-copy")
+    }
+
+    _ = try! store.stageJob(
+        deduplicationKey: "busy",
+        roleID: togent.roles.first(where: { $0.name == "Developer" })?.id,
+        fromUserID: "u",
+        contextToken: "c",
+        messageText: "busy",
+        receivedAt: Date()
+    )
+    try! store.queueStagedJob(deduplicationKey: "busy")
+    let busyUpdate = executor.execute("togent update Developer --active off")
+    expect(busyUpdate.isFailure, "忙碌时 CLI 拒绝切换激活状态")
+    try! store.markCompleted(id: (try! store.jobs()).first(where: { $0.deduplicationKey == "busy" })!.id)
+
+    let listed = executor.execute("togent list")
+    expect(
+        listed.isSuccess
+            && (tocodeOutput(listed)?.text.contains("Developer") == true)
+            && (tocodeOutput(listed)?.text.contains("多模态") == true),
+        "togent list 显示角色与能力标记"
+    )
+    let shown = executor.execute("togent show Developer")
+    expect(
+        shown.isSuccess
+            && (tocodeOutput(shown)?.text.contains("Source prompt") == true)
+            && !(tocodeOutput(shown)?.text.contains("Bearer") == true)
+            && !(tocodeOutput(shown)?.text.contains("tc_") == true),
+        "togent show 回显提示词且不含密钥"
+    )
+    let opened = executor.execute("togent open Developer")
+    expect(opened.isSuccess && opener.urls.count == 1, "togent open 打开已保存工作区")
+
+    let modelStatus = executor.execute("model status")
+    expect(
+        modelStatus.isSuccess
+            && (tocodeOutput(modelStatus)?.text.contains("http://127.0.0.1:27800/v1") == true)
+            && (tocodeOutput(modelStatus)?.text.contains("DeepSeek") == true)
+            && !(tocodeOutput(modelStatus)?.text.contains("Bearer") == true),
+        "model status 返回非密钥摘要"
+    )
+    let portSet = await executor.executeAsync("model port 28080")
+    expect(portSet.isSuccess && relay.updatedPorts == [28080], "model port 异步设置端口")
+    let models = executor.execute("model models")
+    expect(
+        models.isSuccess
+            && (tocodeOutput(models)?.text.contains("deepseek-chat") == true)
+            && (tocodeOutput(models)?.text.contains("多模态") == true),
+        "model models 列出健康模型"
+    )
+    let log = executor.execute("model log")
+    expect(
+        log.isSuccess && opener.urls.last == logURL,
+        "model log 打开今日调用日志"
+    )
+
+    let status = executor.execute("status")
+    expect(
+        status.isSuccess
+            && (tocodeOutput(status)?.text.contains("Togent：") == true)
+            && (tocodeOutput(status)?.text.contains("模型中转：") == true),
+        "status 汇总 Togent 与模型中转"
+    )
+    togent.stop()
 }
 
 func weChatTextMessage(_ text: String, id: String = "m") -> WeChatMessage {
@@ -6124,6 +6331,11 @@ extension Result where Failure == TocodeCommandError {
     var isFailure: Bool { !isSuccess }
 }
 
+func tocodeOutput(_ result: TocodeCommandResult) -> TocodeCommandOutput? {
+    if case .success(let output) = result { return output }
+    return nil
+}
+
 
 @MainActor
 func testWeChatCommandConsumption() async {
@@ -6635,6 +6847,7 @@ struct TestRunnerMain {
         await testTogentWorkspaceFileReplyAndFaults()
         await testTogentWeChatRealPiEndToEnd()
         testTocodeCommandParser()
+        await testTocodeTogentAndModelCommands()
         testTocodeWeChatCommandGate()
         testWeChatQuickInputParseAndInject()
         await testTocodeCommandExecutorMapping()

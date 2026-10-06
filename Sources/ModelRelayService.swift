@@ -244,6 +244,38 @@ final class ModelRelayService: @unchecked Sendable {
         configurationSnapshot()
     }
 
+    /// CLI / 微信点号命令用的非密钥状态摘要。
+    func cliStatus() -> TocodeModelRelayCLIStatus {
+        let configuration = configurationSnapshot()
+        let lastID = callMetrics.lastUsedProviderID
+        let lastName = configuration.providers.first(where: { $0.id == lastID })?.name
+        let count: Int
+        if let lastID {
+            count = callMetrics.series(
+                providerID: lastID,
+                range: .sixHours,
+                now: Date()
+            ).reduce(0) { $0 + $1.count }
+        } else {
+            count = 0
+        }
+        return TocodeModelRelayCLIStatus(
+            baseURL: "http://127.0.0.1:\(configuration.port)/v1",
+            port: configuration.port,
+            runStateText: runState.menuText,
+            lastUsedProviderName: lastName,
+            callCountLast6Hours: count
+        )
+    }
+
+    func availableTogentModels() -> [TogentModelOption] {
+        router.availableTogentModels()
+    }
+
+    func todayCallLogURL() throws -> URL {
+        try callMetrics.ensureTodayLogFile()
+    }
+
     /// 仅供同一 Tocode 进程启动受管 Togent 子进程；token 从不进入持久配置或日志。
     func togentRelayAccess() -> TogentRelayAccess {
         let snapshot = configurationSnapshot()
@@ -1450,5 +1482,16 @@ private final class ModelRelayServiceReadiness {
         lock.lock()
         defer { lock.unlock() }
         return result
+    }
+}
+
+@MainActor
+extension ModelRelayService: TocodeModelRelayCommanding {
+    func updatePort(_ value: Int) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            updatePort(value) { result in
+                continuation.resume(with: result)
+            }
+        }
     }
 }

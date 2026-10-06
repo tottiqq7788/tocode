@@ -117,6 +117,8 @@ enum UserManual {
         tocode finder copy
         tocode codex status|sync|model
         tocode wechat status|bind|send
+        tocode togent list|show|models|create|copy|update|open
+        tocode model status|port|models|log
         tocode blackout
         tocode login on|off|toggle
         tocode wheel vertical|horizontal on|off|toggle
@@ -127,6 +129,9 @@ enum UserManual {
         root clipboard：剪贴板是不带「」的现有文件夹路径时设为固定根。
         root open：在访达打开固定根（不是访达/Codex 跟随后的展示根）。
         finder copy：复制访达当前恰好选中的那一项绝对路径。
+
+        togent：只配置角色，不能提交 Agent 任务。名称须为英文安全标识；省略 --path 时默认 ~/Documents/togent/<角色名>。copy 只继承提示词和模型，生成独立新工作区且默认不激活。
+        model：只查询或调整不含密钥的中转状态、端口、健康模型目录与今日调用日志，不返回任何密钥。
 
         开关类命令的 on / off / toggle 可以互换。每条命令都会返回结果，不会静默执行。不会执行任意 shell。
         """),

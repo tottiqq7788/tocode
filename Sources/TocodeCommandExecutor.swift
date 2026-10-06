@@ -39,9 +39,40 @@ protocol TocodeVisibilityCommanding {
     func setShowAllFiles(_ show: Bool) -> Bool
 }
 
+@MainActor
+protocol TocodeTogentCommanding: AnyObject {
+    var roles: [TogentRole] { get }
+    var models: [TogentModelOption] { get }
+    var isBusy: Bool { get }
+    var startupError: Error? { get }
+    func newRoleDraft() -> TogentRoleDraft
+    func roleCopyOptions() -> [TogentRoleCopyOption]
+    func defaultWorkspacePath(forRoleName name: String) -> String
+    func createRole(from draft: TogentRoleDraft) throws -> TogentRole
+    func updateRole(id: UUID, from draft: TogentRoleDraft) throws -> TogentRole
+}
+
+/// CLI / 微信点号命令用的非密钥中转状态摘要（与 App 内 ModelRelayService 共享形状）。
+struct TocodeModelRelayCLIStatus: Equatable {
+    let baseURL: String
+    let port: UInt16
+    let runStateText: String
+    let lastUsedProviderName: String?
+    let callCountLast6Hours: Int
+}
+
+@MainActor
+protocol TocodeModelRelayCommanding: AnyObject {
+    func cliStatus() -> TocodeModelRelayCLIStatus
+    func availableTogentModels() -> [TogentModelOption]
+    func todayCallLogURL() throws -> URL
+    func updatePort(_ value: Int) async throws
+}
+
 extension MouseWheelReverseService: TocodeWheelCommanding {}
 extension GlobalShortcutService: TocodeShortcutCommanding {}
 extension FinderVisibilityService: TocodeVisibilityCommanding {}
+extension TogentService: TocodeTogentCommanding {}
 
 /// 统一命令执行器：CLI 与微信命令共享，白名单枚举，不做 shell 执行。
 @MainActor
@@ -61,6 +92,9 @@ final class TocodeCommandExecutor {
     private let codexModels: CodexModelSwitching
     private let codexRestarter: CodexApplicationRestarting
     private var weChat: WeChatAssociationControlling
+    private var togent: (any TocodeTogentCommanding)?
+    private var modelRelay: (any TocodeModelRelayCommanding)?
+    private let workspaceOpener: TogentWorkspaceOpening
     private let screenBlackout: ScreenBlackoutService
     private let notify: (String, String) -> Void
 
@@ -80,6 +114,9 @@ final class TocodeCommandExecutor {
         codexModels: CodexModelSwitching,
         codexRestarter: CodexApplicationRestarting = CodexApplicationRestarter(),
         weChat: WeChatAssociationControlling,
+        togent: (any TocodeTogentCommanding)? = nil,
+        modelRelay: (any TocodeModelRelayCommanding)? = nil,
+        workspaceOpener: TogentWorkspaceOpening = SystemTogentWorkspaceOpener(),
         screenBlackout: ScreenBlackoutService? = nil,
         notify: @escaping (String, String) -> Void = { title, body in
             let content = UNMutableNotificationContent()
@@ -110,12 +147,23 @@ final class TocodeCommandExecutor {
         self.codexModels = codexModels
         self.codexRestarter = codexRestarter
         self.weChat = weChat
+        self.togent = togent
+        self.modelRelay = modelRelay
+        self.workspaceOpener = workspaceOpener
         self.screenBlackout = screenBlackout ?? ScreenBlackoutService(overlay: ScreenBlackoutOverlay())
         self.notify = notify
     }
 
     func attachWeChat(_ controller: WeChatAssociationControlling) {
         weChat = controller
+    }
+
+    func attachTogent(_ service: any TocodeTogentCommanding) {
+        togent = service
+    }
+
+    func attachModelRelay(_ service: any TocodeModelRelayCommanding) {
+        modelRelay = service
     }
 
     func execute(_ command: TocodeCommand) -> TocodeCommandResult {
@@ -134,6 +182,12 @@ final class TocodeCommandExecutor {
             return .failure(.operationFailed("wechat send 需要通过 CLI 异步执行"))
         case .wechat(let subcommand):
             return executeWechat(subcommand)
+        case .togent(let subcommand):
+            return executeTogent(subcommand)
+        case .model(.portSet):
+            return .failure(.operationFailed("model port 设置需要通过 CLI 异步执行"))
+        case .model(let subcommand):
+            return executeModel(subcommand)
         case .blackout:
             let alreadyPresented = screenBlackout.isPresented
             screenBlackout.activate()
@@ -189,6 +243,9 @@ final class TocodeCommandExecutor {
         if case .wechat(.send(let payload)) = command {
             return await weChat.sendOutbound(payload)
         }
+        if case .model(.portSet(let port)) = command {
+            return await executeModelPortSet(port)
+        }
         return execute(command)
     }
 
@@ -216,6 +273,26 @@ final class TocodeCommandExecutor {
         } else {
             modelLine = "Codex 模型：不可用"
         }
+        let togentLine: String
+        if let startupError = togent?.startupError {
+            togentLine = "Togent：不可用（\(startupError.localizedDescription)）"
+        } else if let roles = togent?.roles {
+            if let active = roles.first(where: \.isActive) {
+                let modelText = active.publishedModelID.isEmpty ? "未配置" : active.publishedModelID
+                togentLine = "Togent：\(active.name)（激活，模型 \(modelText)，共 \(roles.count) 个角色）"
+            } else {
+                togentLine = "Togent：无激活角色（共 \(roles.count) 个角色）"
+            }
+        } else {
+            togentLine = "Togent：未就绪"
+        }
+        let relayLine: String
+        if let status = modelRelay?.cliStatus() {
+            let provider = status.lastUsedProviderName ?? "无"
+            relayLine = "模型中转：\(status.runStateText)；\(status.baseURL)；最近厂家 \(provider)；近六小时调用 \(status.callCountLast6Hours)"
+        } else {
+            relayLine = "模型中转：未就绪"
+        }
         return [
             "根目录：\(root)",
             "开机自启：\(launchAtLogin.isEnabled ? "开" : "关")",
@@ -226,6 +303,8 @@ final class TocodeCommandExecutor {
             "双击 ⌘Q：\(shortcuts.isDoubleCommandQEffective ? "开" : "关")",
             "⌘Q 强关访达：\(shortcuts.isFinderCommandQEffective ? "开" : "关")",
             "微信绑定：\(weChat.isBound ? "已绑定" : "未绑定")",
+            togentLine,
+            relayLine,
             projectLine,
             "访达跟随：\(finderFollow.followEnabled ? "开" : "关")",
             "codex跟随：\(syncEnabled ? "开" : "关")",
@@ -390,6 +469,198 @@ final class TocodeCommandExecutor {
             return .success(TocodeCommandOutput("已触发微信扫码绑定"))
         case .send:
             return .failure(.operationFailed("wechat send 需要通过 CLI 异步执行"))
+        }
+    }
+
+    // MARK: - Togent
+
+    private func executeTogent(_ subcommand: TocodeTogentCommand) -> TocodeCommandResult {
+        guard let togent else {
+            return .failure(.operationFailed("Togent 未就绪"))
+        }
+        if let startupError = togent.startupError {
+            return .failure(.operationFailed("Togent 不可用：\(startupError.localizedDescription)"))
+        }
+        switch subcommand {
+        case .list:
+            let roles = togent.roles.sorted {
+                $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+            }
+            if roles.isEmpty {
+                return .success(TocodeCommandOutput("暂无 Togent 角色"))
+            }
+            let capabilityByID = Dictionary(
+                uniqueKeysWithValues: togent.models.map {
+                    ($0.publishedModelID, $0.capabilityTitle)
+                }
+            )
+            let lines = roles.map { role -> String in
+                let active = role.isActive ? "激活" : "未激活"
+                let model = role.publishedModelID.isEmpty
+                    ? "未配置"
+                    : "\(role.publishedModelID)（\(capabilityByID[role.publishedModelID] ?? "已失效")）"
+                return "\(role.name)\t\(active)\t\(model)\t\(role.workspacePath)"
+            }
+            return .success(TocodeCommandOutput(lines: lines))
+        case .show(let name):
+            guard let role = role(named: name, in: togent) else {
+                return .failure(.operationFailed("未找到角色：\(name)"))
+            }
+            let capability = togent.models.first {
+                $0.publishedModelID == role.publishedModelID
+            }?.capabilityTitle
+            let model = role.publishedModelID.isEmpty
+                ? "未配置"
+                : "\(role.publishedModelID)（\(capability ?? "已失效")）"
+            return .success(TocodeCommandOutput(lines: [
+                "名称：\(role.name)",
+                "激活：\(role.isActive ? "是" : "否")",
+                "工作区：\(role.workspacePath)",
+                "模型：\(model)",
+                "提示词：",
+                role.prompt.isEmpty ? "（空）" : role.prompt
+            ]))
+        case .models:
+            return .success(TocodeCommandOutput(lines: modelDirectoryLines(togent.models)))
+        case .create(let options):
+            do {
+                var draft = togent.newRoleDraft()
+                apply(options, to: &draft, defaultPathFromName: true, togent: togent)
+                let role = try togent.createRole(from: draft)
+                return .success(TocodeCommandOutput(
+                    "✅ 已创建角色 \(role.name)\n工作区：\(role.workspacePath)\n模型：\(role.publishedModelID.isEmpty ? "未配置" : role.publishedModelID)\n激活：\(role.isActive ? "是" : "否")"
+                ))
+            } catch {
+                return .failure(.operationFailed(error.localizedDescription))
+            }
+        case .copy(let sourceName, let options):
+            guard let sourceOption = togent.roleCopyOptions().first(where: {
+                $0.sourceRoleName.caseInsensitiveCompare(sourceName) == .orderedSame
+            }) else {
+                return .failure(.operationFailed("未找到可复制的源角色：\(sourceName)"))
+            }
+            do {
+                var draft = sourceOption.draft
+                apply(options, to: &draft, defaultPathFromName: true, togent: togent)
+                let role = try togent.createRole(from: draft)
+                return .success(TocodeCommandOutput(
+                    "✅ 已从 \(sourceName) 复制出角色 \(role.name)\n工作区：\(role.workspacePath)\n模型：\(role.publishedModelID.isEmpty ? "未配置" : role.publishedModelID)\n激活：否"
+                ))
+            } catch {
+                return .failure(.operationFailed(error.localizedDescription))
+            }
+        case .update(let name, let options):
+            guard let existing = role(named: name, in: togent) else {
+                return .failure(.operationFailed("未找到角色：\(name)"))
+            }
+            do {
+                var draft = TogentRoleDraft(role: existing)
+                apply(options, to: &draft, defaultPathFromName: false, togent: togent)
+                let role = try togent.updateRole(id: existing.id, from: draft)
+                return .success(TocodeCommandOutput(
+                    "✅ 已更新角色 \(role.name)\n工作区：\(role.workspacePath)\n模型：\(role.publishedModelID.isEmpty ? "未配置" : role.publishedModelID)\n激活：\(role.isActive ? "是" : "否")"
+                ))
+            } catch {
+                return .failure(.operationFailed(error.localizedDescription))
+            }
+        case .open(let name):
+            guard let role = role(named: name, in: togent) else {
+                return .failure(.operationFailed("未找到角色：\(name)"))
+            }
+            guard openTogentWorkspace(at: role.workspacePath, opener: workspaceOpener) else {
+                return .failure(.operationFailed("无法打开已保存的角色工作区：\(role.workspacePath)"))
+            }
+            return .success(TocodeCommandOutput("已打开角色工作区：\(role.workspacePath)"))
+        }
+    }
+
+    private func apply(
+        _ options: TocodeTogentRoleOptions,
+        to draft: inout TogentRoleDraft,
+        defaultPathFromName: Bool,
+        togent: any TocodeTogentCommanding
+    ) {
+        if let name = options.name {
+            draft.name = name
+            if defaultPathFromName, options.workspacePath == nil {
+                draft.workspacePath = togent.defaultWorkspacePath(forRoleName: name)
+            }
+        }
+        if let path = options.workspacePath {
+            draft.workspacePath = path
+        }
+        if let model = options.publishedModelID {
+            draft.publishedModelID = model
+        }
+        if let active = options.isActive {
+            draft.isActive = active
+        }
+        if let prompt = options.prompt {
+            draft.prompt = prompt
+        }
+    }
+
+    private func role(named name: String, in togent: any TocodeTogentCommanding) -> TogentRole? {
+        togent.roles.first {
+            $0.name.caseInsensitiveCompare(name) == .orderedSame
+        }
+    }
+
+    // MARK: - 模型中转
+
+    private func executeModel(_ subcommand: TocodeModelCommand) -> TocodeCommandResult {
+        guard let modelRelay else {
+            return .failure(.operationFailed("模型中转未就绪"))
+        }
+        switch subcommand {
+        case .status:
+            let status = modelRelay.cliStatus()
+            return .success(TocodeCommandOutput(lines: [
+                status.runStateText,
+                "Base URL：\(status.baseURL)",
+                "端口：\(status.port)",
+                "最近厂家：\(status.lastUsedProviderName ?? "无")",
+                "近六小时调用：\(status.callCountLast6Hours)"
+            ]))
+        case .portGet:
+            return .success(TocodeCommandOutput("端口：\(modelRelay.cliStatus().port)"))
+        case .portSet:
+            return .failure(.operationFailed("model port 设置需要通过 CLI 异步执行"))
+        case .models:
+            return .success(TocodeCommandOutput(lines: modelDirectoryLines(
+                modelRelay.availableTogentModels()
+            )))
+        case .log:
+            do {
+                let url = try modelRelay.todayCallLogURL()
+                guard workspaceOpener.open(url) else {
+                    return .failure(.operationFailed("无法打开今日调用日志：\(url.path)"))
+                }
+                return .success(TocodeCommandOutput("已打开今日调用日志：\(url.path)"))
+            } catch {
+                return .failure(.operationFailed(error.localizedDescription))
+            }
+        }
+    }
+
+    private func executeModelPortSet(_ port: Int) async -> TocodeCommandResult {
+        guard let modelRelay else {
+            return .failure(.operationFailed("模型中转未就绪"))
+        }
+        do {
+            try await modelRelay.updatePort(port)
+            return .success(TocodeCommandOutput("✅ 已设置模型中转端口：\(port)"))
+        } catch {
+            return .failure(.operationFailed(error.localizedDescription))
+        }
+    }
+
+    private func modelDirectoryLines(_ models: [TogentModelOption]) -> [String] {
+        if models.isEmpty {
+            return ["无健康模型"]
+        }
+        return models.map {
+            "\($0.publishedModelID)\t\($0.providerName)\t\($0.capabilityTitle)"
         }
     }
 

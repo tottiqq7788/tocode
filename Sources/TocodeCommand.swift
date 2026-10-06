@@ -53,6 +53,32 @@ enum TocodeWechatCommand: Equatable {
     case send(TocodeWechatSendPayload)
 }
 
+struct TocodeTogentRoleOptions: Equatable {
+    var name: String?
+    var workspacePath: String?
+    var publishedModelID: String?
+    var isActive: Bool?
+    var prompt: String?
+}
+
+enum TocodeTogentCommand: Equatable {
+    case list
+    case show(String)
+    case models
+    case create(TocodeTogentRoleOptions)
+    case copy(sourceName: String, options: TocodeTogentRoleOptions)
+    case update(name: String, options: TocodeTogentRoleOptions)
+    case open(String)
+}
+
+enum TocodeModelCommand: Equatable {
+    case status
+    case portGet
+    case portSet(Int)
+    case models
+    case log
+}
+
 enum TocodeCommand: Equatable {
     case help
     case status
@@ -60,6 +86,8 @@ enum TocodeCommand: Equatable {
     case finder(TocodeFinderCommand)
     case codex(TocodeCodexCommand)
     case wechat(TocodeWechatCommand)
+    case togent(TocodeTogentCommand)
+    case model(TocodeModelCommand)
     case blackout
     case login(TocodeToggle)
     case wheel(TocodeWheelAxis, TocodeToggle)
@@ -144,7 +172,7 @@ enum TocodeCommandParser {
 
       帮助 / 状态
         help                                打印命令表
-        status                              根目录、各开关、微信与 Codex 状态汇总
+        status                              根目录、各开关、微信、Togent、模型中转与 Codex 状态汇总
 
       根目录
         root get                            返回当前根目录
@@ -171,6 +199,23 @@ enum TocodeCommandParser {
         wechat send [--to <id>] [--text <文字>] [文件...]
                                             向最近会话发送文字、图片或附件
 
+      Togent（只配置角色，不能提交 Agent 任务）
+        togent list                         列出角色
+        togent show <name>                  回显角色详情与提示词
+        togent models                       列出当前健康中转模型
+        togent create --name <英文名> [--path <路径>] [--model <id>]
+                      [--active on|off] [--prompt <文本> | --prompt-file <文件>]
+        togent copy <源名称> [...]          复制提示词与模型，生成独立新角色
+        togent update <名称> [...]          只改给出的字段
+        togent open <名称>                  打开已保存角色工作区
+
+      模型中转（不含密钥）
+        model status                        Base URL、端口、运行状态与调用摘要
+        model port                          读取当前端口
+        model port <1024...65535>           设置固定 loopback 端口
+        model models                        列出当前健康 published 模型
+        model log                           用系统应用打开今日调用日志
+
       其他
         blackout（别名 .lshp）                工具 → 临时黑屏
         login on|off|toggle                 开机自启
@@ -186,7 +231,7 @@ enum TocodeCommandParser {
     /// 微信 .help 使用的命令表：每条命令以 . 开头、单独用代码框包裹，便于逐条复制。
     static let weChatHelpCommands: [(command: String, description: String)] = [
         ("help", "打印命令表"),
-        ("status", "根目录、各开关、微信与 Codex 状态汇总"),
+        ("status", "根目录、各开关、微信、Togent、模型中转与 Codex 状态汇总"),
         ("root get", "返回当前根目录"),
         ("root set <path>", "校验后设置根目录"),
         ("root choose", "弹出系统目录选择器"),
@@ -203,6 +248,17 @@ enum TocodeCommandParser {
         ("wechat status", "是否已绑定"),
         ("wechat bind", "触发扫码绑定"),
         ("wechat send [--to <id>] [--text <文字>] [文件...]", "向最近会话发送文字、图片或附件"),
+        ("togent list", "列出 Togent 角色"),
+        ("togent show <name>", "回显角色详情与提示词"),
+        ("togent models", "列出当前健康中转模型"),
+        ("togent create --name <英文名> [...]", "新增角色（不能提交 Agent 任务）"),
+        ("togent copy <源名称> [...]", "复制提示词与模型，生成独立新角色"),
+        ("togent update <名称> [...]", "更新角色字段"),
+        ("togent open <名称>", "打开已保存角色工作区"),
+        ("model status", "模型中转状态摘要（不含密钥）"),
+        ("model port [1024...65535]", "读取或设置中转端口"),
+        ("model models", "列出当前健康 published 模型"),
+        ("model log", "打开今日调用日志"),
         ("blackout", "工具 → 临时黑屏（别名 .lshp）"),
         ("login on|off|toggle", "开机自启"),
         ("wheel vertical on|off|toggle", "对调垂直滚轮"),
@@ -277,6 +333,10 @@ enum TocodeCommandParser {
             return parseCodex(rest)
         case "wechat":
             return parseWechat(rest)
+        case "togent":
+            return parseTogent(rest)
+        case "model":
+            return parseModel(rest)
         case "blackout":
             guard rest.isEmpty else { return .failure(.invalidArguments(firstRaw)) }
             return .success(.blackout)
@@ -403,6 +463,166 @@ enum TocodeCommandParser {
             return parseWechatSend(Array(tokens.dropFirst()))
         default:
             return .failure(.unknownCommand("wechat \(sub)"))
+        }
+    }
+
+    private static func parseTogent(_ tokens: [String]) -> Result<TocodeCommand, TocodeCommandError> {
+        guard let sub = tokens.first?.lowercased() else {
+            return .failure(.missingValue("togent list|show|models|create|copy|update|open"))
+        }
+        let rest = Array(tokens.dropFirst())
+        switch sub {
+        case "list":
+            guard rest.isEmpty else { return .failure(.invalidArguments("togent list")) }
+            return .success(.togent(.list))
+        case "models":
+            guard rest.isEmpty else { return .failure(.invalidArguments("togent models")) }
+            return .success(.togent(.models))
+        case "show":
+            guard rest.count == 1 else { return .failure(.missingValue("togent show <name>")) }
+            return .success(.togent(.show(rest[0])))
+        case "open":
+            guard rest.count == 1 else { return .failure(.missingValue("togent open <name>")) }
+            return .success(.togent(.open(rest[0])))
+        case "create":
+            switch parseTogentOptions(rest) {
+            case .failure(let error):
+                return .failure(error)
+            case .success(let options):
+                guard let name = options.name, !name.isEmpty else {
+                    return .failure(.missingValue("togent create --name <英文名>"))
+                }
+                return .success(.togent(.create(options)))
+            }
+        case "copy":
+            guard let source = rest.first else {
+                return .failure(.missingValue("togent copy <源名称>"))
+            }
+            switch parseTogentOptions(Array(rest.dropFirst())) {
+            case .failure(let error):
+                return .failure(error)
+            case .success(let options):
+                return .success(.togent(.copy(sourceName: source, options: options)))
+            }
+        case "update":
+            guard let name = rest.first else {
+                return .failure(.missingValue("togent update <名称>"))
+            }
+            switch parseTogentOptions(Array(rest.dropFirst())) {
+            case .failure(let error):
+                return .failure(error)
+            case .success(let options):
+                guard options.name != nil
+                        || options.workspacePath != nil
+                        || options.publishedModelID != nil
+                        || options.isActive != nil
+                        || options.prompt != nil else {
+                    return .failure(.missingValue("togent update <名称> [--name|--path|--model|--active|--prompt|--prompt-file]"))
+                }
+                return .success(.togent(.update(name: name, options: options)))
+            }
+        default:
+            return .failure(.unknownCommand("togent \(sub)"))
+        }
+    }
+
+    private static func parseTogentOptions(
+        _ tokens: [String]
+    ) -> Result<TocodeTogentRoleOptions, TocodeCommandError> {
+        var options = TocodeTogentRoleOptions()
+        var index = 0
+        while index < tokens.count {
+            let token = tokens[index]
+            switch token {
+            case "--name":
+                guard index + 1 < tokens.count else {
+                    return .failure(.missingValue("togent --name <英文名>"))
+                }
+                options.name = tokens[index + 1]
+                index += 2
+            case "--path":
+                guard index + 1 < tokens.count else {
+                    return .failure(.missingValue("togent --path <路径>"))
+                }
+                options.workspacePath = tokens[index + 1]
+                index += 2
+            case "--model":
+                guard index + 1 < tokens.count else {
+                    return .failure(.missingValue("togent --model <id>"))
+                }
+                options.publishedModelID = tokens[index + 1]
+                index += 2
+            case "--active":
+                guard index + 1 < tokens.count else {
+                    return .failure(.missingValue("togent --active on|off"))
+                }
+                switch tokens[index + 1].lowercased() {
+                case "on":
+                    options.isActive = true
+                case "off":
+                    options.isActive = false
+                default:
+                    return .failure(.invalidToggle(tokens[index + 1]))
+                }
+                index += 2
+            case "--prompt-file":
+                guard index + 1 < tokens.count else {
+                    return .failure(.missingValue("togent --prompt-file <文件>"))
+                }
+                if options.prompt != nil {
+                    return .failure(.invalidArguments("togent 不能同时使用 --prompt 与 --prompt-file"))
+                }
+                let filePath = (tokens[index + 1] as NSString).expandingTildeInPath
+                guard let data = try? Data(contentsOf: URL(fileURLWithPath: filePath)),
+                      let text = String(data: data, encoding: .utf8) else {
+                    return .failure(.operationFailed("无法读取提示词文件：\(tokens[index + 1])"))
+                }
+                options.prompt = text
+                index += 2
+            case "--prompt":
+                guard index + 1 < tokens.count else {
+                    return .failure(.missingValue("togent --prompt <文本>"))
+                }
+                if options.prompt != nil {
+                    return .failure(.invalidArguments("togent 不能同时使用 --prompt 与 --prompt-file"))
+                }
+                options.prompt = tokens[(index + 1)...].joined(separator: " ")
+                index = tokens.count
+            default:
+                if token.hasPrefix("--") {
+                    return .failure(.invalidArguments("togent \(token)"))
+                }
+                return .failure(.invalidArguments("togent \(token)"))
+            }
+        }
+        return .success(options)
+    }
+
+    private static func parseModel(_ tokens: [String]) -> Result<TocodeCommand, TocodeCommandError> {
+        guard let sub = tokens.first?.lowercased() else {
+            return .failure(.missingValue("model status|port|models|log"))
+        }
+        let rest = Array(tokens.dropFirst())
+        switch sub {
+        case "status":
+            guard rest.isEmpty else { return .failure(.invalidArguments("model status")) }
+            return .success(.model(.status))
+        case "models":
+            guard rest.isEmpty else { return .failure(.invalidArguments("model models")) }
+            return .success(.model(.models))
+        case "log":
+            guard rest.isEmpty else { return .failure(.invalidArguments("model log")) }
+            return .success(.model(.log))
+        case "port":
+            if rest.isEmpty {
+                return .success(.model(.portGet))
+            }
+            guard rest.count == 1, let value = Int(rest[0]), (1024...65_535).contains(value) else {
+                return .failure(.invalidArguments("model port <1024...65535>"))
+            }
+            return .success(.model(.portSet(value)))
+        default:
+            return .failure(.unknownCommand("model \(sub)"))
         }
     }
 
