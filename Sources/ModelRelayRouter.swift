@@ -86,18 +86,14 @@ final class ModelRelayRouter: @unchecked Sendable {
         let providers = configuration.providers
         let healthSnapshot = health
         lock.unlock()
+        // 目录列举不得触碰钥匙串：并发 SecItemCopyMatching 会卡住菜单/CLI 主线程。
+        // 真实转发仍在 resolve() 时加载 secret。
         let aliases = providers.flatMap { provider -> [String] in
             guard let reference = provider.upstreamKey,
                   healthSnapshot[reference.id, default: KeyHealth()].isAvailable(at: date) else {
                 return []
             }
-            let hasAvailableKey: Bool
-            do {
-                hasAvailableKey = try keyStore.load(id: reference.id) != nil
-            } catch {
-                hasAvailableKey = false
-            }
-            return hasAvailableKey ? provider.models.map(\.alias) : []
+            return provider.models.map(\.alias)
         }
         return aliases.sorted()
     }
@@ -138,6 +134,7 @@ final class ModelRelayRouter: @unchecked Sendable {
         }.sorted()
     }
 
+    /// 健康目录列举；不读取钥匙串，避免阻塞菜单与 CLI 主线程。
     func availableTogentModels() -> [TogentModelOption] {
         lock.lock()
         let date = now()
@@ -147,8 +144,7 @@ final class ModelRelayRouter: @unchecked Sendable {
 
         return providers.flatMap { provider -> [TogentModelOption] in
             guard let reference = provider.upstreamKey,
-                  healthSnapshot[reference.id, default: KeyHealth()].isAvailable(at: date),
-                  (try? keyStore.load(id: reference.id)) != nil else {
+                  healthSnapshot[reference.id, default: KeyHealth()].isAvailable(at: date) else {
                 return []
             }
             return provider.models.map {

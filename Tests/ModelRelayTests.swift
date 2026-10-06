@@ -398,7 +398,14 @@ func testModelRelayRouterAndControlPlane() {
         keyStore: DeniedModelRelayKeyStore(),
         vault: vault
     )
-    expect(deniedRouter.availableAliases().isEmpty, "Keychain 拒绝时不公布可用模型")
+    expect(
+        deniedRouter.availableAliases() == ["local-a"],
+        "目录列举不读取钥匙串，仅按健康态公布"
+    )
+    expect(
+        deniedRouter.availableTogentModels().map(\.publishedModelID) == ["local-a"],
+        "Togent 模型目录同样不因钥匙串拒绝阻塞主线程"
+    )
     do {
         _ = try deniedRouter.resolve(alias: "local-a")
         expect(false, "Keychain 拒绝时不得回退明文或继续路由")
