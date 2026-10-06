@@ -78,18 +78,21 @@ for s in 16 32 128 256 512; do
 done
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 
+# 使用本机固定证书「Tocode Local」签名，避免 ad-hoc 每次 cdhash 变化导致钥匙串反复授权。
+# designated requirement 仍只绑定 identifier，辅助功能 / 控制访达授权可跨重编译保留。
+CODESIGN_IDENTITY="$(bash scripts/ensure_codesign_identity.sh)"
+
 # Bun 产物自带的 linker-signed 签名在复制后不可验证；先显式重签内置运行时，
 # 再封装 App 的资源 seal，保证 nested codesign 可独立校验。
-codesign --force --sign - \
+codesign --force --sign "$CODESIGN_IDENTITY" \
   --identifier "com.tocode.mac.togent.pi" \
   "$APP/Contents/Resources/Togent/pi"
 
-# 本地 ad-hoc 构建显式使用稳定 designated requirement。
-# 否则默认 DR 会绑定每次变化的 cdhash，重编译后 TCC 会静默拒绝旧的 Apple Events 授权。
-codesign --force --deep --sign - \
+codesign --force --deep --sign "$CODESIGN_IDENTITY" \
   --identifier "com.tocode.mac" \
   --requirements '=designated => identifier "com.tocode.mac"' \
   "$APP"
 
 echo "Built $APP"
 echo "Built build/tocode"
+echo "Signed with $CODESIGN_IDENTITY"

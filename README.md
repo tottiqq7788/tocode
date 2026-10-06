@@ -195,12 +195,12 @@ Tocode 首次启动后，会自动把 CLI 安装到 `~/.local/bin/tocode`（该�
 
 三项快捷键默认关闭；全部关闭时不会安装键盘事件钩子。两项滚轮对调默认关闭；全部关闭时不会安装滚动钩子。键盘映射使用自己独立的键盘事件钩子：没有映射规则时不安装，与上述开关互不依赖，任一侧故障都不会拆掉另一侧。
 
-本地构建使用稳定的 designated requirement，避免 ad-hoc 签名默认绑定每次变化的 `cdhash`，导致重新编译后已有的访达自动化授权静默失效。首次从旧构建迁移到稳定签名时仍需重新允许一次；辅助功能授权同样绑定该稳定身份。
+本地构建用本机证书 `Tocode Local` 签名（由 `scripts/ensure_codesign_identity.sh` 按需生成）。证书与私钥放在专用钥匙串 `~/Library/Keychains/tocode-codesign.keychain-db`，口令仅保存在 `~/Library/Application Support/com.tocode.app/codesign-keychain.pass`（0600），都不进仓库。配合稳定的 designated requirement（只绑定 `identifier "com.tocode.mac"`），重编译后辅助功能 / 控制访达授权可保留，模型中转上游 Key 也不会因每次不同的 ad-hoc `cdhash` 而反复弹窗。从旧 ad-hoc 构建迁到证书签名后，系统仍可能再问一次钥匙串；点「始终允许」之后同一证书的后续构建不再询问。
 
 ## 构建
 
 ```bash
-bash scripts/build.sh        # 构建内置 Pi，并编译打包到 build/Tocode.app
+bash scripts/build.sh        # 确保本机签名身份，构建内置 Pi，并编译打包到 build/Tocode.app
 bash scripts/test.sh         # 运行单元测试
 ```
 
