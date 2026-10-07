@@ -1811,3 +1811,84 @@ func testTogentWorkspaceFileReplyAndFaults() async {
         "微信上传失败时 Togent durable job 保持失败语义"
     )
 }
+
+@MainActor
+func testTogentUpdatedRolePromptReachesNextWeChatJob() async {
+    let root = makeTogentTemporaryDirectory("prompt-reload")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = TogentStore(databaseURL: root.appendingPathComponent("togent.sqlite"))
+    let runtime = StubTogentRuntime()
+    runtime.result = .success("已按新提示词回复")
+    let models = [TogentModelOption(publishedModelID: "model-a", providerName: "厂家")]
+    let togent = TogentService(
+        store: store,
+        workspace: TogentWorkspaceService(homeDirectory: root),
+        runtime: runtime,
+        availableModelOptions: { models },
+        bootstrapDefaultRole: false,
+        messageBatchDebounce: 0.05
+    )
+    var draft = togent.newRoleDraft()
+    draft.name = "PromptedRole"
+    draft.publishedModelID = "model-a"
+    draft.prompt = "初始提示词"
+    draft.isActive = true
+    let role = try! togent.createRole(from: draft)
+
+    var updated = TogentRoleDraft(role: role)
+    updated.prompt = "回复时必须使用 Markdown 标题"
+    _ = try! togent.updateRole(id: role.id, from: updated)
+    let agents = try! String(
+        contentsOf: URL(fileURLWithPath: role.workspacePath)
+            .appendingPathComponent("AGENTS.md"),
+        encoding: .utf8
+    )
+    expect(
+        agents.contains("回复时必须使用 Markdown 标题"),
+        "更新提示词会写入 AGENTS.md 托管区块"
+    )
+
+    let message = WeChatMessage(
+        fromUserID: "user",
+        contextToken: "ctx-prompt",
+        messageID: "msg-prompt",
+        items: [WeChatItem(type: 1, textItem: WeChatTextItem(text: "请自我介绍"))]
+    )
+    let transport = MockWeChatTransport()
+    transport.updates = [
+        .success(WeChatUpdates(messages: [message], cursor: "cursor-prompt")),
+        .failure(CancellationError())
+    ]
+    let weChat = WeChatAssociationService(
+        transport: transport,
+        credentialStore: MemoryWeChatCredentialStore(
+            WeChatCredential(token: "bound", baseURL: WeChatILinkClient.officialBaseURL)
+        ),
+        stateStore: MemoryWeChatStateStore(),
+        archiver: MockWeChatArchiver(),
+        pageWriter: MockWeChatBindingPage(),
+        opener: MockWeChatOpener(),
+        notifier: MockWeChatNotifier(),
+        sleeper: MockWeChatSleeper(),
+        togent: togent
+    )
+    weChat.startBoundListener()
+    let completed = await waitForTogentCondition {
+        runtime.executions.count == 1 && transport.sentTexts.count == 1
+    }
+    weChat.stop()
+    togent.stop()
+
+    expect(completed, "提示词更新后的下一条微信任务完成")
+    let prompt = runtime.executions[0].1
+    expect(
+        prompt.contains("回复时必须使用 Markdown 标题")
+            && prompt.contains("请自我介绍")
+            && !prompt.contains("初始提示词"),
+        "下一次微信任务正文使用更新后的角色提示词"
+    )
+    expect(
+        !prompt.contains("Bearer") && !prompt.contains("tc_") && !prompt.contains("tg_"),
+        "更新后任务正文仍不含密钥面字段"
+    )
+}

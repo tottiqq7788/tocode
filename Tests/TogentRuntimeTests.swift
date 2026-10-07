@@ -743,3 +743,105 @@ func testRealPiThroughSandboxAndRelay() async {
     expect(sawRewrittenModel.value, "真 Pi 请求经 Relay 改写上游模型")
     await runtime.stopAll()
 }
+
+func testTogentRuntimeSignatureAndJobPromptIncludeRolePrompt() {
+    let workspace = makeTogentTemporaryDirectory("prompt-signature")
+    defer { try? FileManager.default.removeItem(at: workspace) }
+    var first = makeTogentRole(name: "PromptRole", workspace: workspace)
+    first = TogentRole(
+        id: first.id,
+        name: first.name,
+        workspacePath: first.workspacePath,
+        prompt: "请用 Markdown 回复",
+        publishedModelID: first.publishedModelID,
+        isActive: first.isActive,
+        createdAt: first.createdAt,
+        updatedAt: first.updatedAt
+    )
+    let second = TogentRole(
+        id: first.id,
+        name: first.name,
+        workspacePath: first.workspacePath,
+        prompt: "请用 Markdown 回复，并加标题",
+        publishedModelID: first.publishedModelID,
+        isActive: first.isActive,
+        createdAt: first.createdAt,
+        updatedAt: first.updatedAt
+    )
+    let same = TogentRole(
+        id: first.id,
+        name: first.name,
+        workspacePath: first.workspacePath,
+        prompt: "  请用 Markdown 回复  \n",
+        publishedModelID: first.publishedModelID,
+        isActive: first.isActive,
+        createdAt: first.createdAt,
+        updatedAt: first.updatedAt
+    )
+    let signatureA = TogentRuntimeSignature(
+        role: first,
+        imageInput: .textOnly,
+        relayBaseURL: "http://127.0.0.1:27800/v1"
+    )
+    let signatureB = TogentRuntimeSignature(
+        role: second,
+        imageInput: .textOnly,
+        relayBaseURL: "http://127.0.0.1:27800/v1"
+    )
+    let signatureSame = TogentRuntimeSignature(
+        role: same,
+        imageInput: .textOnly,
+        relayBaseURL: "http://127.0.0.1:27800/v1"
+    )
+    expect(signatureA == signatureSame, "相同提示词（忽略首尾空白）运行签名相等，可复用 Pi")
+    expect(signatureA != signatureB, "提示词变化后运行签名变化，下次任务会重启该角色 Pi")
+    expect(
+        TogentRuntimeSignature.digest(forPrompt: "请用 Markdown 回复")
+            == signatureA.rolePromptDigest,
+        "运行签名使用角色提示词摘要"
+    )
+
+    let job = TogentJob(
+        id: UUID(),
+        deduplicationKey: "prompt-body",
+        roleID: first.id,
+        fromUserID: "user",
+        contextToken: "ctx",
+        messageText: "你好",
+        receivedAt: Date(),
+        state: .queued,
+        attemptCount: 0,
+        lastError: nil,
+        createdAt: Date(),
+        updatedAt: Date()
+    )
+    let body = TogentService.prompt(job: job, role: second)
+    expect(
+        body.contains("请用 Markdown 回复，并加标题")
+            && body.contains("你好")
+            && body.contains("当前角色提示词："),
+        "微信任务正文附带当前已保存角色提示词"
+    )
+    expect(
+        !body.contains("Bearer")
+            && !body.contains("tc_")
+            && !body.contains("tg_")
+            && !body.contains("查看密码"),
+        "任务正文不含密钥面字段"
+    )
+    let emptyPromptRole = TogentRole(
+        id: first.id,
+        name: first.name,
+        workspacePath: first.workspacePath,
+        prompt: "   ",
+        publishedModelID: first.publishedModelID,
+        isActive: first.isActive,
+        createdAt: first.createdAt,
+        updatedAt: first.updatedAt
+    )
+    let emptyBody = TogentService.prompt(job: job, role: emptyPromptRole)
+    expect(
+        emptyBody.contains("（未设置额外角色提示词）"),
+        "空提示词在任务正文中有明确占位"
+    )
+}

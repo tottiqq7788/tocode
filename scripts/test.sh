@@ -104,6 +104,7 @@ swiftc Tests/TestRunner.swift \
   -framework ApplicationServices \
   -framework CoreGraphics \
   -framework CoreImage \
+  -framework CryptoKit \
   -framework Security \
   -framework UserNotifications \
   -framework ServiceManagement \

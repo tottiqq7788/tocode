@@ -663,8 +663,18 @@ final class TogentService {
         return normalized.isEmpty ? "（空消息，详情见微信归档）" : normalized
     }
 
-    private static func prompt(job: TogentJob, role: TogentRole) -> String {
+    nonisolated static func prompt(job: TogentJob, role: TogentRole) -> String {
         let formatter = ISO8601DateFormatter()
+        let rolePrompt = role.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rolePromptSection: String
+        if rolePrompt.isEmpty {
+            rolePromptSection = "当前角色提示词：（未设置额外角色提示词）"
+        } else {
+            rolePromptSection = """
+            当前角色提示词：
+            \(rolePrompt)
+            """
+        }
         return """
         这是微信消息完成角色归档后进入 Togent 的一个用户任务。微信是唯一任务入口；用户在短时间内连续发送的多条消息可能已按顺序合并在本任务中，不要再与本任务之外的消息合并。
 
@@ -673,10 +683,12 @@ final class TogentService {
         当前工作区：\(role.workspacePath)
         项目分类根目录：\(role.workspacePath)/project
 
+        \(rolePromptSection)
+
         用户消息：
         \(job.messageText)
 
-        请遵循工作区 AGENTS.md。需要历史上下文时，仅按需只读查询微信归档。
+        请遵循工作区 AGENTS.md 与上方当前角色提示词。需要历史上下文时，仅按需只读查询微信归档。
 
         完成实际工作后给出适合直接回复微信的最终文本。如果用户明确要求把当前角色工作区里的一个或多个文件发送到微信，必须在最终回复末尾追加且只追加一个以下控制块，`files` 只能填写当前工作区相对路径，按发送顺序最多五个；不要使用绝对路径、目录、symlink 或工作区外路径，也不要加 Markdown 代码围栏：
         <tocode_wechat_files>

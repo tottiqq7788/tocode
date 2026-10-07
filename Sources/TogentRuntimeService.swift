@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 protocol TogentRuntimeExecuting: AnyObject {
@@ -6,13 +7,35 @@ protocol TogentRuntimeExecuting: AnyObject {
     func stopAll() async
 }
 
-actor TogentRuntimeService: TogentRuntimeExecuting {
-    private struct Signature: Equatable {
-        let workspacePath: String
-        let modelID: String
-        let imageInput: TogentImageInputCapability
-        let relayBaseURL: String
+/// Pi 复用签名：工作区/模型/能力/中转地址之外，角色提示词摘要变化也会触发该角色进程重启。
+struct TogentRuntimeSignature: Equatable {
+    let workspacePath: String
+    let modelID: String
+    let imageInput: TogentImageInputCapability
+    let relayBaseURL: String
+    let rolePromptDigest: String
+
+    init(
+        role: TogentRole,
+        imageInput: TogentImageInputCapability,
+        relayBaseURL: String
+    ) {
+        workspacePath = role.workspacePath
+        modelID = role.publishedModelID
+        self.imageInput = imageInput
+        self.relayBaseURL = relayBaseURL
+        rolePromptDigest = Self.digest(forPrompt: role.prompt)
     }
+
+    static func digest(forPrompt prompt: String) -> String {
+        let normalized = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let digest = SHA256.hash(data: Data(normalized.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+actor TogentRuntimeService: TogentRuntimeExecuting {
+    private typealias Signature = TogentRuntimeSignature
 
     private final class Entry {
         let signature: Signature
@@ -73,8 +96,7 @@ actor TogentRuntimeService: TogentRuntimeExecuting {
             throw TogentError.modelUnavailable
         }
         let signature = Signature(
-            workspacePath: role.workspacePath,
-            modelID: role.publishedModelID,
+            role: role,
             imageInput: selectedModel.imageInput,
             relayBaseURL: access.baseURL
         )
