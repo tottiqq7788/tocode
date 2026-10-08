@@ -30,6 +30,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private let extendedSettings: ExtendedSettingsStore
     private let screenBlackout: ScreenBlackoutService
     private let commandExecutor: TocodeCommandExecutor
+    private let appLinks: AppLinkControlling
     private let modelRelay: ModelRelayService
     private let togent: TogentService
     private let togentWorkspaceOpener: TogentWorkspaceOpening
@@ -76,7 +77,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         modelRelay: ModelRelayService,
         togent: TogentService,
         togentWorkspaceOpener: TogentWorkspaceOpening = SystemTogentWorkspaceOpener(),
-        commandExecutor: TocodeCommandExecutor
+        commandExecutor: TocodeCommandExecutor,
+        appLinks: AppLinkControlling
     ) {
         self.shortcuts = shortcuts
         self.trackpadShortcuts = trackpadShortcuts
@@ -99,6 +101,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         self.togent = togent
         self.togentWorkspaceOpener = togentWorkspaceOpener
         self.commandExecutor = commandExecutor
+        self.appLinks = appLinks
+        if let links = appLinks as? AppLinkService {
+            links.onPaired = { AppLinkPairingPanel.close() }
+        }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         super.init()
         actionDispatcher.execute = { [weak self] command in
@@ -293,7 +299,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         modifierPollingTimer = nil
     }
 
-    /// 右键：功能菜单。访达 / 输入 / 工具 / AK / 微信 / 设置。
+    /// 右键：功能菜单。访达 / 输入 / 工具 / AK / togent / 设置。
     private func showActionMenu() {
         let menu = NSMenu()
         menu.autoenablesItems = false
@@ -513,24 +519,73 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             akMenu.addItem(secretsFolder)
         }
 
-        // 微信
-        let weChatItem = menu.addItem(withTitle: "微信", action: nil, keyEquivalent: "")
-        weChatItem.image = NSImage(systemSymbolName: "link", accessibilityDescription: nil)
-        let weChatMenu = NSMenu()
-        weChatMenu.autoenablesItems = false
-        let bindWeChat = weChatMenu.addItem(
-            withTitle: "绑定微信",
+        let togentItem = menu.addItem(withTitle: TogentMenuLayout.root, action: nil, keyEquivalent: "")
+        togentItem.image = NSImage(systemSymbolName: "person.2.wave.2", accessibilityDescription: nil)
+        let togentMenu = NSMenu()
+        togentMenu.autoenablesItems = false
+
+        let channelItem = togentMenu.addItem(withTitle: TogentMenuLayout.channels, action: nil, keyEquivalent: "")
+        channelItem.image = NSImage(systemSymbolName: "dot.radiowaves.left.and.right", accessibilityDescription: nil)
+        let channelMenu = NSMenu()
+        channelMenu.autoenablesItems = false
+        let bindWeChat = channelMenu.addItem(
+            withTitle: TogentMenuLayout.weChatAssociation,
             action: #selector(bindWeChat),
             keyEquivalent: ""
         )
         bindWeChat.target = self
         ShortcutMenuAppearance.apply(to: bindWeChat, enabled: weChat.isBound)
 
-        let togentItem = weChatMenu.addItem(withTitle: "togent", action: nil, keyEquivalent: "")
-        togentItem.image = NSImage(systemSymbolName: "person.2.wave.2", accessibilityDescription: nil)
-        let togentMenu = NSMenu()
-        togentMenu.autoenablesItems = false
-        let addTogentRole = togentMenu.addItem(
+        let appItem = channelMenu.addItem(
+            withTitle: TogentMenuLayout.appAssociations,
+            action: nil,
+            keyEquivalent: ""
+        )
+        appItem.image = NSImage(systemSymbolName: "iphone", accessibilityDescription: nil)
+        let appMenu = NSMenu()
+        appMenu.autoenablesItems = false
+        let addAppLink = appMenu.addItem(
+            withTitle: TogentMenuLayout.addAssociation,
+            action: #selector(addAppAssociation),
+            keyEquivalent: ""
+        )
+        addAppLink.target = self
+        addAppLink.image = NSImage(systemSymbolName: "plus", accessibilityDescription: nil)
+        let associations = appLinks.links.sorted {
+            $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
+        }
+        if !associations.isEmpty {
+            appMenu.addItem(.separator())
+        }
+        for link in associations {
+            let item = appMenu.addItem(withTitle: link.displayName, action: nil, keyEquivalent: "")
+            let linkMenu = NSMenu()
+            linkMenu.autoenablesItems = false
+            let edit = linkMenu.addItem(
+                withTitle: TogentMenuLayout.editAssociation,
+                action: #selector(editAppAssociation(_:)),
+                keyEquivalent: ""
+            )
+            edit.target = self
+            edit.representedObject = link.id
+            let delete = linkMenu.addItem(
+                withTitle: TogentMenuLayout.deleteAssociation,
+                action: #selector(deleteAppAssociation(_:)),
+                keyEquivalent: ""
+            )
+            delete.target = self
+            delete.representedObject = link.id
+            item.submenu = linkMenu
+            item.toolTip = "\(link.macName) · \(link.roleName)\n\(link.androidName)"
+        }
+        appItem.submenu = appMenu
+        channelItem.submenu = channelMenu
+
+        let roleItem = togentMenu.addItem(withTitle: TogentMenuLayout.roles, action: nil, keyEquivalent: "")
+        roleItem.image = NSImage(systemSymbolName: "person.crop.circle", accessibilityDescription: nil)
+        let roleMenu = NSMenu()
+        roleMenu.autoenablesItems = false
+        let addTogentRole = roleMenu.addItem(
             withTitle: "新增…",
             action: #selector(createTogentRole),
             keyEquivalent: ""
@@ -545,10 +600,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
         }
         if !roles.isEmpty {
-            togentMenu.addItem(.separator())
+            roleMenu.addItem(.separator())
         }
         for role in roles {
-            let item = togentMenu.addItem(
+            let item = roleMenu.addItem(
                 withTitle: role.name,
                 action: #selector(editTogentRole(_:)),
                 keyEquivalent: ""
@@ -561,9 +616,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 : role.publishedModelID
             item.toolTip = "\(role.workspacePath)\n模型：\(modelText)"
         }
+        roleItem.submenu = roleMenu
         togentItem.submenu = togentMenu
-
-        weChatItem.submenu = weChatMenu
 
         // 设置
         let settingsItem = menu.addItem(withTitle: "设置", action: nil, keyEquivalent: "")
@@ -1289,6 +1343,82 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     @objc private func bindWeChat() {
         weChat.startBinding()
+    }
+
+    @objc private func addAppAssociation() {
+        let roles = togent.roles.sorted {
+            $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }
+        guard !roles.isEmpty else {
+            let alert = NSAlert()
+            alert.messageText = "还没有角色"
+            alert.informativeText = "请先在「角色」里新增一个角色。"
+            alert.runModal()
+            return
+        }
+        guard let draft = AppLinkDialog.add(roles: roles, relayURL: appLinks.relayBaseURL) else {
+            return
+        }
+        Task { @MainActor in
+            do {
+                let payload = try await appLinks.beginPairing(
+                    role: draft.role,
+                    displayName: draft.displayName,
+                    relay: draft.relayURL
+                )
+                AppLinkPairingPanel.show(payload: payload)
+            } catch {
+                AppLinkPairingPanel.close()
+                let alert = NSAlert()
+                alert.messageText = "无法创建应用关联"
+                alert.informativeText = (error as? LocalizedError)?.errorDescription
+                    ?? error.localizedDescription
+                alert.runModal()
+            }
+        }
+    }
+
+    @objc private func editAppAssociation(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String,
+              let link = appLinks.links.first(where: { $0.id == id }) else {
+            return
+        }
+        let roles = togent.roles.sorted {
+            $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }
+        guard let result = AppLinkDialog.edit(link: link, roles: roles) else { return }
+        Task { @MainActor in
+            do {
+                if result.delete {
+                    try await appLinks.deleteLink(id: id)
+                } else {
+                    try await appLinks.updateLink(
+                        id: id,
+                        displayName: result.draft.displayName,
+                        role: result.draft.role
+                    )
+                }
+            } catch {
+                let alert = NSAlert()
+                alert.messageText = "无法更新应用关联"
+                alert.informativeText = (error as? LocalizedError)?.errorDescription
+                    ?? error.localizedDescription
+                alert.runModal()
+            }
+        }
+    }
+
+    @objc private func deleteAppAssociation(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        let alert = NSAlert()
+        alert.messageText = "删除这条应用关联？"
+        alert.informativeText = "删除后不再转发。两边已经留下的消息还在。"
+        alert.addButton(withTitle: "删除")
+        alert.addButton(withTitle: "取消")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        Task { @MainActor in
+            try? await appLinks.deleteLink(id: id)
+        }
     }
 
     @objc private func createTogentRole() {

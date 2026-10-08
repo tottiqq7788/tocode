@@ -423,7 +423,7 @@ func testTocodePortableSettingsTransfer() {
 func testUserManualPages() {
     expect(UserManual.menuTitle == "说明书", "说明书顶层标题")
     let titles = UserManual.pages.map(\.title)
-    expect(titles == ["入门", "目录树", "访达与目录", "输入与工具", "模型中转", "微信", "命令行", "设置"], "说明书 Tab 分页完整")
+    expect(titles == ["入门", "目录树", "访达与目录", "输入与工具", "模型中转", "togent", "命令行", "设置"], "说明书 Tab 分页完整")
     expect(Set(titles).count == titles.count, "说明书 Tab 标题不重复")
     expect(UserManual.pages.allSatisfy { !$0.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }, "每页都有正文")
 
@@ -6888,6 +6888,9 @@ struct TestRunnerMain {
         await testTogentArchiveReplyModelAndCrashFaults()
         await testTogentWorkspaceFileReplyAndFaults()
         await testTogentWeChatRealPiEndToEnd()
+        testAppLinkPayloadStoreAndMenuWords()
+        await testAppChannelStaysOutOfWeChat()
+        await testAppLinkRelayRoundTrip()
         testTocodeCommandParser()
         await testTocodeTogentAndModelCommands()
         testTocodeWeChatCommandGate()

@@ -184,6 +184,11 @@ enum TogentJobState: String, Codable {
     case failed
 }
 
+enum TogentChannel: String, Codable, Equatable {
+    case wechat
+    case app
+}
+
 struct TogentJob: Codable, Equatable, Identifiable {
     let id: UUID
     let deduplicationKey: String
@@ -197,6 +202,7 @@ struct TogentJob: Codable, Equatable, Identifiable {
     var lastError: String?
     let createdAt: Date
     var updatedAt: Date
+    var channel: TogentChannel = .wechat
 }
 
 struct TogentReply: Equatable {

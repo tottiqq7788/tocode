@@ -79,6 +79,12 @@ swiftc Tests/TestRunner.swift \
   Sources/WeChatArchiveMigration.swift \
   Sources/WeChatBindingPage.swift \
   Sources/WeChatAssociationService.swift \
+  Sources/AppLinkModels.swift \
+  Sources/AppLinkStore.swift \
+  Sources/AppLinkClient.swift \
+  Sources/AppLinkService.swift \
+  Sources/AppLinkPairingPanel.swift \
+  Tests/AppLinkTests.swift \
   Sources/WeChatQuickInput.swift \
   Sources/TocodeCommand.swift \
   Sources/TocodeRootChooser.swift \

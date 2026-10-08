@@ -122,6 +122,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         executor.attachWeChat(weChat)
         weChat.commandExecutor = executor
         weChat.attachTogent(togent)
+        let appLinks = AppLinkService()
+        appLinks.attach(togent: togent)
+        appLinks.start()
 
         let controller = StatusItemController(
             shortcuts: service,
@@ -134,7 +137,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             screenBlackout: blackout,
             modelRelay: modelRelay,
             togent: togent,
-            commandExecutor: executor
+            commandExecutor: executor,
+            appLinks: appLinks
         )
         self.controller = controller
         keyboardRemaps.actionHandler = { [weak controller] action in

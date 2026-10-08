@@ -273,6 +273,35 @@ final class TogentService {
         )
     }
 
+    /// 应用关联文字进入该关联锁定的角色，不归档到微信，也不走微信命令。
+    func stageAppText(
+        linkID: String,
+        androidID: String,
+        roleID: UUID,
+        text: String,
+        messageID: String,
+        receivedAt: Date = Date()
+    ) throws {
+        try checkStartup()
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        guard try store.role(id: roleID) != nil else {
+            throw TogentError.roleNotFound
+        }
+        let key = "app:\(linkID):\(messageID)"
+        _ = try store.stageJob(
+            deduplicationKey: key,
+            roleID: roleID,
+            fromUserID: androidID,
+            contextToken: linkID,
+            messageText: trimmed,
+            receivedAt: receivedAt,
+            channel: .app
+        )
+        try store.queueStagedJob(deduplicationKey: key)
+        startWorkerIfNeeded()
+    }
+
     func commitStagedInbound(
         deduplicationKey: String,
         deferForBatching: Bool = false
@@ -460,7 +489,7 @@ final class TogentService {
             )
             try Task.checkCancellation()
             guard let replyHandler else {
-                throw TogentError.unavailable("微信回复通道未就绪")
+                throw TogentError.unavailable("回复通道未就绪")
             }
             let reply = try TogentReply.parse(answer)
             try await replyHandler(job, role, reply)
@@ -481,7 +510,8 @@ final class TogentService {
                     )
                 }
             } catch {
-                let combined = "\(message)；微信错误回复发送失败：\(error.localizedDescription)"
+                let channelName = job.channel == .app ? "应用" : "微信"
+                let combined = "\(message)；\(channelName)错误回复发送失败：\(error.localizedDescription)"
                 try? store.markFailed(id: job.id, error: combined)
                 return
             }
@@ -675,8 +705,24 @@ final class TogentService {
             \(rolePrompt)
             """
         }
+        let opening: String
+        let closing: String
+        if job.channel == .app {
+            opening = "这是安卓应用经中转发来的一条文字任务。它不是微信消息，不要按微信命令解析，回复只会送回发起的那部安卓。"
+            closing = "完成实际工作后给出适合直接回复安卓的最终文本。本期只回复文字，不要输出文件控制块。"
+        } else {
+            opening = "这是微信消息完成角色归档后进入 Togent 的一个用户任务。微信是微信侧唯一任务入口；用户在短时间内连续发送的多条消息可能已按顺序合并在本任务中，不要再与本任务之外的消息合并。"
+            closing = """
+            完成实际工作后给出适合直接回复微信的最终文本。如果用户明确要求把当前角色工作区里的一个或多个文件发送到微信，必须在最终回复末尾追加且只追加一个以下控制块，`files` 只能填写当前工作区相对路径，按发送顺序最多五个；不要使用绝对路径、目录、symlink 或工作区外路径，也不要加 Markdown 代码围栏：
+            <tocode_wechat_files>
+            {"files":["AGENTS.md"]}
+            </tocode_wechat_files>
+
+            控制块由 Tocode 宿主处理，不会作为文字发给用户。只需文字回复时不要输出控制块。
+            """
+        }
         return """
-        这是微信消息完成角色归档后进入 Togent 的一个用户任务。微信是唯一任务入口；用户在短时间内连续发送的多条消息可能已按顺序合并在本任务中，不要再与本任务之外的消息合并。
+        \(opening)
 
         批次首条收到时间：\(formatter.string(from: job.receivedAt))
         当前角色：\(role.name)
@@ -690,12 +736,7 @@ final class TogentService {
 
         请遵循工作区 AGENTS.md 与上方当前角色提示词。需要历史上下文时，仅按需只读查询微信归档。
 
-        完成实际工作后给出适合直接回复微信的最终文本。如果用户明确要求把当前角色工作区里的一个或多个文件发送到微信，必须在最终回复末尾追加且只追加一个以下控制块，`files` 只能填写当前工作区相对路径，按发送顺序最多五个；不要使用绝对路径、目录、symlink 或工作区外路径，也不要加 Markdown 代码围栏：
-        <tocode_wechat_files>
-        {"files":["AGENTS.md"]}
-        </tocode_wechat_files>
-
-        控制块由 Tocode 宿主处理，不会作为文字发给用户。只需文字回复时不要输出控制块。
+        \(closing)
         """
     }
 }

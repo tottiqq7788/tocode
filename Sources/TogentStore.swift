@@ -183,7 +183,8 @@ final class TogentStore: @unchecked Sendable {
         messageText: String,
         receivedAt: Date,
         batchKey: String = "",
-        waitsForText: Bool = false
+        waitsForText: Bool = false,
+        channel: TogentChannel = .wechat
     ) throws -> TogentJob {
         try withDatabase { database in
             let now = Date()
@@ -193,8 +194,8 @@ final class TogentStore: @unchecked Sendable {
                 INSERT OR IGNORE INTO jobs
                 (id, dedupe_key, role_id, from_user_id, context_token, message_text,
                  batch_key, waits_for_text, received_at, state, attempt_count,
-                 last_error, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'staged', 0, NULL, ?, ?)
+                 last_error, created_at, updated_at, channel)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'staged', 0, NULL, ?, ?, ?)
                 """,
                 bindings: [
                     .text(UUID().uuidString),
@@ -207,7 +208,8 @@ final class TogentStore: @unchecked Sendable {
                     .integer(waitsForText ? 1 : 0),
                     .double(receivedAt.timeIntervalSince1970),
                     .double(now.timeIntervalSince1970),
-                    .double(now.timeIntervalSince1970)
+                    .double(now.timeIntervalSince1970),
+                    .text(channel.rawValue)
                 ]
             )
             guard let job = try job(database, deduplicationKey: deduplicationKey) else {
@@ -357,7 +359,8 @@ final class TogentStore: @unchecked Sendable {
                 database,
                 sql: """
                 SELECT id, dedupe_key, role_id, from_user_id, context_token, message_text,
-                       received_at, state, attempt_count, last_error, created_at, updated_at
+                       received_at, state, attempt_count, last_error, created_at, updated_at,
+                       channel
                 FROM jobs WHERE state = 'queued'
                 ORDER BY created_at, rowid LIMIT 1
                 """
@@ -397,7 +400,8 @@ final class TogentStore: @unchecked Sendable {
                 database,
                 sql: """
                 SELECT id, dedupe_key, role_id, from_user_id, context_token, message_text,
-                       received_at, state, attempt_count, last_error, created_at, updated_at
+                       received_at, state, attempt_count, last_error, created_at, updated_at,
+                       channel
                 FROM jobs ORDER BY created_at, rowid
                 """
             )
@@ -462,6 +466,7 @@ final class TogentStore: @unchecked Sendable {
                 """
             )
             try ensureBatchColumns(database)
+            try ensureChannelColumn(database)
             try execute(
                 database,
                 sql: "CREATE INDEX IF NOT EXISTS jobs_state_order ON jobs(state, created_at)"
@@ -475,6 +480,16 @@ final class TogentStore: @unchecked Sendable {
             )
         }
         applyPermissions()
+    }
+
+    private func ensureChannelColumn(_ database: OpaquePointer) throws {
+        let columns = try columnNames(database, table: "jobs")
+        if !columns.contains("channel") {
+            try executeScript(
+                database,
+                sql: "ALTER TABLE jobs ADD COLUMN channel TEXT NOT NULL DEFAULT 'wechat'"
+            )
+        }
     }
 
     private func ensureBatchColumns(_ database: OpaquePointer) throws {
@@ -689,7 +704,8 @@ final class TogentStore: @unchecked Sendable {
             database,
             sql: """
             SELECT id, dedupe_key, role_id, from_user_id, context_token, message_text,
-                   received_at, state, attempt_count, last_error, created_at, updated_at
+                   received_at, state, attempt_count, last_error, created_at, updated_at,
+                   channel
             FROM jobs WHERE dedupe_key = ? LIMIT 1
             """,
             bindings: [.text(deduplicationKey)]
@@ -748,7 +764,8 @@ final class TogentStore: @unchecked Sendable {
                 attemptCount: Int(sqlite3_column_int(statement, 8)),
                 lastError: optionalText(statement, 9),
                 createdAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 10)),
-                updatedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 11))
+                updatedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 11)),
+                channel: text(statement, 12) == TogentChannel.app.rawValue ? .app : .wechat
             ))
         }
         return values
