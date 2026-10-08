@@ -1,7 +1,7 @@
 import Foundation
 import Security
 
-enum WeChatTransportError: Error, Equatable {
+enum WeChatTransportError: Error, Equatable, LocalizedError {
     case invalidURL
     case untrustedURL
     case invalidResponse
@@ -9,9 +9,41 @@ enum WeChatTransportError: Error, Equatable {
     case unauthorized
     case serverFailure(Int)
     case apiFailure(Int)
+    case apiBusinessError(code: Int, message: String)
+    case undelivered
     case emptyQRCode
     case emptyUploadParam
     case missingEncryptedParam
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidURL:
+            return "微信服务地址无效"
+        case .untrustedURL:
+            return "微信服务地址不受信任"
+        case .invalidResponse:
+            return "微信响应无法解析"
+        case .httpStatus(let status):
+            return "微信 HTTP \(status)"
+        case .unauthorized:
+            return "微信授权已失效"
+        case .serverFailure(let status):
+            return "微信服务暂时故障（\(status)）"
+        case .apiFailure(let ret):
+            return "微信接口返回 \(ret)"
+        case .apiBusinessError(let code, let message):
+            let detail = message.trimmingCharacters(in: .whitespacesAndNewlines)
+            return detail.isEmpty ? "微信业务错误 \(code)" : "微信业务错误 \(code)：\(detail)"
+        case .undelivered:
+            return "微信已受理但未投递（缺少 message_id）"
+        case .emptyQRCode:
+            return "微信二维码为空"
+        case .emptyUploadParam:
+            return "微信上传参数为空"
+        case .missingEncryptedParam:
+            return "微信加密参数缺失"
+        }
+    }
 }
 
 enum WeChatOutboundMediaKind: Equatable {
@@ -200,12 +232,32 @@ final class WeChatILinkClient: WeChatILinkTransporting, @unchecked Sendable {
             request(url: url, method: "POST", token: credential.token, body: encoded),
             timeout: 20
         )
-        // 微信实际成功响应可能不返回 ret 字段（或返回空体/额外字段）。
-        // 缺失 ret 视为成功，仅显式非零 ret 才视为业务失败，避免“已送达却误报失败”。
-        if let outbound = try? decoder.decode(OutboundResponse.self, from: data) {
-            guard outbound.ret == 0 else {
-                throw WeChatTransportError.apiFailure(outbound.ret)
-            }
+        try evaluateSendMessageResponse(data)
+    }
+
+    /// iLink 可能返回 `{"ret":0}` 却不投递；社区与实测表明成功投递会带非空 `message_id`。
+    /// 缺失 ret 本身不再当成功；必须有 message_id，且 ret/errcode 不得为非零。
+    private func evaluateSendMessageResponse(_ data: Data) throws {
+        guard !data.isEmpty else {
+            throw WeChatTransportError.undelivered
+        }
+        let outbound: OutboundResponse
+        do {
+            outbound = try decoder.decode(OutboundResponse.self, from: data)
+        } catch {
+            throw WeChatTransportError.invalidResponse
+        }
+        if let errcode = outbound.errcode, errcode != 0 {
+            throw WeChatTransportError.apiBusinessError(
+                code: errcode,
+                message: outbound.errmsg ?? ""
+            )
+        }
+        if let ret = outbound.ret, ret != 0 {
+            throw WeChatTransportError.apiFailure(ret)
+        }
+        guard let messageID = outbound.messageID?.value, !messageID.isEmpty else {
+            throw WeChatTransportError.undelivered
         }
     }
 
@@ -517,21 +569,65 @@ final class WeChatILinkClient: WeChatILinkTransporting, @unchecked Sendable {
     }
 
     private struct OutboundResponse: Decodable {
-        let ret: Int
+        let ret: Int?
+        let errcode: Int?
+        let errmsg: String?
+        let messageID: FlexibleScalar?
 
         enum CodingKeys: String, CodingKey {
             case ret
+            case errcode
+            case errmsg
+            case messageID = "message_id"
         }
 
         init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             if let ret = try container.decodeIfPresent(Int.self, forKey: .ret) {
                 self.ret = ret
-            } else if let raw = try container.decodeIfPresent(String.self, forKey: .ret), let parsed = Int(raw) {
+            } else if let raw = try container.decodeIfPresent(String.self, forKey: .ret),
+                      let parsed = Int(raw) {
                 self.ret = parsed
             } else {
-                // 缺失 ret 字段按成功处理；由调用方决定是否解析成功。
-                self.ret = 0
+                self.ret = nil
+            }
+            if let errcode = try container.decodeIfPresent(Int.self, forKey: .errcode) {
+                self.errcode = errcode
+            } else if let raw = try container.decodeIfPresent(String.self, forKey: .errcode),
+                      let parsed = Int(raw) {
+                self.errcode = parsed
+            } else {
+                self.errcode = nil
+            }
+            errmsg = try container.decodeIfPresent(String.self, forKey: .errmsg)
+            messageID = try container.decodeIfPresent(FlexibleScalar.self, forKey: .messageID)
+        }
+    }
+
+    private enum FlexibleScalar: Decodable {
+        case string(String)
+        case int(Int)
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.singleValueContainer()
+            if let value = try? container.decode(String.self) {
+                self = .string(value)
+            } else if let value = try? container.decode(Int.self) {
+                self = .int(value)
+            } else if let value = try? container.decode(Int64.self) {
+                self = .string(String(value))
+            } else {
+                throw DecodingError.dataCorruptedError(
+                    in: container,
+                    debugDescription: "expected string or int"
+                )
+            }
+        }
+
+        var value: String {
+            switch self {
+            case .string(let value): return value
+            case .int(let value): return String(value)
             }
         }
     }

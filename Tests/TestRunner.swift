@@ -4916,7 +4916,7 @@ func testWeChatProtocolContract() async {
     WeChatURLProtocol.handler = { request in
         switch request.url!.path {
         case "/ilink/bot/sendmessage":
-            return (200, Data(#"{"ret":0}"#.utf8))
+            return (200, Data(#"{"ret":0,"message_id":"7513854861166379528"}"#.utf8))
         default:
             return (404, Data())
         }
@@ -4946,7 +4946,7 @@ func testWeChatProtocolContract() async {
             return (200, Data())
         }
         if request.url!.path == "/ilink/bot/sendmessage" {
-            return (200, Data(#"{"ret":0}"#.utf8))
+            return (200, Data(#"{"message_id":7513854861166379528}"#.utf8))
         }
         return (404, Data())
     }
@@ -5029,6 +5029,46 @@ func testWeChatProtocolContract() async {
         expect(ret == -3, "sendmessage 非零 ret 正确分类")
     } catch {
         expect(false, "sendmessage 错误分类")
+    }
+
+    WeChatURLProtocol.handler = { request in
+        if request.url!.path == "/ilink/bot/sendmessage" {
+            return (200, Data(#"{"ret":0}"#.utf8))
+        }
+        return (404, Data())
+    }
+    do {
+        _ = try await client.sendText(
+            credential: credential,
+            toUserID: "user@im.wechat",
+            contextToken: "ctx",
+            text: "silent-drop"
+        )
+        expect(false, "sendmessage 仅有 ret:0 缺少 message_id 应视为未投递")
+    } catch WeChatTransportError.undelivered {
+        expect(true, "sendmessage 缺少 message_id 正确分类为未投递")
+    } catch {
+        expect(false, "sendmessage 未投递错误分类")
+    }
+
+    WeChatURLProtocol.handler = { request in
+        if request.url!.path == "/ilink/bot/sendmessage" {
+            return (200, Data(#"{"errcode":-14,"errmsg":"session timeout"}"#.utf8))
+        }
+        return (404, Data())
+    }
+    do {
+        _ = try await client.sendText(
+            credential: credential,
+            toUserID: "user@im.wechat",
+            contextToken: "ctx",
+            text: "timeout"
+        )
+        expect(false, "sendmessage 非零 errcode 应视为失败")
+    } catch WeChatTransportError.apiBusinessError(let code, let message) {
+        expect(code == -14 && message == "session timeout", "sendmessage errcode 正确分类")
+    } catch {
+        expect(false, "sendmessage errcode 错误分类")
     }
 }
 

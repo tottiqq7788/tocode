@@ -814,10 +814,15 @@ final class WeChatAssociationService: WeChatAssociationControlling {
                 reason = "微信上传协议不匹配"
             case .apiFailure(let ret):
                 reason = "微信接口返回 \(ret)"
+            case .apiBusinessError(let code, let message):
+                let detail = message.trimmingCharacters(in: .whitespacesAndNewlines)
+                reason = detail.isEmpty ? "微信业务错误 \(code)" : "微信业务错误 \(code)：\(detail)"
+            case .undelivered:
+                reason = "微信未投递（缺少 message_id）"
             case .serverFailure(let status):
                 reason = "微信服务暂时故障（\(status)）"
             default:
-                reason = "发送失败"
+                reason = transport.errorDescription ?? "发送失败"
             }
         } else {
             reason = "发送失败"
