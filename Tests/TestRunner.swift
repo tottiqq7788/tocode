@@ -357,6 +357,302 @@ func testHermesProjectFollow() {
     expect(service.resolveProject() == nil, "主目录不存在时不跟随")
 }
 
+func testHermesCurrentProfileDatabase() {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("tocode-hermes-profile-\(UUID().uuidString)", isDirectory: true)
+    let home = root.appendingPathComponent("home", isDirectory: true)
+    let storage = root.appendingPathComponent("leveldb", isDirectory: true)
+    let namedRoot = root.appendingPathComponent("named", isDirectory: true)
+    let defaultRoot = root.appendingPathComponent("fallback", isDirectory: true)
+    try! FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+    try! FileManager.default.createDirectory(at: storage, withIntermediateDirectories: true)
+    try! FileManager.default.createDirectory(at: namedRoot, withIntermediateDirectories: true)
+    try! FileManager.default.createDirectory(at: defaultRoot, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    func database(profile: String?) -> String {
+        HermesProjectService.projectsDatabasePath(home: home.path, profile: profile)
+    }
+    func writeProject(profile: String?, name: String, path: String) {
+        let file = database(profile: profile)
+        try! FileManager.default.createDirectory(
+            atPath: (file as NSString).deletingLastPathComponent,
+            withIntermediateDirectories: true
+        )
+        try? FileManager.default.removeItem(atPath: file)
+        var pointer: OpaquePointer?
+        expect(sqlite3_open(file, &pointer) == SQLITE_OK, "可打开 \(profile ?? "default") 项目库")
+        guard let pointer else { return }
+        defer { sqlite3_close(pointer) }
+        let sql = """
+        CREATE TABLE projects (
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, primary_path TEXT, archived INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE project_folders (
+            project_id TEXT NOT NULL, path TEXT NOT NULL, is_primary INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE project_meta (key TEXT PRIMARY KEY, value TEXT);
+        INSERT INTO projects (id, name, primary_path, archived)
+        VALUES ('p_active', '\(name)', '\(path.replacingOccurrences(of: "'", with: "''"))', 0);
+        INSERT INTO project_meta (key, value) VALUES ('active_id', 'p_active');
+        """
+        expect(sqlite3_exec(pointer, sql, nil, nil, nil) == SQLITE_OK, "写入 \(profile ?? "default") 当前项目")
+    }
+    func route(_ profile: String, remote: Bool = false) -> Data {
+        var data = Data("hermes.desktop.lastRoute.profile.\(profile)".utf8)
+        if remote { data.append(Data(".remote.https%3A%2F%2Fexample".utf8)) }
+        data.append(contentsOf: [0x01])
+        return data
+    }
+
+    writeProject(profile: nil, name: "gone", path: root.appendingPathComponent("missing").path)
+    writeProject(profile: "liubei", name: "地球online", path: namedRoot.path)
+    writeProject(profile: "po-jie", name: "tocode", path: defaultRoot.path)
+
+    let older = storage.appendingPathComponent("001.log")
+    let newer = storage.appendingPathComponent("002.log")
+    try! route("liubei").write(to: older)
+    try! FileManager.default.setAttributes(
+        [.modificationDate: Date(timeIntervalSinceNow: -60)],
+        ofItemAtPath: older.path
+    )
+    try! route("po-jie").write(to: newer)
+    let named = HermesProjectService(home: home.path, storageDirectory: storage.path).resolveProject()
+    expect(named?.name == "tocode", "较新的会话路由决定配置档案")
+    expect(
+        named?.rootPath == (defaultRoot.path as NSString).standardizingPath,
+        "跟随该档案的当前项目主目录"
+    )
+
+    try! (route("po-jie") + route("liubei")).write(to: newer)
+    let latest = HermesProjectService(home: home.path, storageDirectory: storage.path).resolveProject()
+    expect(latest?.name == "地球online", "同一文件里后写的路由覆盖先前的")
+
+    try! (route("liubei.remote.example", remote: false) + route("liubei", remote: true) + route("../tmp")).write(to: newer)
+    let ignored = HermesProjectService(home: home.path, storageDirectory: storage.path).resolveProject()
+    expect(ignored == nil, "远程路由和非法档案名不改读其它项目库")
+
+    try! FileManager.default.removeItem(at: newer)
+    try! FileManager.default.removeItem(at: older)
+    let fallback = HermesProjectService(home: home.path, storageDirectory: storage.path).resolveProject()
+    expect(fallback == nil, "没有路由时只读默认档案，路径失效则不跟随")
+
+    writeProject(profile: nil, name: "family", path: defaultRoot.path)
+    let defaultProfile = HermesProjectService(home: home.path, storageDirectory: storage.path).resolveProject()
+    expect(defaultProfile?.name == "family", "没有路由时跟随默认档案里仍有效的项目")
+}
+
+func testHermesWALDatabaseRead() {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("tocode-hermes-wal-\(UUID().uuidString)", isDirectory: true)
+    let primary = root.appendingPathComponent("primary", isDirectory: true)
+    try! FileManager.default.createDirectory(at: primary, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let database = root.appendingPathComponent("projects.db").path
+    let path = primary.path.replacingOccurrences(of: "'", with: "''")
+    var pointer: OpaquePointer?
+    expect(sqlite3_open(database, &pointer) == SQLITE_OK, "可创建 WAL 项目库")
+    guard let pointer else { return }
+    let sql = """
+    PRAGMA journal_mode=WAL;
+    CREATE TABLE projects (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, primary_path TEXT, archived INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE project_meta (key TEXT PRIMARY KEY, value TEXT);
+    INSERT INTO projects (id, name, primary_path, archived)
+    VALUES ('p_active', '地球online', '\(path)', 0);
+    INSERT INTO project_meta (key, value) VALUES ('active_id', 'p_active');
+    PRAGMA wal_checkpoint(TRUNCATE);
+    """
+    expect(sqlite3_exec(pointer, sql, nil, nil, nil) == SQLITE_OK, "写入 WAL 当前项目")
+    sqlite3_close(pointer)
+    for suffix in ["-shm", "-wal"] {
+        try? FileManager.default.removeItem(atPath: database + suffix)
+    }
+    let project = HermesProjectService(databasePath: database).resolveProject()
+    expect(
+        project?.rootPath == (primary.path as NSString).standardizingPath,
+        "WAL 项目库在没有共享内存文件时仍能读到主目录"
+    )
+}
+
+func testHermesFollowsOpenedProjectInsteadOfActivePointer() {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("tocode-hermes-scope-\(UUID().uuidString)", isDirectory: true)
+    let activeRoot = root.appendingPathComponent("active", isDirectory: true)
+    let parent = root.appendingPathComponent("liubei", isDirectory: true)
+    let nested = parent.appendingPathComponent("blacker", isDirectory: true)
+    let deep = nested.appendingPathComponent("chapters", isDirectory: true)
+    let auto = root.appendingPathComponent("project", isDirectory: true)
+    try! FileManager.default.createDirectory(at: activeRoot, withIntermediateDirectories: true)
+    try! FileManager.default.createDirectory(at: deep, withIntermediateDirectories: true)
+    try! FileManager.default.createDirectory(at: auto, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let home = root.appendingPathComponent("home", isDirectory: true)
+    let storage = root.appendingPathComponent("leveldb", isDirectory: true)
+    try! FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+    try! FileManager.default.createDirectory(at: storage, withIntermediateDirectories: true)
+    let database = HermesProjectService.projectsDatabasePath(home: home.path, profile: "liubei")
+    try! FileManager.default.createDirectory(atPath: (database as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+    func sql(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "''") + "'" }
+    var pointer: OpaquePointer?
+    expect(sqlite3_open(database, &pointer) == SQLITE_OK, "可创建多项目库")
+    guard let pointer else { return }
+    let setup = """
+    CREATE TABLE projects (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, primary_path TEXT, archived INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE project_folders (
+        project_id TEXT NOT NULL, path TEXT NOT NULL, is_primary INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE project_meta (key TEXT PRIMARY KEY, value TEXT);
+    INSERT INTO projects (id, name, primary_path, archived) VALUES
+      ('p_active', '地球online', \(sql(activeRoot.path)), 0),
+      ('p_nested', 'blacker', \(sql(nested.path)), 0);
+    INSERT INTO project_folders (project_id, path, is_primary) VALUES
+      ('p_active', \(sql(activeRoot.path)), 1),
+      ('p_nested', \(sql(nested.path)), 1);
+    INSERT INTO project_meta (key, value) VALUES ('active_id', 'p_active');
+    """
+    expect(sqlite3_exec(pointer, setup, nil, nil, nil) == SQLITE_OK, "写入两个项目且当前指针停在第一个")
+    sqlite3_close(pointer)
+
+    let state = HermesProjectService.stateDatabasePath(home: home.path, profile: "liubei")
+    var stateDB: OpaquePointer?
+    expect(sqlite3_open(state, &stateDB) == SQLITE_OK, "可创建会话库")
+    guard let stateDB else { return }
+    let sessionSQL = """
+    CREATE TABLE sessions (id TEXT PRIMARY KEY, cwd TEXT, git_repo_root TEXT);
+    INSERT INTO sessions (id, cwd, git_repo_root) VALUES
+      ('20261013_193152_02ef04', \(sql(deep.path)), NULL);
+    """
+    expect(sqlite3_exec(stateDB, sessionSQL, nil, nil, nil) == SQLITE_OK, "写入落在子项目里的会话")
+    sqlite3_close(stateDB)
+
+    func record(_ key: String, _ value: String) -> Data {
+        var data = Data(key.utf8)
+        let payload = Data([0x01]) + Data(value.utf8)
+        data.append(UInt8(payload.count))
+        data.append(payload)
+        return data
+    }
+    let route = Data("hermes.desktop.lastRoute.profile.liubei".utf8) + Data([0x02, 0x01, 0x2f])
+    let file = storage.appendingPathComponent("001.log")
+    func service(scope: String) -> HermesProjectService {
+        var data = route
+        data.append(record("hermes.desktop.projectScope", scope))
+        data.append(record("hermes.desktop.lastSessionId.profile.liubei", "20261013_193152_02ef04"))
+        try! data.write(to: file)
+        return HermesProjectService(home: home.path, storageDirectory: storage.path)
+    }
+
+    let opened = service(scope: "p_nested").resolveProject()
+    expect(opened?.name == "blacker", "打开的项目优先于 active_id")
+    expect(opened?.rootPath == (nested.path as NSString).standardizingPath, "打开的项目使用它自己的主目录")
+
+    let discovered = service(scope: auto.path).resolveProject()
+    expect(discovered?.rootPath == (auto.path as NSString).standardizingPath, "自动发现的项目跟随该目录")
+
+    let session = service(scope: "__all_projects__").resolveProject()
+    expect(session?.name == "blacker", "未进入项目时跟随当前会话所属项目")
+    expect(
+        session?.rootPath == (nested.path as NSString).standardizingPath,
+        "会话在项目内部更深的目录时仍用项目主目录"
+    )
+}
+
+func testHermesVisibleEntryDoesNotWaitForStorage() {
+    expect(
+        HermesVisibleEntryReader.entry(fromTitles: ["已置顶", "地球online", "显示项目", "全部项目", "某会话"]) == .entered("地球online"),
+        "进入项目后窗口标题就是项目名"
+    )
+    expect(
+        HermesVisibleEntryReader.entry(fromTitles: ["项目", "打开 地球online", "主页"]) == nil,
+        "还在项目列表时不把某一行当成已进入"
+    )
+    expect(
+        HermesVisibleEntryReader.entry(fromTitles: ["主页", "显示项目", "全部项目"]) == .home,
+        "进入主页时不再沿用上一个项目"
+    )
+
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("tocode-hermes-visible-\(UUID().uuidString)", isDirectory: true)
+    let activeRoot = root.appendingPathComponent("active", isDirectory: true)
+    let nested = root.appendingPathComponent("blacker", isDirectory: true)
+    let auto = root.appendingPathComponent("project", isDirectory: true)
+    try! FileManager.default.createDirectory(at: activeRoot, withIntermediateDirectories: true)
+    try! FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+    try! FileManager.default.createDirectory(at: auto, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let home = root.appendingPathComponent("home", isDirectory: true)
+    let storage = root.appendingPathComponent("leveldb", isDirectory: true)
+    try! FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+    try! FileManager.default.createDirectory(at: storage, withIntermediateDirectories: true)
+    let database = HermesProjectService.projectsDatabasePath(home: home.path, profile: "liubei")
+    try! FileManager.default.createDirectory(atPath: (database as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+    func sql(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "''") + "'" }
+    var pointer: OpaquePointer?
+    expect(sqlite3_open(database, &pointer) == SQLITE_OK, "可创建窗口跟随项目库")
+    guard let pointer else { return }
+    let setup = """
+    CREATE TABLE projects (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, primary_path TEXT, archived INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE project_folders (
+        project_id TEXT NOT NULL, path TEXT NOT NULL, is_primary INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE project_meta (key TEXT PRIMARY KEY, value TEXT);
+    INSERT INTO projects (id, name, primary_path, archived) VALUES
+      ('p_active', '地球online', \(sql(activeRoot.path)), 0),
+      ('p_nested', 'blacker', \(sql(nested.path)), 0);
+    INSERT INTO project_meta (key, value) VALUES ('active_id', 'p_active');
+    """
+    expect(sqlite3_exec(pointer, setup, nil, nil, nil) == SQLITE_OK, "窗口跟随项目库仍停在旧项目")
+    sqlite3_close(pointer)
+
+    let route = Data("hermes.desktop.lastRoute.profile.liubei".utf8) + Data([0x02, 0x01, 0x2f])
+    var stored = route
+    func remember(_ key: String, _ value: String) {
+        var data = Data(key.utf8)
+        let payload = Data([0x01]) + Data(value.utf8)
+        data.append(UInt8(payload.count))
+        data.append(payload)
+        stored.append(data)
+    }
+    remember("hermes.desktop.projectScope", "p_nested")
+    try! stored.write(to: storage.appendingPathComponent("001.log"))
+
+    let state = HermesProjectService.stateDatabasePath(home: home.path, profile: "liubei")
+    var stateDB: OpaquePointer?
+    expect(sqlite3_open(state, &stateDB) == SQLITE_OK, "可创建窗口跟随会话库")
+    guard let stateDB else { return }
+    let sessionSQL = """
+    CREATE TABLE sessions (id TEXT PRIMARY KEY, cwd TEXT, git_repo_root TEXT);
+    INSERT INTO sessions (id, cwd, git_repo_root) VALUES
+      ('20261013_193152_02ef04', \(sql(auto.path)), \(sql(auto.path)));
+    """
+    expect(sqlite3_exec(stateDB, sessionSQL, nil, nil, nil) == SQLITE_OK, "写入自动发现目录的会话")
+    sqlite3_close(stateDB)
+
+    func service(_ entry: HermesVisibleEntry?) -> HermesProjectService {
+        HermesProjectService(home: home.path, storageDirectory: storage.path, visibleEntry: { entry })
+    }
+    let named = service(.entered("blacker")).resolveProject()
+    expect(named?.name == "blacker", "窗口上的项目名优先于还没落盘的旧记录")
+    expect(named?.rootPath == (nested.path as NSString).standardizingPath, "窗口项目名解析到该项目主目录")
+
+    let discovered = service(.entered("project")).resolveProject()
+    expect(
+        discovered?.rootPath == (auto.path as NSString).standardizingPath,
+        "自动发现项目用窗口上的目录名对上仓库根"
+    )
+
+    let homeEntry = service(.home).resolveProject()
+    expect(homeEntry?.name == "地球online", "回到主页后不再停在磁盘上刚进入的项目")
+}
+
 func testDirectoryMenuModeResolve() {
     expect(DirectoryMenuMode.resolve(option: false, command: false) == .normal, "无修饰键是普通模式")
     expect(DirectoryMenuMode.resolve(option: true, command: false) == .delete, "Option 是删除模式")
@@ -6366,6 +6662,10 @@ struct TestRunnerMain {
         await testRootMenuTerminalItem()
         testTerminalWindowFollow()
         testHermesProjectFollow()
+        testHermesCurrentProfileDatabase()
+        testHermesWALDatabaseRead()
+        testHermesFollowsOpenedProjectInsteadOfActivePointer()
+        testHermesVisibleEntryDoesNotWaitForStorage()
         testDirectoryMenuModeResolve()
         testDirectoryMenuAccessOpener()
         testTocodePreferencesMigration()
