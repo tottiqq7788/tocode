@@ -1,13 +1,14 @@
 import AppKit
 
 /// 目录树菜单构建器：把目录内容渲染为 NSMenu 树，子文件夹惰性递归展开。
-/// 根菜单在「新增」上方提供「历史」以复用上次点击项的同级目录；普通模式点击复制；Shift 多选；Option 删除；Command 访问。
+/// 根菜单在「新增」上方依次提供「历史」「配置」与「终端」；普通模式点击复制；Shift 多选；Option 删除；Command 访问。
 @MainActor
 final class MenuBuilder: NSObject, NSMenuDelegate {
     private let fs = FileSystemService()
     private let clipboard = ClipboardService()
     private let opener: WorkspaceItemOpening
     private let resumeStore: DirectoryMenuResumeStore
+    private let terminal: DirectoryTerminalLaunching
     private var menuDirectoryMap: [ObjectIdentifier: String] = [:]
     private var includeHidden = true
     private var mode: DirectoryMenuMode = .normal
@@ -15,7 +16,7 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
 
     private var entryItems: [EntryItem] = []
     private var bottomItems: [BottomItem] = []
-    /// 仅根菜单：在「历史」与「新增」之间插入「配置」夹。
+    /// 仅根菜单：在「历史」与「终端」之间插入「配置」夹。
     var makeRootConfigItem: (() -> NSMenuItem)?
 
     private var multiCopyPaths: [String] = []
@@ -28,13 +29,16 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
     private static let clearTitle = "清空"
     private static let accessTitle = "访问"
     private static let historyTitle = "历史"
+    private static let terminalTitle = "终端"
 
     init(
         opener: WorkspaceItemOpening = NSWorkspaceItemOpener(),
-        resumeStore: DirectoryMenuResumeStore = DirectoryMenuResumeStore()
+        resumeStore: DirectoryMenuResumeStore = DirectoryMenuResumeStore(),
+        terminal: DirectoryTerminalLaunching = SystemDirectoryTerminalLauncher()
     ) {
         self.opener = opener
         self.resumeStore = resumeStore
+        self.terminal = terminal
         super.init()
     }
 
@@ -146,6 +150,7 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
             if let makeRootConfigItem {
                 menu.addItem(makeRootConfigItem())
             }
+            menu.addItem(makeTerminalItem(for: dir))
         }
         menu.addItem(makeBottomActionItem(for: dir))
     }
@@ -198,6 +203,15 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
         submenu.addItem(placeholder)
         menuDirectoryMap[ObjectIdentifier(submenu)] = sibling
         item.submenu = submenu
+        return item
+    }
+
+    private func makeTerminalItem(for directory: String) -> NSMenuItem {
+        let item = NSMenuItem(title: Self.terminalTitle, action: #selector(openTerminal(_:)), keyEquivalent: "")
+        item.target = self
+        item.representedObject = directory
+        item.image = NSImage(systemSymbolName: "terminal", accessibilityDescription: Self.terminalTitle)
+        item.isAlternate = false
         return item
     }
 
@@ -286,6 +300,15 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
         }
         guard entryItems.contains(where: { $0.item === item }) else { return nil }
         return item.representedObject as? String
+    }
+
+    @objc private func openTerminal(_ sender: NSMenuItem) {
+        guard let directory = sender.representedObject as? String else { return }
+        do {
+            try terminal.openTerminal(at: directory)
+        } catch {
+            presentError(error, title: "打开终端失败")
+        }
     }
 
     // MARK: - 新增

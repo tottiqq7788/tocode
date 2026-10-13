@@ -178,7 +178,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         )
     }
 
-    /// 左键：弹出目录树（始终从当前根第一层）；根菜单含「历史」「配置」与「新增」。
+    /// 左键：弹出目录树（始终从当前根第一层）；根菜单含「历史」「配置」「终端」与「新增」。
     /// Shift 连续多选尽量保持同一菜单；若系统仍关闭则立刻再弹同一菜单。
     private func showDirectoryMenu() {
         let menu = NSMenu()

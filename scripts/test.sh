@@ -28,6 +28,8 @@ swiftc Tests/TestRunner.swift \
   Sources/AlertFocus.swift \
   Sources/DirectoryMenuMode.swift \
   Sources/DirectoryMenuResume.swift \
+  Sources/DirectoryTerminal.swift \
+  Sources/MenuBuilder.swift \
   Sources/TocodePreferences.swift \
   Sources/TocodePortableSettings.swift \
   Sources/UserManual.swift \

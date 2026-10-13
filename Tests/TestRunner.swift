@@ -159,6 +159,76 @@ final class MockWorkspaceItemOpener: WorkspaceItemOpening {
     }
 }
 
+@MainActor
+func testRootMenuTerminalItem() {
+    final class RecordingDirectoryTerminal: DirectoryTerminalLaunching {
+        var opened: [String] = []
+        func openTerminal(at directory: String) throws {
+            opened.append(directory)
+        }
+    }
+
+    let path = "/tmp/tocode terminal \(UUID().uuidString)"
+    let arguments = DirectoryTerminalCommand.arguments(directory: path)
+    expect(arguments.last == path, "目录只作为 osascript 参数")
+    expect(!DirectoryTerminalCommand.script.contains(path), "目录不写进脚本正文")
+    do {
+        _ = try DirectoryTerminalCommand.standardizedDirectory("/no/such/tocode-terminal-\(UUID().uuidString)")
+        expect(false, "不存在的目录不能打开终端")
+    } catch {
+        expect(true, "不存在的目录不能打开终端")
+    }
+
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("tocode-terminal-\(UUID().uuidString)", isDirectory: true)
+    try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    try! FileManager.default.createDirectory(
+        at: root.appendingPathComponent("child", isDirectory: true),
+        withIntermediateDirectories: true
+    )
+    defer { try? FileManager.default.removeItem(at: root) }
+    let suite = "tocode.terminal.test.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+
+    let launcher = RecordingDirectoryTerminal()
+    let builder = MenuBuilder(
+        resumeStore: DirectoryMenuResumeStore(defaults: defaults),
+        terminal: launcher
+    )
+    builder.makeRootConfigItem = {
+        NSMenuItem(title: "配置", action: nil, keyEquivalent: "")
+    }
+    let menu = NSMenu()
+    menu.autoenablesItems = false
+    builder.fillRoot(menu, with: root.path)
+    expect(
+        Array(menu.items.map(\.title).suffix(4)) == ["历史", "配置", "终端", "新增"],
+        "根菜单在配置与新增之间提供终端"
+    )
+
+    let child = menu.items.first { $0.title == "child" }
+    builder.menuWillOpen(child?.submenu ?? NSMenu())
+    let childTitles = child?.submenu?.items.map(\.title) ?? []
+    expect(!childTitles.contains("终端"), "子文件夹菜单没有终端")
+    expect(childTitles.last == "新增", "子文件夹菜单底部仍是新增")
+
+    guard let terminal = menu.items.first(where: { $0.title == "终端" }) else {
+        expect(false, "根菜单有终端项")
+        return
+    }
+    _ = terminal.target?.perform(terminal.action, with: terminal)
+    expect(launcher.opened == [(root.path as NSString).standardizingPath], "终端打开当前展示根")
+    expect(defaults.string(forKey: DirectoryMenuResumeStore.key) == nil, "点击终端不写入历史")
+
+    builder.setMode(.delete)
+    expect(terminal.title == "终端", "删除模式仍显示终端")
+    expect(menu.items.last?.title == "清空", "删除模式只改底部新增")
+    builder.setMode(.access)
+    expect(terminal.title == "终端", "访问模式仍显示终端")
+    expect(menu.items.last?.title == "访问", "访问模式只改底部新增")
+}
+
 func testDirectoryMenuModeResolve() {
     expect(DirectoryMenuMode.resolve(option: false, command: false) == .normal, "无修饰键是普通模式")
     expect(DirectoryMenuMode.resolve(option: true, command: false) == .delete, "Option 是删除模式")
@@ -406,7 +476,7 @@ func testUserManualPages() {
     expect(joined.contains("一行一条") || joined.contains("换行"), "说明书说明多路径换行")
     expect(joined.contains("历史"), "说明书覆盖目录树历史同级")
     expect(joined.contains("始终从当前解析根的第一层开始"), "说明书写明根菜单不整页跳转")
-    expect(joined.contains("分隔线 →「历史」→「配置」→「新增」"), "说明书写明根菜单底部结构")
+    expect(joined.contains("分隔线 →「历史」→「配置」→「终端」→「新增」"), "说明书写明根菜单底部结构")
     expect(joined.contains("只悬停展开不会更新"), "说明书写明悬停不写入历史")
     expect(joined.contains("限制程序坞弹出"), "说明书覆盖限制程序坞弹出")
     expect(joined.contains("自动隐藏和显示程序坞"), "说明书写明需系统自动隐藏")
@@ -5909,6 +5979,7 @@ struct TestRunnerMain {
     static func main() async {
         testFileSystemService()
         testFileCreationAndTrash()
+        await testRootMenuTerminalItem()
         testDirectoryMenuModeResolve()
         testDirectoryMenuAccessOpener()
         testTocodePreferencesMigration()
