@@ -250,6 +250,13 @@ final class TrackpadShortcutService: NSObject, TrackpadShortcutControlling {
                     body: "功能配置已保留，其他输入功能不受影响。"
                 )
             }
+        case .openURL(let raw):
+            if !MappedURLLaunch.openStored(raw) {
+                alerts.notify(
+                    title: "打开网址失败",
+                    body: "系统没有打开该网址。配置已保留，其他输入功能不受影响。"
+                )
+            }
         case .pass, .suppress:
             break
         }

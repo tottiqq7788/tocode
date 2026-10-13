@@ -25,6 +25,6 @@
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSAppleEventsUsageDescription</key>
-    <string>Tocode 需要读取访达当前选中项，并在开启「⌘Q强关访达」时关闭访达窗口。</string>
+    <string>Tocode 需要读取访达当前选中项，在开启「⌘Q强关访达」时关闭访达窗口，并读取系统「终端」前台窗口以跟随打开时的目录。</string>
 </dict>
 </plist>

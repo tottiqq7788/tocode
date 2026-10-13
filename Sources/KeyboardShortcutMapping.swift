@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import Foundation
 
@@ -34,18 +35,21 @@ struct KeyboardShortcutMappingDraft: Equatable {
     }
 }
 
-/// 目标可以是用户录入的组合键，也可以是内置命名功能。
+/// 目标可以是用户录入的组合键、内置命名功能，或一个带协议的网址。
 enum KeyboardShortcutMappingTarget: Equatable, Hashable {
     case shortcut(RecordedShortcut)
     case action(KeyboardMappingAction)
+    case openURL(String)
 
-    /// 快捷键目标，或桌面切换解析出的组合键；Tocode 动作没有组合键。
+    /// 快捷键目标，或桌面切换解析出的组合键；Tocode 动作和打开网址没有组合键。
     var resolvedShortcut: RecordedShortcut? {
         switch self {
         case .shortcut(let shortcut):
             return shortcut
         case .action(let action):
             return action.synthesizedShortcut
+        case .openURL:
+            return nil
         }
     }
 
@@ -58,6 +62,8 @@ enum KeyboardShortcutMappingTarget: Equatable, Hashable {
                 return .emit(shortcut)
             }
             return .invoke(action)
+        case .openURL(let raw):
+            return .openURL(raw)
         }
     }
 
@@ -67,7 +73,39 @@ enum KeyboardShortcutMappingTarget: Equatable, Hashable {
             return shortcut.displayName
         case .action(let action):
             return action.title
+        case .openURL(let raw):
+            return MappedURL.displayText(for: raw)
         }
+    }
+}
+
+enum MappedURL {
+    /// 去掉首尾空白后，须能解析成带协议的网址。无协议文本不补协议。
+    static func normalized(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let url = URL(string: trimmed),
+              let scheme = url.scheme,
+              !scheme.isEmpty else {
+            return nil
+        }
+        return trimmed
+    }
+
+    static func displayText(for raw: String) -> String {
+        "打开网址 \(raw.trimmingCharacters(in: .whitespacesAndNewlines))"
+    }
+}
+
+enum MappedURLLaunch {
+    static var open: (URL) -> Bool = { NSWorkspace.shared.open($0) }
+
+    @discardableResult
+    static func openStored(_ raw: String) -> Bool {
+        guard let normalized = MappedURL.normalized(raw), let url = URL(string: normalized) else {
+            return false
+        }
+        return open(url)
     }
 }
 
@@ -76,11 +114,13 @@ extension KeyboardShortcutMappingTarget: Codable {
         case kind
         case shortcut
         case action
+        case url
     }
 
     private enum Kind: String, Codable {
         case shortcut
         case action
+        case openURL
     }
 
     init(from decoder: Decoder) throws {
@@ -91,6 +131,8 @@ extension KeyboardShortcutMappingTarget: Codable {
                 self = .shortcut(try container.decode(RecordedShortcut.self, forKey: .shortcut))
             case .action:
                 self = .action(try container.decode(KeyboardMappingAction.self, forKey: .action))
+            case .openURL:
+                self = .openURL(try container.decode(String.self, forKey: .url))
             }
             return
         }
@@ -107,6 +149,9 @@ extension KeyboardShortcutMappingTarget: Codable {
         case .action(let action):
             try container.encode(Kind.action, forKey: .kind)
             try container.encode(action, forKey: .action)
+        case .openURL(let url):
+            try container.encode(Kind.openURL, forKey: .kind)
+            try container.encode(url, forKey: .url)
         }
     }
 }
@@ -508,6 +553,7 @@ enum KeyboardShortcutRemapStep: Equatable {
     case suppress
     case emit(RecordedShortcut)
     case invoke(KeyboardMappingAction)
+    case openURL(String)
 }
 
 struct KeyboardShortcutRemapEngine {

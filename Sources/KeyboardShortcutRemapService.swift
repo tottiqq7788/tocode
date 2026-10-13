@@ -222,7 +222,7 @@ final class KeyboardShortcutRemapService: KeyboardShortcutRemapControlling {
         switch step {
         case .pass:
             return .pass
-        case .suppress, .emit, .invoke:
+        case .suppress, .emit, .invoke, .openURL:
             return .suppress
         }
     }
@@ -244,6 +244,16 @@ final class KeyboardShortcutRemapService: KeyboardShortcutRemapControlling {
         case .invoke(let action):
             scheduler.async { [weak self] in
                 self?.actionHandler?(action)
+            }
+        case .openURL(let raw):
+            scheduler.async { [weak self] in
+                guard let self else { return }
+                if !MappedURLLaunch.openStored(raw) {
+                    self.alerts.notify(
+                        title: "打开网址失败",
+                        body: "系统没有打开该网址。规则已保留，其他输入功能不受影响。"
+                    )
+                }
             }
         }
     }

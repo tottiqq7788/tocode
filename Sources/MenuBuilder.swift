@@ -9,6 +9,7 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
     private let opener: WorkspaceItemOpening
     private let resumeStore: DirectoryMenuResumeStore
     private let terminal: DirectoryTerminalLaunching
+    private let terminalWindows: DirectoryTerminalWindowStore
     private var menuDirectoryMap: [ObjectIdentifier: String] = [:]
     private var includeHidden = true
     private var mode: DirectoryMenuMode = .normal
@@ -34,11 +35,13 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
     init(
         opener: WorkspaceItemOpening = NSWorkspaceItemOpener(),
         resumeStore: DirectoryMenuResumeStore = DirectoryMenuResumeStore(),
-        terminal: DirectoryTerminalLaunching = SystemDirectoryTerminalLauncher()
+        terminal: DirectoryTerminalLaunching = SystemDirectoryTerminalLauncher(),
+        terminalWindows: DirectoryTerminalWindowStore = DirectoryTerminalWindowStore()
     ) {
         self.opener = opener
         self.resumeStore = resumeStore
         self.terminal = terminal
+        self.terminalWindows = terminalWindows
         super.init()
     }
 
@@ -305,7 +308,8 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
     @objc private func openTerminal(_ sender: NSMenuItem) {
         guard let directory = sender.representedObject as? String else { return }
         do {
-            try terminal.openTerminal(at: directory)
+            let binding = try terminal.openTerminal(at: directory)
+            terminalWindows.remember(binding)
         } catch {
             presentError(error, title: "打开终端失败")
         }

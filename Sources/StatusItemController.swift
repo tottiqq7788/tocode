@@ -6,7 +6,9 @@ import UserNotifications
 @MainActor
 final class StatusItemController: NSObject, NSMenuDelegate {
     private let statusItem: NSStatusItem
-    private let builder = MenuBuilder()
+    private let terminalWindows: DirectoryTerminalWindowStore
+    private let terminalFrontWindow: DirectoryTerminalFrontWindowReading
+    private let builder: MenuBuilder
     private let fs = FileSystemService()
     private let clipboard = ClipboardService()
     private let store = RootPathStore()
@@ -96,6 +98,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         self.screenBlackout = screenBlackout ?? ScreenBlackoutService(overlay: ScreenBlackoutOverlay())
         self.modelRelay = modelRelay
         self.commandExecutor = commandExecutor
+        let terminalWindows = DirectoryTerminalWindowStore()
+        self.terminalWindows = terminalWindows
+        self.terminalFrontWindow = SystemDirectoryTerminalFrontWindowReader()
+        self.builder = MenuBuilder(terminalWindows: terminalWindows)
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         super.init()
         actionDispatcher.execute = { [weak self] command in
@@ -150,7 +156,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
     }
 
-    /// 左键根目录解析：默认固定目录；访达/Codex 前台且对应跟随开启时临时接管。
+    /// 左键根目录解析：默认固定目录；访达/Codex 跟随开启时临时接管；已记录的终端窗口在前台时用其启动目录。
     private func resolveDirectoryRoot() -> String {
         let frontmost = DirectoryRootResolver.frontmost(
             fromBundleIdentifier: NSWorkspace.shared.frontmostApplication?.bundleIdentifier
@@ -168,12 +174,22 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         } else {
             codexRoot = nil
         }
+        let terminalRoot: String?
+        if frontmost == .terminal, let front = terminalFrontWindow.frontWindow() {
+            terminalRoot = DirectoryTerminalFollow.validatedPath(
+                terminalWindows.path(matching: front),
+                isDirectory: { fs.isExistingDirectory($0) }
+            )
+        } else {
+            terminalRoot = nil
+        }
         return DirectoryRootResolver.resolve(
             frontmost: frontmost,
             finderFollowEnabled: finderFollow.followEnabled,
             finderDirectory: finderDirectory,
             codexFollowEnabled: codexSync.syncEnabled,
             codexRoot: codexRoot,
+            terminalRoot: terminalRoot,
             manualRoot: store.resolveRoot(isDirectory: { fs.isExistingDirectory($0) })
         )
     }
@@ -369,6 +385,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                     symbolName = "checkmark.circle.fill"
                 case .action(let action):
                     symbolName = action.menuSymbolName
+                case .openURL:
+                    symbolName = "link"
                 }
                 item.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "已配置")
                 item.toolTip = "\(mapping.source.displayName) → \(mapping.target.displayText)"
@@ -1492,6 +1510,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             }
         case .invoke(let action):
             performMappedAction(action)
+        case .openURL(let raw):
+            if !MappedURLLaunch.openStored(raw) {
+                notifyMappedAction("定时器执行失败", "系统没有打开该网址。任务已保留。")
+            }
         case .pass, .suppress:
             break
         }

@@ -163,8 +163,9 @@ final class MockWorkspaceItemOpener: WorkspaceItemOpening {
 func testRootMenuTerminalItem() {
     final class RecordingDirectoryTerminal: DirectoryTerminalLaunching {
         var opened: [String] = []
-        func openTerminal(at directory: String) throws {
+        func openTerminal(at directory: String) throws -> DirectoryTerminalWindowBinding {
             opened.append(directory)
+            return DirectoryTerminalWindowBinding(windowID: 7, tty: "/dev/ttys007", path: directory)
         }
     }
 
@@ -192,9 +193,11 @@ func testRootMenuTerminalItem() {
     defer { defaults.removePersistentDomain(forName: suite) }
 
     let launcher = RecordingDirectoryTerminal()
+    let windows = DirectoryTerminalWindowStore()
     let builder = MenuBuilder(
         resumeStore: DirectoryMenuResumeStore(defaults: defaults),
-        terminal: launcher
+        terminal: launcher,
+        terminalWindows: windows
     )
     builder.makeRootConfigItem = {
         NSMenuItem(title: "配置", action: nil, keyEquivalent: "")
@@ -219,6 +222,10 @@ func testRootMenuTerminalItem() {
     }
     _ = terminal.target?.perform(terminal.action, with: terminal)
     expect(launcher.opened == [(root.path as NSString).standardizingPath], "终端打开当前展示根")
+    expect(
+        windows.path(matching: DirectoryTerminalFrontWindow(windowID: 7, ttys: ["/dev/ttys007"])) == launcher.opened.first,
+        "打开后记下窗口与启动目录"
+    )
     expect(defaults.string(forKey: DirectoryMenuResumeStore.key) == nil, "点击终端不写入历史")
 
     builder.setMode(.delete)
@@ -227,6 +234,49 @@ func testRootMenuTerminalItem() {
     builder.setMode(.access)
     expect(terminal.title == "终端", "访问模式仍显示终端")
     expect(menu.items.last?.title == "访问", "访问模式只改底部新增")
+}
+
+func testTerminalWindowFollow() {
+    let path = "/tmp/tocode terminal \(UUID().uuidString)"
+    expect(!DirectoryTerminalCommand.frontWindowScript.contains(path), "读取前台窗口的脚本不含目录")
+    expect(!DirectoryTerminalCommand.frontWindowArguments().contains(path), "读取前台窗口不接收目录参数")
+    expect(
+        DirectoryTerminalCommand.parseOpenedWindow("42\n/dev/ttys001\n", path: path)
+            == DirectoryTerminalWindowBinding(windowID: 42, tty: "/dev/ttys001", path: path),
+        "打开结果解析出窗口编号和 tty"
+    )
+    expect(DirectoryTerminalCommand.parseOpenedWindow("nope\n", path: path) == nil, "无法解析时不记窗口")
+    expect(
+        DirectoryTerminalCommand.parseFrontWindow("42\n/dev/ttys001\n/dev/ttys002\n")
+            == DirectoryTerminalFrontWindow(windowID: 42, ttys: ["/dev/ttys001", "/dev/ttys002"]),
+        "前台窗口解析出编号和全部标签"
+    )
+    expect(DirectoryTerminalCommand.parseFrontWindow("") == nil, "没有终端窗口时不跟随")
+    expect(DirectoryTerminalCommand.parseFrontWindow("42\nmissing value\n") == nil, "没有有效 tty 时不跟随")
+
+    let store = DirectoryTerminalWindowStore()
+    store.remember(DirectoryTerminalWindowBinding(windowID: 42, tty: "/dev/ttys001", path: path))
+    let front = DirectoryTerminalFrontWindow(windowID: 42, ttys: ["/dev/ttys002", "/dev/ttys001"])
+    expect(store.path(matching: front) == path, "原标签仍在时用启动目录")
+    expect(
+        store.path(matching: DirectoryTerminalFrontWindow(windowID: 9, ttys: ["/dev/ttys001"])) == nil,
+        "编号不符时不跟随"
+    )
+    expect(store.path(matching: front) == path, "其它窗口不删除已有记录")
+    expect(
+        store.path(matching: DirectoryTerminalFrontWindow(windowID: 42, ttys: ["/dev/ttys009"])) == nil,
+        "原标签消失时删除记录"
+    )
+    expect(store.path(matching: front) == nil, "原标签消失后不再跟随该窗口")
+
+    expect(
+        DirectoryTerminalFollow.validatedPath(path, isDirectory: { _ in true }) == path,
+        "目录仍在时保留启动路径"
+    )
+    expect(
+        DirectoryTerminalFollow.validatedPath(path, isDirectory: { _ in false }) == nil,
+        "目录失效时不用启动路径"
+    )
 }
 
 func testDirectoryMenuModeResolve() {
@@ -2280,6 +2330,7 @@ func testDirectoryRootResolverPriority() {
             finderDirectory: finder,
             codexFollowEnabled: true,
             codexRoot: codex,
+            terminalRoot: nil,
             manualRoot: manual
         ) == finder,
         "访达前台且访达跟随开时用访达目录"
@@ -2291,6 +2342,7 @@ func testDirectoryRootResolverPriority() {
             finderDirectory: nil,
             codexFollowEnabled: true,
             codexRoot: codex,
+            terminalRoot: nil,
             manualRoot: manual
         ) == manual,
         "访达前台但无单选时用固定目录"
@@ -2302,6 +2354,7 @@ func testDirectoryRootResolverPriority() {
             finderDirectory: finder,
             codexFollowEnabled: true,
             codexRoot: codex,
+            terminalRoot: nil,
             manualRoot: manual
         ) == codex,
         "Codex 前台且 codex跟随开时用项目根"
@@ -2313,6 +2366,7 @@ func testDirectoryRootResolverPriority() {
             finderDirectory: nil,
             codexFollowEnabled: true,
             codexRoot: nil,
+            terminalRoot: nil,
             manualRoot: manual
         ) == manual,
         "Codex 前台但无项目时用固定目录"
@@ -2324,9 +2378,58 @@ func testDirectoryRootResolverPriority() {
             finderDirectory: finder,
             codexFollowEnabled: true,
             codexRoot: codex,
+            terminalRoot: nil,
             manualRoot: manual
         ) == manual,
         "其它前台即使两跟随皆开仍用固定目录"
+    )
+    expect(
+        DirectoryRootResolver.resolve(
+            frontmost: .terminal,
+            finderFollowEnabled: true,
+            finderDirectory: finder,
+            codexFollowEnabled: true,
+            codexRoot: codex,
+            terminalRoot: "/terminal",
+            manualRoot: manual
+        ) == "/terminal",
+        "终端前台且窗口对上时用启动目录"
+    )
+    expect(
+        DirectoryRootResolver.resolve(
+            frontmost: .terminal,
+            finderFollowEnabled: true,
+            finderDirectory: finder,
+            codexFollowEnabled: true,
+            codexRoot: codex,
+            terminalRoot: nil,
+            manualRoot: manual
+        ) == manual,
+        "终端前台但对不上记录时用固定目录"
+    )
+    expect(
+        DirectoryRootResolver.resolve(
+            frontmost: .finder,
+            finderFollowEnabled: true,
+            finderDirectory: finder,
+            codexFollowEnabled: false,
+            codexRoot: nil,
+            terminalRoot: "/terminal",
+            manualRoot: manual
+        ) == finder,
+        "访达前台不使用终端记录"
+    )
+    expect(
+        DirectoryRootResolver.resolve(
+            frontmost: .other,
+            finderFollowEnabled: false,
+            finderDirectory: nil,
+            codexFollowEnabled: false,
+            codexRoot: nil,
+            terminalRoot: "/terminal",
+            manualRoot: manual
+        ) == manual,
+        "终端窗口不在前台时不用其启动目录"
     )
     expect(
         DirectoryRootResolver.frontmost(fromBundleIdentifier: "com.apple.finder") == .finder,
@@ -2339,6 +2442,10 @@ func testDirectoryRootResolverPriority() {
     expect(
         DirectoryRootResolver.frontmost(fromBundleIdentifier: "com.apple.Safari") == .other,
         "其它应用为 other"
+    )
+    expect(
+        DirectoryRootResolver.frontmost(fromBundleIdentifier: "com.apple.Terminal") == .terminal,
+        "系统终端 bundle 识别"
     )
     expect(KeyboardMappingAction.initRootFromFinder.title == "访达跟随", "映射文案为访达跟随")
     expect(KeyboardMappingAction.toggleCodexSync.title == "codex跟随", "映射文案为 codex跟随")
@@ -2602,6 +2709,75 @@ func testKeyboardMappingTargetEditorRetainsBlackout() {
     editor.detach()
     desktop.detach()
     trackpad.detach()
+}
+
+@MainActor
+func testMappedOpenURL() {
+    expect(MappedURL.normalized("  https://example.com/a  ") == "https://example.com/a", "带协议网址去掉空白")
+    expect(MappedURL.normalized("file:///tmp") == "file:///tmp", "file 协议可保存")
+    expect(MappedURL.normalized("mailto:a@b.test") == "mailto:a@b.test", "mailto 可保存")
+    expect(MappedURL.normalized("custom-app://open") == "custom-app://open", "其它协议可保存")
+    expect(MappedURL.normalized("example.com") == nil, "没有协议不能保存")
+    expect(MappedURL.normalized("   ") == nil, "纯空白不能保存")
+    expect(MappedURL.normalized("") == nil, "空文本不能保存")
+    expect(KeyboardMappingAction.allCases.count == 18, "打开网址不进入无参数功能表")
+
+    let raw = "https://example.com"
+    let target = KeyboardShortcutMappingTarget.openURL(raw)
+    expect(target.displayText == "打开网址 https://example.com", "提示含打开网址和地址")
+    expect(target.resolvedShortcut == nil, "打开网址没有组合键")
+    expect(target.remapStep() == .openURL(raw), "打开网址产生打开步骤")
+
+    let source = RecordedShortcut(keyCode: 1, modifiers: [.command], keyLabel: "S")
+    let mapping = KeyboardShortcutMapping(
+        id: UUID(),
+        name: "打开",
+        source: source,
+        target: target
+    )
+    let data = try! JSONEncoder().encode(mapping)
+    let decoded = try! JSONDecoder().decode(KeyboardShortcutMapping.self, from: data)
+    expect(decoded.target == target, "打开网址可编解码")
+
+    let legacyShortcut = RecordedShortcut(keyCode: 11, modifiers: [.control], keyLabel: "B")
+    let legacyData = try! JSONEncoder().encode(legacyShortcut)
+    let legacyTarget = try! JSONDecoder().decode(KeyboardShortcutMappingTarget.self, from: legacyData)
+    expect(legacyTarget == .shortcut(legacyShortcut), "旧快捷键格式仍可读为快捷键目标")
+
+    var engine = KeyboardShortcutRemapEngine(mappings: [mapping])
+    let down = KeyboardShortcutEventSnapshot(
+        keyCode: source.keyCode,
+        modifiers: source.modifiers,
+        isKeyDown: true,
+        isAutoRepeat: false,
+        isSynthesized: false
+    )
+    expect(engine.process(down) == .openURL(raw), "键盘命中产生打开步骤")
+    let repeated = KeyboardShortcutEventSnapshot(
+        keyCode: source.keyCode,
+        modifiers: source.modifiers,
+        isKeyDown: true,
+        isAutoRepeat: true,
+        isSynthesized: false
+    )
+    expect(engine.process(repeated) == .suppress, "打开网址的自动重复只吞掉不重复打开")
+
+    let editor = KeyboardMappingTargetEditor(target: .openURL(raw))
+    expect(editor.target == .openURL(raw), "编辑已有打开网址时回填该地址")
+    editor.detach()
+
+    var opened: [URL] = []
+    let previous = MappedURLLaunch.open
+    MappedURLLaunch.open = { url in
+        opened.append(url)
+        return true
+    }
+    defer { MappedURLLaunch.open = previous }
+    expect(MappedURLLaunch.openStored(raw), "有效网址交给系统打开")
+    expect(opened == [URL(string: raw)!], "打开的是保存的网址")
+    MappedURLLaunch.open = { _ in false }
+    expect(!MappedURLLaunch.openStored(raw), "系统拒绝打开时返回失败")
+    expect(!MappedURLLaunch.openStored("example.com"), "无协议文本不会尝试打开")
 }
 
 func testKeyboardMappingActionDispatchAndYield() {
@@ -5980,6 +6156,7 @@ struct TestRunnerMain {
         testFileSystemService()
         testFileCreationAndTrash()
         await testRootMenuTerminalItem()
+        testTerminalWindowFollow()
         testDirectoryMenuModeResolve()
         testDirectoryMenuAccessOpener()
         testTocodePreferencesMigration()
@@ -6021,6 +6198,7 @@ struct TestRunnerMain {
         await testTrackpadShortcutActionBindingsAndDispatch()
         testKeyboardShortcutMappingStoreAndEngine()
         testKeyboardShortcutMappingActionTargets()
+        await testMappedOpenURL()
         await testKeyboardMappingTargetEditorRetainsBlackout()
         testKeyboardMappingActionDispatchAndYield()
         testKeyboardShortcutRemapServiceLifecycleAndFaults()

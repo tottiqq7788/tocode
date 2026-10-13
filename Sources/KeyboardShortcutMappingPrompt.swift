@@ -119,16 +119,27 @@ final class KeyboardMappingTargetEditor: NSObject {
     private let shortcutPage = NSView()
     private let actionPage = NSView()
     private let actionPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let urlField = NSTextField(string: "")
+    private let urlObserver = MappedURLFieldObserver()
     private var selectedAction: KeyboardMappingAction
+    private var openURLSelected = false
+    private var openURLItem: NSMenuItem?
     private var actionItems: [KeyboardMappingAction: NSMenuItem] = [:]
     private let actionTriggerPhrase: String
+    private static let openURLRepresented = "tocode.openURL"
 
     init(
         target: KeyboardShortcutMappingTarget?,
         actionTriggerPhrase: String = "命中源快捷键后"
     ) {
         self.actionTriggerPhrase = actionTriggerPhrase
-        if case .action(let action)? = target {
+        if case .openURL(let raw)? = target {
+            recorder = ShortcutRecorderView(shortcut: nil)
+            selectedAction = .blackout
+            openURLSelected = true
+            urlField.stringValue = raw
+            segment.selectedSegment = Self.actionSegment
+        } else if case .action(let action)? = target {
             recorder = ShortcutRecorderView(shortcut: nil)
             selectedAction = action
             segment.selectedSegment = Self.actionSegment
@@ -162,8 +173,13 @@ final class KeyboardMappingTargetEditor: NSObject {
         populateActionPopup()
         actionPopup.target = self
         actionPopup.action = #selector(actionPopupChanged(_:))
-        actionPopup.toolTip = "按右键菜单分组选择一次性动作或开关切换"
+        actionPopup.toolTip = "按右键菜单分组选择一次性动作、开关切换或打开网址"
+        urlField.placeholderString = "https:// 或其它带协议的网址"
+        urlField.toolTip = "去掉空白后须包含协议，例如 https://、file:// 或 mailto:"
+        urlField.delegate = urlObserver
+        urlObserver.onChange = { [weak self] in self?.onChange?() }
         actionPage.addSubview(actionPopup)
+        actionPage.addSubview(urlField)
 
         let container = NSView()
         container.addSubview(shortcutPage)
@@ -173,7 +189,7 @@ final class KeyboardMappingTargetEditor: NSObject {
             subview.translatesAutoresizingMaskIntoConstraints = false
             stack.addArrangedSubview(subview)
         }
-        for subview in [shortcutPage, actionPage, recorder, actionPopup] {
+        for subview in [shortcutPage, actionPage, recorder, actionPopup, urlField] {
             subview.translatesAutoresizingMaskIntoConstraints = false
         }
 
@@ -196,7 +212,11 @@ final class KeyboardMappingTargetEditor: NSObject {
             actionPopup.leadingAnchor.constraint(equalTo: actionPage.leadingAnchor),
             actionPopup.trailingAnchor.constraint(equalTo: actionPage.trailingAnchor),
             actionPopup.topAnchor.constraint(equalTo: actionPage.topAnchor),
-            actionPopup.heightAnchor.constraint(equalToConstant: 28)
+            actionPopup.heightAnchor.constraint(equalToConstant: 28),
+            urlField.leadingAnchor.constraint(equalTo: actionPage.leadingAnchor),
+            urlField.trailingAnchor.constraint(equalTo: actionPage.trailingAnchor),
+            urlField.topAnchor.constraint(equalTo: actionPopup.bottomAnchor, constant: 6),
+            urlField.heightAnchor.constraint(equalToConstant: 24)
         ])
 
         updatePages()
@@ -205,6 +225,10 @@ final class KeyboardMappingTargetEditor: NSObject {
     /// 当前分段下的目标；快捷键页未录入时返回 nil，用于禁用保存。
     var target: KeyboardShortcutMappingTarget? {
         if segment.selectedSegment == Self.actionSegment {
+            if openURLSelected {
+                guard let url = MappedURL.normalized(urlField.stringValue) else { return nil }
+                return .openURL(url)
+            }
             if let rawValue = actionPopup.selectedItem?.representedObject as? String,
                 let action = KeyboardMappingAction(rawValue: rawValue)
             {
@@ -219,6 +243,8 @@ final class KeyboardMappingTargetEditor: NSObject {
     func detach() {
         onChange = nil
         recorder.onChange = nil
+        urlObserver.onChange = nil
+        urlField.delegate = nil
         segment.target = nil
         actionPopup.target = nil
     }
@@ -229,13 +255,17 @@ final class KeyboardMappingTargetEditor: NSObject {
     }
 
     @objc private func actionPopupChanged(_ sender: NSPopUpButton) {
-        guard
-            let rawValue = sender.selectedItem?.representedObject as? String,
-            let action = KeyboardMappingAction(rawValue: rawValue)
-        else {
+        guard let rawValue = sender.selectedItem?.representedObject as? String else { return }
+        if rawValue == Self.openURLRepresented {
+            openURLSelected = true
+            updateURLField()
+            onChange?()
             return
         }
+        guard let action = KeyboardMappingAction(rawValue: rawValue) else { return }
+        openURLSelected = false
         selectedAction = action
+        updateURLField()
         onChange?()
     }
 
@@ -263,9 +293,20 @@ final class KeyboardMappingTargetEditor: NSObject {
                 menu.addItem(item)
                 actionItems[action] = item
             }
+            if group == .tools {
+                let item = NSMenuItem(title: "打开网址", action: nil, keyEquivalent: "")
+                item.representedObject = Self.openURLRepresented
+                item.indentationLevel = 1
+                item.image = NSImage(systemSymbolName: "link", accessibilityDescription: "打开网址")
+                item.toolTip = "\(actionTriggerPhrase)用系统默认方式打开所填网址"
+                menu.addItem(item)
+                openURLItem = item
+            }
         }
         actionPopup.menu = menu
-        if let item = actionItems[selectedAction] {
+        if openURLSelected, let openURLItem {
+            actionPopup.select(openURLItem)
+        } else if let item = actionItems[selectedAction] {
             actionPopup.select(item)
         }
     }
@@ -274,10 +315,28 @@ final class KeyboardMappingTargetEditor: NSObject {
         let isAction = segment.selectedSegment == Self.actionSegment
         shortcutPage.isHidden = isAction
         actionPage.isHidden = !isAction
+        updateURLField()
         // 隐藏页不得继续持有键盘焦点，否则按键会写进看不见的录入框。
         if isAction, recorder.window?.firstResponder === recorder {
             recorder.window?.makeFirstResponder(nil)
         }
+        if !openURLSelected || !isAction, urlField.window?.firstResponder === urlField.currentEditor() {
+            urlField.window?.makeFirstResponder(nil)
+        }
+    }
+
+    private func updateURLField() {
+        let visible = segment.selectedSegment == Self.actionSegment && openURLSelected
+        urlField.isHidden = !visible
+    }
+}
+
+@MainActor
+private final class MappedURLFieldObserver: NSObject, NSTextFieldDelegate {
+    var onChange: (() -> Void)?
+
+    func controlTextDidChange(_ obj: Notification) {
+        onChange?()
     }
 }
 
