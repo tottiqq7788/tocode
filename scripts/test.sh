@@ -17,6 +17,8 @@ swiftc Tests/TestRunner.swift \
   Sources/CodexSyncSettingsStore.swift \
   Sources/FinderFollowSettingsStore.swift \
   Sources/TerminalFollowSettingsStore.swift \
+  Sources/HermesFollowSettingsStore.swift \
+  Sources/HermesProjectService.swift \
   Sources/DirectoryRootResolver.swift \
   Sources/ExtendedSettingsStore.swift \
   Sources/CodexModelSwitchService.swift \

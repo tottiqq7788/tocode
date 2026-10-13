@@ -279,6 +279,84 @@ func testTerminalWindowFollow() {
     )
 }
 
+func testHermesProjectFollow() {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("tocode-hermes-\(UUID().uuidString)", isDirectory: true)
+    let primary = root.appendingPathComponent("primary", isDirectory: true)
+    let folder = root.appendingPathComponent("folder", isDirectory: true)
+    try! FileManager.default.createDirectory(at: primary, withIntermediateDirectories: true)
+    try! FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let database = root.appendingPathComponent("projects.db").path
+    let missingPath = root.appendingPathComponent("gone").path
+
+    func sqlString(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "''") + "'"
+    }
+    func write(_ sql: String) -> Bool {
+        var pointer: OpaquePointer?
+        guard sqlite3_open(database, &pointer) == SQLITE_OK, let pointer else { return false }
+        defer { sqlite3_close(pointer) }
+        return sqlite3_exec(pointer, sql, nil, nil, nil) == SQLITE_OK
+    }
+
+    expect(
+        write("""
+        CREATE TABLE projects (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            primary_path TEXT,
+            archived INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE project_folders (
+            project_id TEXT NOT NULL,
+            path TEXT NOT NULL,
+            is_primary INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE project_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        );
+        """),
+        "可创建 Hermes 项目夹具"
+    )
+    let service = HermesProjectService(databasePath: database)
+    expect(service.resolveProject() == nil, "没有当前项目时不跟随")
+    expect(HermesProjectService(databasePath: root.appendingPathComponent("absent.db").path).resolveProject() == nil, "项目库缺失时不跟随")
+
+    expect(
+        write("""
+        INSERT INTO projects (id, name, primary_path, archived)
+        VALUES ('p_active', 'family', \(sqlString(primary.path)), 0);
+        INSERT INTO project_meta (key, value) VALUES ('active_id', 'p_active');
+        """),
+        "写入未归档当前项目"
+    )
+    expect(
+        service.resolveProject() == HermesProject(name: "family", rootPath: (primary.path as NSString).standardizingPath),
+        "当前项目使用主目录"
+    )
+
+    expect(write("UPDATE projects SET archived = 1 WHERE id = 'p_active';"), "归档当前项目")
+    expect(service.resolveProject() == nil, "已归档项目不跟随")
+
+    expect(
+        write("""
+        UPDATE projects SET archived = 0, primary_path = '' WHERE id = 'p_active';
+        INSERT INTO project_folders (project_id, path, is_primary)
+        VALUES ('p_active', \(sqlString(folder.path)), 1);
+        """),
+        "主目录为空时准备 is_primary 文件夹"
+    )
+    expect(
+        service.resolveProject()?.rootPath == (folder.path as NSString).standardizingPath,
+        "主目录为空时使用 is_primary 文件夹"
+    )
+
+    expect(write("UPDATE projects SET primary_path = \(sqlString(missingPath)) WHERE id = 'p_active';"), "把主目录改成不存在的路径")
+    expect(service.resolveProject() == nil, "主目录不存在时不跟随")
+}
+
 func testDirectoryMenuModeResolve() {
     expect(DirectoryMenuMode.resolve(option: false, command: false) == .normal, "无修饰键是普通模式")
     expect(DirectoryMenuMode.resolve(option: true, command: false) == .delete, "Option 是删除模式")
@@ -485,6 +563,7 @@ func testTocodePortableSettingsTransfer() {
     other.set(true, forKey: ExtendedSettingsStore.akEnabledKey)
     other.set(true, forKey: CodexSyncSettingsStore.syncEnabledKey)
     other.set(true, forKey: TerminalFollowSettingsStore.followEnabledKey)
+    other.set(true, forKey: HermesFollowSettingsStore.followEnabledKey)
     KeyboardShortcutMappingStore(defaults: other).replaceAll([
         KeyboardShortcutMapping(
             id: UUID(),
@@ -512,6 +591,7 @@ func testTocodePortableSettingsTransfer() {
     expect(other.bool(forKey: ExtendedSettingsStore.akEnabledKey), "导入不改 AK 开关")
     expect(other.bool(forKey: CodexSyncSettingsStore.syncEnabledKey), "导入不改 codex跟随")
     expect(other.bool(forKey: TerminalFollowSettingsStore.followEnabledKey), "导入不改终端跟随")
+    expect(other.bool(forKey: HermesFollowSettingsStore.followEnabledKey), "导入不改 hermes跟随")
 }
 
 func testUserManualPages() {
@@ -530,6 +610,7 @@ func testUserManualPages() {
     expect(joined.contains("始终从当前解析根的第一层开始"), "说明书写明根菜单不整页跳转")
     expect(joined.contains("分隔线 →「历史」→「配置」→「终端」→「新增」"), "说明书写明根菜单底部结构")
     expect(joined.contains("终端跟随（默认关）"), "说明书覆盖终端跟随开关")
+    expect(joined.contains("hermes跟随（默认关）"), "说明书覆盖 hermes跟随开关")
     expect(joined.contains("只悬停展开不会更新"), "说明书写明悬停不写入历史")
     expect(joined.contains("限制程序坞弹出"), "说明书覆盖限制程序坞弹出")
     expect(joined.contains("自动隐藏和显示程序坞"), "说明书写明需系统自动隐藏")
@@ -2334,6 +2415,8 @@ func testDirectoryRootResolverPriority() {
             codexRoot: codex,
             terminalFollowEnabled: true,
             terminalRoot: nil,
+            hermesFollowEnabled: false,
+            hermesRoot: nil,
             manualRoot: manual
         ) == finder,
         "访达前台且访达跟随开时用访达目录"
@@ -2347,6 +2430,8 @@ func testDirectoryRootResolverPriority() {
             codexRoot: codex,
             terminalFollowEnabled: true,
             terminalRoot: nil,
+            hermesFollowEnabled: false,
+            hermesRoot: nil,
             manualRoot: manual
         ) == manual,
         "访达前台但无单选时用固定目录"
@@ -2360,6 +2445,8 @@ func testDirectoryRootResolverPriority() {
             codexRoot: codex,
             terminalFollowEnabled: true,
             terminalRoot: nil,
+            hermesFollowEnabled: false,
+            hermesRoot: nil,
             manualRoot: manual
         ) == codex,
         "Codex 前台且 codex跟随开时用项目根"
@@ -2373,6 +2460,8 @@ func testDirectoryRootResolverPriority() {
             codexRoot: nil,
             terminalFollowEnabled: true,
             terminalRoot: nil,
+            hermesFollowEnabled: false,
+            hermesRoot: nil,
             manualRoot: manual
         ) == manual,
         "Codex 前台但无项目时用固定目录"
@@ -2386,6 +2475,8 @@ func testDirectoryRootResolverPriority() {
             codexRoot: codex,
             terminalFollowEnabled: true,
             terminalRoot: nil,
+            hermesFollowEnabled: false,
+            hermesRoot: nil,
             manualRoot: manual
         ) == manual,
         "其它前台即使两跟随皆开仍用固定目录"
@@ -2399,6 +2490,8 @@ func testDirectoryRootResolverPriority() {
             codexRoot: codex,
             terminalFollowEnabled: true,
             terminalRoot: "/terminal",
+            hermesFollowEnabled: false,
+            hermesRoot: nil,
             manualRoot: manual
         ) == "/terminal",
         "终端前台且窗口对上时用启动目录"
@@ -2412,6 +2505,8 @@ func testDirectoryRootResolverPriority() {
             codexRoot: codex,
             terminalFollowEnabled: false,
             terminalRoot: "/terminal",
+            hermesFollowEnabled: false,
+            hermesRoot: nil,
             manualRoot: manual
         ) == manual,
         "终端跟随关闭时即使窗口对上仍用固定目录"
@@ -2425,6 +2520,8 @@ func testDirectoryRootResolverPriority() {
             codexRoot: codex,
             terminalFollowEnabled: true,
             terminalRoot: nil,
+            hermesFollowEnabled: false,
+            hermesRoot: nil,
             manualRoot: manual
         ) == manual,
         "终端前台但对不上记录时用固定目录"
@@ -2438,6 +2535,8 @@ func testDirectoryRootResolverPriority() {
             codexRoot: nil,
             terminalFollowEnabled: true,
             terminalRoot: "/terminal",
+            hermesFollowEnabled: false,
+            hermesRoot: nil,
             manualRoot: manual
         ) == finder,
         "访达前台不使用终端记录"
@@ -2451,9 +2550,71 @@ func testDirectoryRootResolverPriority() {
             codexRoot: nil,
             terminalFollowEnabled: true,
             terminalRoot: "/terminal",
+            hermesFollowEnabled: false,
+            hermesRoot: nil,
             manualRoot: manual
         ) == manual,
         "终端窗口不在前台时不用其启动目录"
+    )
+    expect(
+        DirectoryRootResolver.resolve(
+            frontmost: .hermes,
+            finderFollowEnabled: true,
+            finderDirectory: finder,
+            codexFollowEnabled: true,
+            codexRoot: codex,
+            terminalFollowEnabled: true,
+            terminalRoot: "/terminal",
+            hermesFollowEnabled: true,
+            hermesRoot: "/hermes",
+            manualRoot: manual
+        ) == "/hermes",
+        "Hermes 前台且 hermes跟随开时用项目主目录"
+    )
+    expect(
+        DirectoryRootResolver.resolve(
+            frontmost: .hermes,
+            finderFollowEnabled: false,
+            finderDirectory: nil,
+            codexFollowEnabled: false,
+            codexRoot: nil,
+            terminalFollowEnabled: false,
+            terminalRoot: nil,
+            hermesFollowEnabled: false,
+            hermesRoot: "/hermes",
+            manualRoot: manual
+        ) == manual,
+        "hermes跟随关闭时即使前台是 Hermes 仍用固定目录"
+    )
+    expect(
+        DirectoryRootResolver.resolve(
+            frontmost: .hermes,
+            finderFollowEnabled: false,
+            finderDirectory: nil,
+            codexFollowEnabled: false,
+            codexRoot: nil,
+            terminalFollowEnabled: false,
+            terminalRoot: nil,
+            hermesFollowEnabled: true,
+            hermesRoot: nil,
+            manualRoot: manual
+        ) == manual,
+        "Hermes 前台但没有有效项目时用固定目录"
+    )
+    expect(
+        DirectoryRootResolver.resolve(
+            frontmost: .codex,
+            finderFollowEnabled: false,
+            finderDirectory: nil,
+            codexFollowEnabled: true,
+            codexRoot: codex,
+            terminalFollowEnabled: false,
+            terminalRoot: nil,
+            hermesFollowEnabled: true,
+            hermesRoot: "/hermes",
+            manualRoot: manual
+        ) == codex,
+        "Codex 前台不使用 Hermes 项目"
     )
     expect(
         DirectoryRootResolver.frontmost(fromBundleIdentifier: "com.apple.finder") == .finder,
@@ -2462,6 +2623,14 @@ func testDirectoryRootResolverPriority() {
     expect(
         DirectoryRootResolver.frontmost(fromBundleIdentifier: "com.openai.codex") == .codex,
         "Codex bundle 识别"
+    )
+    expect(
+        DirectoryRootResolver.frontmost(fromBundleIdentifier: "com.nousresearch.hermes") == .hermes,
+        "Hermes 桌面应用 bundle 识别"
+    )
+    expect(
+        DirectoryRootResolver.frontmost(fromBundleIdentifier: "com.nousresearch.hermes.setup") == .other,
+        "Hermes 安装器不算跟随前台"
     )
     expect(
         DirectoryRootResolver.frontmost(fromBundleIdentifier: "com.apple.Safari") == .other,
@@ -2478,6 +2647,13 @@ func testDirectoryRootResolverPriority() {
     expect(!terminalFollow.followEnabled, "终端跟随缺省关闭")
     terminalFollow.followEnabled = true
     expect(followDefaults.bool(forKey: TerminalFollowSettingsStore.followEnabledKey), "终端跟随写入偏好")
+    let hermesSuite = "tocode-hermes-follow-\(UUID().uuidString)"
+    let hermesDefaults = UserDefaults(suiteName: hermesSuite)!
+    defer { hermesDefaults.removePersistentDomain(forName: hermesSuite) }
+    let hermesFollow = HermesFollowSettingsStore(defaults: hermesDefaults)
+    expect(!hermesFollow.followEnabled, "hermes跟随缺省关闭")
+    hermesFollow.followEnabled = true
+    expect(hermesDefaults.bool(forKey: HermesFollowSettingsStore.followEnabledKey), "hermes跟随写入偏好")
     expect(KeyboardMappingAction.allCases.count == 18, "终端跟随不进入映射功能表")
     expect(KeyboardMappingAction.initRootFromFinder.title == "访达跟随", "映射文案为访达跟随")
     expect(KeyboardMappingAction.toggleCodexSync.title == "codex跟随", "映射文案为 codex跟随")
@@ -6189,6 +6365,7 @@ struct TestRunnerMain {
         testFileCreationAndTrash()
         await testRootMenuTerminalItem()
         testTerminalWindowFollow()
+        testHermesProjectFollow()
         testDirectoryMenuModeResolve()
         testDirectoryMenuAccessOpener()
         testTocodePreferencesMigration()

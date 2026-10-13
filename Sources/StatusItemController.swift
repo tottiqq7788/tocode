@@ -28,6 +28,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private let codexSync: CodexSyncSettingsStore
     private let finderFollow: FinderFollowSettingsStore
     private let terminalFollow: TerminalFollowSettingsStore
+    private let hermesFollow: HermesFollowSettingsStore
+    private let hermesProjects: HermesProjectService
     private let codexModels: CodexModelSwitching
     private let codexRestarter: CodexApplicationRestarting
     private let extendedSettings: ExtendedSettingsStore
@@ -68,6 +70,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         codexSync: CodexSyncSettingsStore = CodexSyncSettingsStore(),
         finderFollow: FinderFollowSettingsStore = FinderFollowSettingsStore(),
         terminalFollow: TerminalFollowSettingsStore = TerminalFollowSettingsStore(),
+        hermesFollow: HermesFollowSettingsStore = HermesFollowSettingsStore(),
+        hermesProjects: HermesProjectService = HermesProjectService(),
         codexModels: CodexModelSwitching = CodexModelSwitchService(),
         codexRestarter: CodexApplicationRestarting = CodexApplicationRestarter(),
         extendedSettings: ExtendedSettingsStore = ExtendedSettingsStore(),
@@ -89,6 +93,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         self.codexSync = codexSync
         self.finderFollow = finderFollow
         self.terminalFollow = terminalFollow
+        self.hermesFollow = hermesFollow
+        self.hermesProjects = hermesProjects
         self.codexModels = codexModels
         self.codexRestarter = codexRestarter
         self.extendedSettings = extendedSettings
@@ -153,7 +159,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
     }
 
-    /// 左键根目录解析：默认固定目录；访达/Codex/终端跟随开启时才临时接管。
+    /// 左键根目录解析：默认固定目录；访达/Codex/Hermes/终端跟随开启时才临时接管。
     private func resolveDirectoryRoot() -> String {
         let frontmost = DirectoryRootResolver.frontmost(
             fromBundleIdentifier: NSWorkspace.shared.frontmostApplication?.bundleIdentifier
@@ -170,6 +176,12 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             codexRoot = codex.resolveProject()?.rootPath
         } else {
             codexRoot = nil
+        }
+        let hermesRoot: String?
+        if hermesFollow.followEnabled, frontmost == .hermes {
+            hermesRoot = hermesProjects.resolveProject()?.rootPath
+        } else {
+            hermesRoot = nil
         }
         let terminalRoot: String?
         if terminalFollow.followEnabled, frontmost == .terminal, let front = terminalFrontWindow.frontWindow() {
@@ -188,6 +200,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             codexRoot: codexRoot,
             terminalFollowEnabled: terminalFollow.followEnabled,
             terminalRoot: terminalRoot,
+            hermesFollowEnabled: hermesFollow.followEnabled,
+            hermesRoot: hermesRoot,
             manualRoot: store.resolveRoot(isDirectory: { fs.isExistingDirectory($0) })
         )
     }
@@ -280,6 +294,12 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             title: "codex跟随",
             enabled: codexSync.syncEnabled,
             action: #selector(toggleCodexProjectSync(_:))
+        )
+        addShortcutToggle(
+            to: submenu,
+            title: "hermes跟随",
+            enabled: hermesFollow.followEnabled,
+            action: #selector(toggleHermesFollow(_:))
         )
 
         item.submenu = submenu
@@ -653,6 +673,12 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     @objc private func resetRoot() {
         store.reset()
         notifyRootChanged(RootPathStore.defaultRoot)
+    }
+
+    /// 切换「hermes跟随」开关并更新勾选圆。
+    @objc private func toggleHermesFollow(_ sender: NSMenuItem) {
+        hermesFollow.followEnabled = !hermesFollow.followEnabled
+        ShortcutMenuAppearance.apply(to: sender, enabled: hermesFollow.followEnabled)
     }
 
     /// 切换「codex跟随」开关并更新勾选圆。

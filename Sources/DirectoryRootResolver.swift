@@ -4,6 +4,7 @@ import Foundation
 enum DirectoryRootFollowFrontmost: Equatable {
     case finder
     case codex
+    case hermes
     case terminal
     case other
 }
@@ -17,6 +18,8 @@ enum DirectoryRootResolver {
         codexRoot: String?,
         terminalFollowEnabled: Bool,
         terminalRoot: String?,
+        hermesFollowEnabled: Bool,
+        hermesRoot: String?,
         manualRoot: String
     ) -> String {
         switch frontmost {
@@ -27,6 +30,10 @@ enum DirectoryRootResolver {
         case .codex:
             if codexFollowEnabled, let codexRoot {
                 return codexRoot
+            }
+        case .hermes:
+            if hermesFollowEnabled, let hermesRoot {
+                return hermesRoot
             }
         case .terminal:
             if terminalFollowEnabled, let terminalRoot {
@@ -44,6 +51,8 @@ enum DirectoryRootResolver {
             return .finder
         case "com.openai.codex":
             return .codex
+        case "com.nousresearch.hermes":
+            return .hermes
         case "com.apple.Terminal":
             return .terminal
         default:
