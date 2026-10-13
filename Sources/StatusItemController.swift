@@ -27,6 +27,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private let codex: CodexProjectService
     private let codexSync: CodexSyncSettingsStore
     private let finderFollow: FinderFollowSettingsStore
+    private let terminalFollow: TerminalFollowSettingsStore
     private let codexModels: CodexModelSwitching
     private let codexRestarter: CodexApplicationRestarting
     private let extendedSettings: ExtendedSettingsStore
@@ -66,6 +67,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         codex: CodexProjectService = CodexProjectService(),
         codexSync: CodexSyncSettingsStore = CodexSyncSettingsStore(),
         finderFollow: FinderFollowSettingsStore = FinderFollowSettingsStore(),
+        terminalFollow: TerminalFollowSettingsStore = TerminalFollowSettingsStore(),
         codexModels: CodexModelSwitching = CodexModelSwitchService(),
         codexRestarter: CodexApplicationRestarting = CodexApplicationRestarter(),
         extendedSettings: ExtendedSettingsStore = ExtendedSettingsStore(),
@@ -86,6 +88,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         self.codex = codex
         self.codexSync = codexSync
         self.finderFollow = finderFollow
+        self.terminalFollow = terminalFollow
         self.codexModels = codexModels
         self.codexRestarter = codexRestarter
         self.extendedSettings = extendedSettings
@@ -150,7 +153,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
     }
 
-    /// 左键根目录解析：默认固定目录；访达/Codex 跟随开启时临时接管；已记录的终端窗口在前台时用其启动目录。
+    /// 左键根目录解析：默认固定目录；访达/Codex/终端跟随开启时才临时接管。
     private func resolveDirectoryRoot() -> String {
         let frontmost = DirectoryRootResolver.frontmost(
             fromBundleIdentifier: NSWorkspace.shared.frontmostApplication?.bundleIdentifier
@@ -169,7 +172,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             codexRoot = nil
         }
         let terminalRoot: String?
-        if frontmost == .terminal, let front = terminalFrontWindow.frontWindow() {
+        if terminalFollow.followEnabled, frontmost == .terminal, let front = terminalFrontWindow.frontWindow() {
             terminalRoot = DirectoryTerminalFollow.validatedPath(
                 terminalWindows.path(matching: front),
                 isDirectory: { fs.isExistingDirectory($0) }
@@ -183,6 +186,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             finderDirectory: finderDirectory,
             codexFollowEnabled: codexSync.syncEnabled,
             codexRoot: codexRoot,
+            terminalFollowEnabled: terminalFollow.followEnabled,
             terminalRoot: terminalRoot,
             manualRoot: store.resolveRoot(isDirectory: { fs.isExistingDirectory($0) })
         )
@@ -264,6 +268,12 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             title: "访达跟随",
             enabled: finderFollow.followEnabled,
             action: #selector(toggleFinderFollow(_:))
+        )
+        addShortcutToggle(
+            to: submenu,
+            title: "终端跟随",
+            enabled: terminalFollow.followEnabled,
+            action: #selector(toggleTerminalFollow(_:))
         )
         addShortcutToggle(
             to: submenu,
@@ -655,6 +665,12 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     @objc private func toggleFinderFollow(_ sender: NSMenuItem) {
         finderFollow.followEnabled = !finderFollow.followEnabled
         ShortcutMenuAppearance.apply(to: sender, enabled: finderFollow.followEnabled)
+    }
+
+    /// 切换「终端跟随」开关并更新勾选圆。
+    @objc private func toggleTerminalFollow(_ sender: NSMenuItem) {
+        terminalFollow.followEnabled = !terminalFollow.followEnabled
+        ShortcutMenuAppearance.apply(to: sender, enabled: terminalFollow.followEnabled)
     }
 
     @objc private func toggleExtendedSettingAK(_ sender: NSMenuItem) {

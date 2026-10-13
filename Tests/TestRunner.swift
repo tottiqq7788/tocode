@@ -484,6 +484,7 @@ func testTocodePortableSettingsTransfer() {
     other.set("/Users/keep-root", forKey: RootPathStore.key)
     other.set(true, forKey: ExtendedSettingsStore.akEnabledKey)
     other.set(true, forKey: CodexSyncSettingsStore.syncEnabledKey)
+    other.set(true, forKey: TerminalFollowSettingsStore.followEnabledKey)
     KeyboardShortcutMappingStore(defaults: other).replaceAll([
         KeyboardShortcutMapping(
             id: UUID(),
@@ -510,6 +511,7 @@ func testTocodePortableSettingsTransfer() {
     expect(other.string(forKey: RootPathStore.key) == "/Users/keep-root", "导入不改根目录")
     expect(other.bool(forKey: ExtendedSettingsStore.akEnabledKey), "导入不改 AK 开关")
     expect(other.bool(forKey: CodexSyncSettingsStore.syncEnabledKey), "导入不改 codex跟随")
+    expect(other.bool(forKey: TerminalFollowSettingsStore.followEnabledKey), "导入不改终端跟随")
 }
 
 func testUserManualPages() {
@@ -527,6 +529,7 @@ func testUserManualPages() {
     expect(joined.contains("历史"), "说明书覆盖目录树历史同级")
     expect(joined.contains("始终从当前解析根的第一层开始"), "说明书写明根菜单不整页跳转")
     expect(joined.contains("分隔线 →「历史」→「配置」→「终端」→「新增」"), "说明书写明根菜单底部结构")
+    expect(joined.contains("终端跟随（默认关）"), "说明书覆盖终端跟随开关")
     expect(joined.contains("只悬停展开不会更新"), "说明书写明悬停不写入历史")
     expect(joined.contains("限制程序坞弹出"), "说明书覆盖限制程序坞弹出")
     expect(joined.contains("自动隐藏和显示程序坞"), "说明书写明需系统自动隐藏")
@@ -2329,6 +2332,7 @@ func testDirectoryRootResolverPriority() {
             finderDirectory: finder,
             codexFollowEnabled: true,
             codexRoot: codex,
+            terminalFollowEnabled: true,
             terminalRoot: nil,
             manualRoot: manual
         ) == finder,
@@ -2341,6 +2345,7 @@ func testDirectoryRootResolverPriority() {
             finderDirectory: nil,
             codexFollowEnabled: true,
             codexRoot: codex,
+            terminalFollowEnabled: true,
             terminalRoot: nil,
             manualRoot: manual
         ) == manual,
@@ -2353,6 +2358,7 @@ func testDirectoryRootResolverPriority() {
             finderDirectory: finder,
             codexFollowEnabled: true,
             codexRoot: codex,
+            terminalFollowEnabled: true,
             terminalRoot: nil,
             manualRoot: manual
         ) == codex,
@@ -2365,6 +2371,7 @@ func testDirectoryRootResolverPriority() {
             finderDirectory: nil,
             codexFollowEnabled: true,
             codexRoot: nil,
+            terminalFollowEnabled: true,
             terminalRoot: nil,
             manualRoot: manual
         ) == manual,
@@ -2377,6 +2384,7 @@ func testDirectoryRootResolverPriority() {
             finderDirectory: finder,
             codexFollowEnabled: true,
             codexRoot: codex,
+            terminalFollowEnabled: true,
             terminalRoot: nil,
             manualRoot: manual
         ) == manual,
@@ -2389,6 +2397,7 @@ func testDirectoryRootResolverPriority() {
             finderDirectory: finder,
             codexFollowEnabled: true,
             codexRoot: codex,
+            terminalFollowEnabled: true,
             terminalRoot: "/terminal",
             manualRoot: manual
         ) == "/terminal",
@@ -2401,6 +2410,20 @@ func testDirectoryRootResolverPriority() {
             finderDirectory: finder,
             codexFollowEnabled: true,
             codexRoot: codex,
+            terminalFollowEnabled: false,
+            terminalRoot: "/terminal",
+            manualRoot: manual
+        ) == manual,
+        "终端跟随关闭时即使窗口对上仍用固定目录"
+    )
+    expect(
+        DirectoryRootResolver.resolve(
+            frontmost: .terminal,
+            finderFollowEnabled: true,
+            finderDirectory: finder,
+            codexFollowEnabled: true,
+            codexRoot: codex,
+            terminalFollowEnabled: true,
             terminalRoot: nil,
             manualRoot: manual
         ) == manual,
@@ -2413,6 +2436,7 @@ func testDirectoryRootResolverPriority() {
             finderDirectory: finder,
             codexFollowEnabled: false,
             codexRoot: nil,
+            terminalFollowEnabled: true,
             terminalRoot: "/terminal",
             manualRoot: manual
         ) == finder,
@@ -2425,6 +2449,7 @@ func testDirectoryRootResolverPriority() {
             finderDirectory: nil,
             codexFollowEnabled: false,
             codexRoot: nil,
+            terminalFollowEnabled: true,
             terminalRoot: "/terminal",
             manualRoot: manual
         ) == manual,
@@ -2446,6 +2471,14 @@ func testDirectoryRootResolverPriority() {
         DirectoryRootResolver.frontmost(fromBundleIdentifier: "com.apple.Terminal") == .terminal,
         "系统终端 bundle 识别"
     )
+    let followSuite = "tocode-terminal-follow-\(UUID().uuidString)"
+    let followDefaults = UserDefaults(suiteName: followSuite)!
+    defer { followDefaults.removePersistentDomain(forName: followSuite) }
+    let terminalFollow = TerminalFollowSettingsStore(defaults: followDefaults)
+    expect(!terminalFollow.followEnabled, "终端跟随缺省关闭")
+    terminalFollow.followEnabled = true
+    expect(followDefaults.bool(forKey: TerminalFollowSettingsStore.followEnabledKey), "终端跟随写入偏好")
+    expect(KeyboardMappingAction.allCases.count == 18, "终端跟随不进入映射功能表")
     expect(KeyboardMappingAction.initRootFromFinder.title == "访达跟随", "映射文案为访达跟随")
     expect(KeyboardMappingAction.toggleCodexSync.title == "codex跟随", "映射文案为 codex跟随")
     expect(KeyboardMappingActionGroup.directory.title == "配置", "映射分组名为配置")

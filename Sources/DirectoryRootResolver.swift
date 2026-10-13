@@ -15,6 +15,7 @@ enum DirectoryRootResolver {
         finderDirectory: String?,
         codexFollowEnabled: Bool,
         codexRoot: String?,
+        terminalFollowEnabled: Bool,
         terminalRoot: String?,
         manualRoot: String
     ) -> String {
@@ -28,7 +29,7 @@ enum DirectoryRootResolver {
                 return codexRoot
             }
         case .terminal:
-            if let terminalRoot {
+            if terminalFollowEnabled, let terminalRoot {
                 return terminalRoot
             }
         case .other:
