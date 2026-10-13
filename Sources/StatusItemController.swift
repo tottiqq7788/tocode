@@ -29,7 +29,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private let finderFollow: FinderFollowSettingsStore
     private let codexModels: CodexModelSwitching
     private let codexRestarter: CodexApplicationRestarting
-    private let ankerCredentials: AnkerCredentialUpdating
     private let extendedSettings: ExtendedSettingsStore
     private let screenBlackout: ScreenBlackoutService
     private let commandExecutor: TocodeCommandExecutor
@@ -41,7 +40,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private var modelDescriptors: [String: CodexModelDescriptor] = [:]
     private var modelLoadGeneration = UUID()
     private var isSwitchingModel = false
-    private var isUpdatingCredentials = false
     private var isCreatingModelRelayProvider = false
     private var relayBusyProviderIDs: Set<UUID> = []
     private var modifierPollingTimer: Timer?
@@ -50,8 +48,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private weak var liveModelRelayStatusItem: NSMenuItem?
     private var liveTimerMenuItems: [UUID: NSMenuItem] = [:]
     private weak var liveModelMenuItem: NSMenuItem?
-    private static let ankerKeyItemID = "tocode.extended.ankerKey"
-    private static let secretsFolderItemID = "tocode.extended.secretsFolder"
     private static let codexModelItemID = "tocode.extended.codexModel"
     private static let portableSettingsType =
         UTType(tag: "tocode", tagClass: .filenameExtension, conformingTo: .json) ?? .json
@@ -72,7 +68,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         finderFollow: FinderFollowSettingsStore = FinderFollowSettingsStore(),
         codexModels: CodexModelSwitching = CodexModelSwitchService(),
         codexRestarter: CodexApplicationRestarting = CodexApplicationRestarter(),
-        ankerCredentials: AnkerCredentialUpdating = AnkerCredentialService(),
         extendedSettings: ExtendedSettingsStore = ExtendedSettingsStore(),
         screenBlackout: ScreenBlackoutService? = nil,
         modelRelay: ModelRelayService,
@@ -93,7 +88,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         self.finderFollow = finderFollow
         self.codexModels = codexModels
         self.codexRestarter = codexRestarter
-        self.ankerCredentials = ankerCredentials
         self.extendedSettings = extendedSettings
         self.screenBlackout = screenBlackout ?? ScreenBlackoutService(overlay: ScreenBlackoutOverlay())
         self.modelRelay = modelRelay
@@ -474,7 +468,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         // 独立顶层「模型」：本地 OpenAI-compatible 中转站，始终显示。
         menu.addItem(makeModelRelayMenuItem())
 
-        // AK → 模型（AK 门控）
+        // AK 下直接列出 Codex 模型（AK 门控）。
         activeModelMenu = nil
         activeModelParentItem = nil
         currentModelID = nil
@@ -486,44 +480,21 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 keyEquivalent: ""
             )
             akItem.image = NSImage(systemSymbolName: "sparkles", accessibilityDescription: nil)
+            akItem.representedObject = Self.codexModelItemID
             let akMenu = NSMenu()
             akMenu.autoenablesItems = false
-
-            let modelItem = akMenu.addItem(
-                withTitle: ExtendedSettingsStore.modelMenuTitle,
-                action: nil,
-                keyEquivalent: ""
-            )
-            modelItem.image = NSImage(systemSymbolName: "cpu", accessibilityDescription: nil)
-            modelItem.representedObject = Self.codexModelItemID
-            let modelMenu = NSMenu()
-            modelMenu.autoenablesItems = false
-            modelMenu.delegate = self
-            addModelStatusItem("悬停后实时加载", to: modelMenu)
-            modelItem.submenu = modelMenu
+            akMenu.delegate = self
+            addModelStatusItem("悬停后实时加载", to: akMenu)
             akItem.submenu = akMenu
-            activeModelMenu = modelMenu
-            activeModelParentItem = modelItem
+            activeModelMenu = akMenu
+            activeModelParentItem = akItem
             liveModelMenuItem = akItem
             if let state = try? codexModels.currentState() {
                 currentModelID = state.liveModelID
                 if !state.isConsistent {
-                    modelItem.toolTip = "Codex 实时配置与 CC Switch Provider 模板当前不一致"
+                    akItem.toolTip = "Codex 实时配置与 CC Switch Provider 模板当前不一致"
                 }
             }
-
-            let secretsFolder = NSMenuItem(
-                title: ExtendedSettingsStore.secretsFolderTitle,
-                action: nil,
-                keyEquivalent: ""
-            )
-            secretsFolder.image = NSImage(systemSymbolName: "key", accessibilityDescription: nil)
-            secretsFolder.representedObject = Self.secretsFolderItemID
-            let secretsMenu = NSMenu()
-            secretsMenu.autoenablesItems = false
-            secretsMenu.addItem(makeAnkerKeyItem())
-            secretsFolder.submenu = secretsMenu
-            akMenu.addItem(secretsFolder)
         }
 
         let remoteItem = menu.addItem(withTitle: "遥控", action: nil, keyEquivalent: "")
@@ -986,25 +957,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         (sender.representedObject as? String).flatMap(UUID.init(uuidString:))
     }
 
-    private var ankerKeyItemTitle: String {
-        isUpdatingCredentials
-            ? "\(AnkerCredentialPrompt.menuTitle)（保存中…）"
-            : AnkerCredentialPrompt.menuTitle
-    }
-
-    private func makeAnkerKeyItem() -> NSMenuItem {
-        let item = NSMenuItem(
-            title: ankerKeyItemTitle,
-            action: #selector(changeAnkerCredential),
-            keyEquivalent: ""
-        )
-        item.target = self
-        item.image = NSImage(systemSymbolName: "key.fill", accessibilityDescription: nil)
-        item.isEnabled = !isUpdatingCredentials && !isSwitchingModel
-        item.representedObject = Self.ankerKeyItemID
-        return item
-    }
-
     func menuWillOpen(_ menu: NSMenu) {
         guard menu === activeModelMenu else { return }
         loadCodexModels(into: menu)
@@ -1024,7 +976,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
         if let state = try? codexModels.currentState() {
             currentModelID = state.liveModelID
-            activeModelParentItem?.title = ExtendedSettingsStore.modelMenuTitle
             activeModelParentItem?.toolTip = state.isConsistent
                 ? nil
                 : "Codex 实时配置与 CC Switch Provider 模板当前不一致"
@@ -1122,7 +1073,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     @objc private func selectCodexModel(_ sender: NSMenuItem) {
-        guard !isSwitchingModel, !isUpdatingCredentials,
+        guard !isSwitchingModel,
               let modelID = sender.representedObject as? String,
               let descriptor = modelDescriptors[modelID],
               modelID != currentModelID else {
@@ -1148,7 +1099,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 switch result {
                 case .success:
                     self.currentModelID = modelID
-                    self.activeModelParentItem?.title = ExtendedSettingsStore.modelMenuTitle
                     self.notifyCodexModelSwitchScheduled(descriptor.displayName)
                     self.codexRestarter.forceRestart(after: 2) { restartResult in
                         DispatchQueue.main.async {
@@ -1162,19 +1112,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                     self.isSwitchingModel = false
                     self.notifyCodexModelFailure(error.localizedDescription)
                 }
-            }
-        }
-    }
-
-    @objc private func changeAnkerCredential() {
-        guard !isUpdatingCredentials, !isSwitchingModel,
-              let key = AnkerCredentialPrompt.prompt() else { return }
-        isUpdatingCredentials = true
-        DispatchQueue.global(qos: .userInitiated).async { [ankerCredentials] in
-            let result = Result { try ankerCredentials.update(key) }
-            DispatchQueue.main.async { [weak self] in
-                self?.isUpdatingCredentials = false
-                AnkerCredentialPrompt.showResult(result)
             }
         }
     }
