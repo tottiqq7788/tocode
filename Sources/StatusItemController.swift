@@ -21,6 +21,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private let shortcutPoster: TrackpadShortcutEventPosting
     private let launchAtLogin: LaunchAtLoginControlling
     private let weChat: WeChatAssociationControlling
+    private let remoteControl: RemoteControlService
     private let codex: CodexProjectService
     private let codexSync: CodexSyncSettingsStore
     private let finderFollow: FinderFollowSettingsStore
@@ -63,6 +64,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         shortcutPoster: TrackpadShortcutEventPosting = SystemTrackpadShortcutEventPoster(),
         launchAtLogin: LaunchAtLoginControlling = LaunchAtLoginService(),
         weChat: WeChatAssociationControlling,
+        remoteControl: RemoteControlService,
         codex: CodexProjectService = CodexProjectService(),
         codexSync: CodexSyncSettingsStore = CodexSyncSettingsStore(),
         finderFollow: FinderFollowSettingsStore = FinderFollowSettingsStore(),
@@ -83,6 +85,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         self.shortcutPoster = shortcutPoster
         self.launchAtLogin = launchAtLogin
         self.weChat = weChat
+        self.remoteControl = remoteControl
         self.codex = codex
         self.codexSync = codexSync
         self.finderFollow = finderFollow
@@ -504,6 +507,19 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             secretsFolder.submenu = secretsMenu
             akMenu.addItem(secretsFolder)
         }
+
+        let remoteItem = menu.addItem(withTitle: "遥控", action: nil, keyEquivalent: "")
+        remoteItem.image = NSImage(systemSymbolName: "iphone", accessibilityDescription: nil)
+        let remoteMenu = NSMenu()
+        remoteMenu.autoenablesItems = false
+        let associate = remoteMenu.addItem(
+            withTitle: "应用关联",
+            action: #selector(openRemoteAssociation),
+            keyEquivalent: ""
+        )
+        associate.target = self
+        ShortcutMenuAppearance.apply(to: associate, enabled: remoteControl.isAssociated)
+        remoteItem.submenu = remoteMenu
 
         // 微信
         let weChatItem = menu.addItem(withTitle: "微信", action: nil, keyEquivalent: "")
@@ -1244,6 +1260,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     @objc private func toggleFinderCommandQ(_ sender: NSMenuItem) {
         _ = shortcuts.setFinderCommandQEnabled(!shortcuts.isFinderCommandQEffective)
         ShortcutMenuAppearance.apply(to: sender, enabled: shortcuts.isFinderCommandQEffective)
+    }
+
+    @objc private func openRemoteAssociation() {
+        remoteControl.startAssociation()
     }
 
     @objc private func bindWeChat() {

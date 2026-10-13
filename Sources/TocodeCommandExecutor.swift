@@ -43,7 +43,7 @@ extension MouseWheelReverseService: TocodeWheelCommanding {}
 extension GlobalShortcutService: TocodeShortcutCommanding {}
 extension FinderVisibilityService: TocodeVisibilityCommanding {}
 
-/// 统一命令执行器：CLI 与微信命令共享，白名单枚举，不做 shell 执行。
+/// 统一命令执行器：本机 CLI 与遥控白名单共用，不做 shell 执行。
 @MainActor
 final class TocodeCommandExecutor {
     private let fs: FileSystemService

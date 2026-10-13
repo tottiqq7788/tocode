@@ -80,8 +80,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let weChat = WeChatAssociationService()
         self.weChat = weChat
         executor.attachWeChat(weChat)
-        weChat.commandExecutor = executor
-
+        let remote = RemoteControlService(
+            store: .live,
+            transport: RemoteControlHTTPClient(),
+            executor: executor
+        )
+        remote.start()
         let controller = StatusItemController(
             shortcuts: service,
             trackpadShortcuts: trackpad,
@@ -90,6 +94,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             dockAutohideRestrict: dockRestrict,
             macTimers: macTimers,
             weChat: weChat,
+            remoteControl: remote,
             screenBlackout: blackout,
             modelRelay: modelRelay,
             commandExecutor: executor

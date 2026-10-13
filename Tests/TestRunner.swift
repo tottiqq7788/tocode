@@ -1615,30 +1615,6 @@ final class MockTrackpadShortcutPoster: TrackpadShortcutEventPosting {
     }
 }
 
-final class MockWeChatUnicodeInjector: WeChatUnicodeInjecting {
-    var texts: [String] = []
-    var shouldSucceed = true
-    var failOnCount: Int?
-
-    func injectUnicode(_ text: String) -> Bool {
-        texts.append(text)
-        if let failOnCount, texts.count == failOnCount {
-            return false
-        }
-        return shouldSucceed
-    }
-}
-
-final class MockWeChatQuickInput: WeChatQuickInputPerforming {
-    var segmentsLog: [[WeChatQuickInputSegment]] = []
-    var result: TocodeCommandResult = .success(TocodeCommandOutput("已注入快捷输入"))
-
-    func perform(_ segments: [WeChatQuickInputSegment]) -> TocodeCommandResult {
-        segmentsLog.append(segments)
-        return result
-    }
-}
-
 final class MockTrackpadPermissions: ShortcutPermissionChecking {
     var trusted: Bool
     var requestResult: Bool
@@ -5234,9 +5210,9 @@ func testTocodeCommandParser() {
     expect(TocodeCommandParser.helpText.contains("root open"), "help 含 root open")
     expect(TocodeCommandParser.helpText.contains("finder copy"), "help 含 finder copy")
     expect(
-        TocodeCommandParser.weChatHelpCommands.contains(where: { $0.command == "root clipboard" })
-            && TocodeCommandParser.weChatHelpCommands.contains(where: { $0.command == "root open" })
-            && TocodeCommandParser.weChatHelpCommands.contains(where: { $0.command == "finder copy" }),
+        TocodeCommandParser.helpText.contains("root clipboard")
+            && TocodeCommandParser.helpText.contains("root open")
+            && TocodeCommandParser.helpText.contains("finder copy"),
         "微信 help 含三条新命令"
     )
 
@@ -5309,273 +5285,6 @@ func weChatTextMessage(_ text: String, id: String = "m") -> WeChatMessage {
         messageID: id,
         items: [WeChatItem(type: 1, textItem: WeChatTextItem(text: text))]
     )
-}
-
-func testTocodeWeChatCommandGate() {
-    let cmd = weChatTextMessage("  .lshp  ")
-    expect(TocodeWeChatCommandGate.commandBody(from: cmd) == "lshp", "微信命令判定 trim 后去点号")
-    expect(
-        TocodeWeChatCommandGate.routedInput(from: cmd) == .command("lshp"),
-        "点号命令走 command 分流"
-    )
-
-    let help = weChatTextMessage(".help")
-    expect(
-        TocodeWeChatCommandGate.routedInput(from: help) == .command("help"),
-        ".help 仍是点号命令"
-    )
-
-    let quotedHello = "\u{201C}你好\u{201D}"
-    expect(
-        TocodeWeChatCommandGate.routedInput(from: weChatTextMessage("{space}"))
-            == .quickInput([.key(raw: "space")]),
-        "单段 {space} 是快捷输入"
-    )
-    expect(
-        TocodeWeChatCommandGate.routedInput(from: weChatTextMessage(quotedHello))
-            == .quickInput([.text("你好")]),
-        "中文引号文字段是快捷输入"
-    )
-    expect(
-        TocodeWeChatCommandGate.routedInput(from: weChatTextMessage("\(quotedHello){enter}"))
-            == .quickInput([.text("你好"), .key(raw: "enter")]),
-        "“你好”{enter} 拆成文字加回车"
-    )
-    expect(
-        TocodeWeChatCommandGate.routedInput(from: weChatTextMessage("\(quotedHello) {enter}"))
-            == .quickInput([.text("你好"), .key(raw: "enter")]),
-        "段间空白与无空格等价"
-    )
-    expect(
-        TocodeWeChatCommandGate.routedInput(from: weChatTextMessage("{enter}{enter}"))
-            == .quickInput([.key(raw: "enter"), .key(raw: "enter")]),
-        "连续按键段可拆"
-    )
-    expect(
-        TocodeWeChatCommandGate.routedInput(from: weChatTextMessage("{foo}"))
-            == .quickInput([.key(raw: "foo")]),
-        "非法键名仍先判定为快捷输入"
-    )
-
-    expect(TocodeWeChatCommandGate.commandBody(from: weChatTextMessage("hello")) == nil, "普通文本不是命令")
-    expect(TocodeWeChatCommandGate.routedInput(from: weChatTextMessage("hello")) == nil, "裸文本不是快捷输入")
-    expect(
-        TocodeWeChatCommandGate.routedInput(from: weChatTextMessage("你好{enter}")) == nil,
-        "未包裹文本拼按键不识别"
-    )
-    expect(
-        TocodeWeChatCommandGate.routedInput(from: weChatTextMessage("\"hello\"")) == nil,
-        "ASCII 直引号不是快捷输入"
-    )
-    expect(
-        TocodeWeChatCommandGate.routedInput(from: weChatTextMessage("{enter")) == nil,
-        "半截花括号不是快捷输入"
-    )
-    expect(
-        TocodeWeChatCommandGate.routedInput(from: weChatTextMessage("{enter} extra")) == nil,
-        "拆不完的剩余字符按普通消息"
-    )
-
-    let firstImage = WeChatMessage(
-        fromUserID: "u",
-        contextToken: "ctx",
-        messageID: "m",
-        items: [WeChatItem(type: 2, imageItem: WeChatImageItem(media: WeChatMedia()))]
-    )
-    expect(TocodeWeChatCommandGate.commandBody(from: firstImage) == nil, "首项非文本不是命令")
-    expect(TocodeWeChatCommandGate.routedInput(from: firstImage) == nil, "首项非文本不是快捷输入")
-}
-
-func testWeChatQuickInputParseAndInject() {
-    let space = WeChatQuickInput.parseKey("space")
-    if case .success(let shortcut) = space {
-        expect(shortcut.keyCode == 49 && shortcut.modifiers.isEmpty, "{space} 解析为空格")
-    } else {
-        expect(false, "{space} 应解析成功")
-    }
-
-    let enter = WeChatQuickInput.parseKey("ENTER")
-    if case .success(let shortcut) = enter {
-        expect(shortcut.keyCode == 36 && shortcut.modifiers.isEmpty, "{enter} 大小写不敏感")
-    } else {
-        expect(false, "{enter} 应解析成功")
-    }
-
-    let cmdSpace = WeChatQuickInput.parseKey("cmd+space")
-    if case .success(let shortcut) = cmdSpace {
-        expect(
-            shortcut.keyCode == 49 && shortcut.modifiers == [.command],
-            "{cmd+space} 解析为 Command+空格"
-        )
-    } else {
-        expect(false, "{cmd+space} 应解析成功")
-    }
-
-    let ctrlEnter = WeChatQuickInput.parseKey("CTRL + ENTER")
-    if case .success(let shortcut) = ctrlEnter {
-        expect(
-            shortcut.keyCode == 36 && shortcut.modifiers == [.control],
-            "修饰键别名与空白可解析"
-        )
-    } else {
-        expect(false, "{ctrl+enter} 应解析成功")
-    }
-
-    expect(
-        {
-            if case .failure(.unknownToken("foo")) = WeChatQuickInput.parseKey("foo") { return true }
-            return false
-        }(),
-        "{foo} 非法键名失败"
-    )
-    expect(
-        {
-            if case .failure(.missingPrimary) = WeChatQuickInput.parseKey("cmd") { return true }
-            return false
-        }(),
-        "{cmd} 缺少主键失败"
-    )
-    expect(
-        {
-            if case .failure(.missingPrimary) = WeChatQuickInput.parseKey("space+enter") { return true }
-            return false
-        }(),
-        "{space+enter} 两个主键失败"
-    )
-    expect(
-        {
-            if case .failure(.duplicateModifier) = WeChatQuickInput.parseKey("cmd+command+space") {
-                return true
-            }
-            return false
-        }(),
-        "重复修饰键失败"
-    )
-    expect(
-        {
-            if case .failure(.emptyKey) = WeChatQuickInput.parseKey("") { return true }
-            return false
-        }(),
-        "空按键段失败"
-    )
-
-    let quoted = WeChatQuickInput.tokenize("\u{201C}你好\u{201D}{enter}")
-    expect(quoted == [.text("你好"), .key(raw: "enter")], "tokenize 拆出文字加回车")
-
-    switch WeChatQuickInput.compile([.text("你好"), .key(raw: "enter")]) {
-    case .success(let steps):
-        expect(steps.count == 2, "compile 保留两段顺序")
-        if case .text("你好") = steps.first { } else { expect(false, "第一段是文字") }
-        if case .key(let shortcut) = steps.dropFirst().first {
-            expect(shortcut.keyCode == 36, "第二段是回车")
-        } else {
-            expect(false, "第二段应是按键")
-        }
-    case .failure:
-        expect(false, "合法组合应 compile 成功")
-    }
-
-    let tooMany = Array(repeating: WeChatQuickInputSegment.key(raw: "enter"), count: 17)
-    expect(
-        {
-            if case .failure(.tooManySegments) = WeChatQuickInput.compile(tooMany) { return true }
-            return false
-        }(),
-        "超过 16 段失败"
-    )
-    let longText = String(repeating: "字", count: 501)
-    expect(
-        {
-            if case .failure(.textTooLong) = WeChatQuickInput.compile([.text(longText)]) {
-                return true
-            }
-            return false
-        }(),
-        "文字合计超过 500 字失败"
-    )
-    expect(
-        {
-            if case .failure(.emptyText) = WeChatQuickInput.compile([.text("")]) { return true }
-            return false
-        }(),
-        "空文字段失败"
-    )
-
-    let poster = MockTrackpadShortcutPoster()
-    let unicode = MockWeChatUnicodeInjector()
-    let permissions = MockTrackpadPermissions(trusted: true)
-    let service = WeChatQuickInputService(
-        permissions: permissions,
-        poster: poster,
-        unicode: unicode
-    )
-
-    let combo = service.perform([.text("你好"), .key(raw: "enter")])
-    expect(combo.isSuccess, "“你好”{enter} 按序执行成功")
-    expect(unicode.texts == ["你好"], "先注入文字")
-    expect(poster.posted.count == 1 && poster.posted.first?.keyCode == 36, "再注入回车")
-
-    let single = WeChatQuickInputService(
-        permissions: MockTrackpadPermissions(trusted: true),
-        poster: MockTrackpadShortcutPoster(),
-        unicode: MockWeChatUnicodeInjector()
-    ).perform([.key(raw: "space")])
-    expect(single.isSuccess, "单段 {space} 注入成功")
-
-    let cmdPoster = MockTrackpadShortcutPoster()
-    let cmdResult = WeChatQuickInputService(
-        permissions: MockTrackpadPermissions(trusted: true),
-        poster: cmdPoster,
-        unicode: MockWeChatUnicodeInjector()
-    ).perform([.key(raw: "cmd+space")])
-    expect(cmdResult.isSuccess, "{cmd+space} 注入成功")
-    expect(
-        cmdPoster.posted.first?.keyCode == 49 && cmdPoster.posted.first?.modifiers == [.command],
-        "{cmd+space} 复用 poster 合成组合键"
-    )
-
-    let failPoster = MockTrackpadShortcutPoster()
-    failPoster.failOnCount = 1
-    let laterUnicode = MockWeChatUnicodeInjector()
-    let stopped = WeChatQuickInputService(
-        permissions: MockTrackpadPermissions(trusted: true),
-        poster: failPoster,
-        unicode: laterUnicode
-    ).perform([.key(raw: "enter"), .text("你好")])
-    expect(!stopped.isSuccess, "前段失败则整条失败")
-    expect(laterUnicode.texts.isEmpty, "前段失败后不再执行后续段")
-
-    let deniedPoster = MockTrackpadShortcutPoster()
-    let deniedUnicode = MockWeChatUnicodeInjector()
-    let denied = WeChatQuickInputService(
-        permissions: MockTrackpadPermissions(trusted: false),
-        poster: deniedPoster,
-        unicode: deniedUnicode
-    ).perform([.key(raw: "space")])
-    expect(!denied.isSuccess, "辅助功能拒绝则失败")
-    expect(deniedPoster.posted.isEmpty && deniedUnicode.texts.isEmpty, "权限拒绝时一段都不注入")
-    if case .failure(let error) = denied {
-        expect(error.message.contains("辅助功能"), "权限拒绝回复原因")
-    }
-
-    let overLimitPoster = MockTrackpadShortcutPoster()
-    let overLimit = WeChatQuickInputService(
-        permissions: MockTrackpadPermissions(trusted: true),
-        poster: overLimitPoster,
-        unicode: MockWeChatUnicodeInjector()
-    ).perform(tooMany)
-    expect(!overLimit.isSuccess, "超段数整条失败")
-    expect(overLimitPoster.posted.isEmpty, "超段数一段都不注入")
-
-    let longPoster = MockTrackpadShortcutPoster()
-    let longUnicode = MockWeChatUnicodeInjector()
-    let tooLong = WeChatQuickInputService(
-        permissions: MockTrackpadPermissions(trusted: true),
-        poster: longPoster,
-        unicode: longUnicode
-    ).perform([.text(longText)])
-    expect(!tooLong.isSuccess, "超长文字整条失败")
-    expect(longUnicode.texts.isEmpty && longPoster.posted.isEmpty, "超长文字一段都不注入")
 }
 
 @MainActor
@@ -5826,30 +5535,167 @@ extension Result where Failure == TocodeCommandError {
 }
 
 
+final class ScriptedRemoteTransport: RemoteControlTransporting {
+    var sent: [[String: Any]] = []
+    var onMessage: (([String: Any]) -> Void)?
+    func register(relay: URL, name: String) async throws -> (id: String, token: String) { ("device", "token") }
+    func createPairing(relay: URL, token: String) async throws -> (code: String, expiresAt: Int) { ("ABCD2345", 0) }
+    func pairingStatus(relay: URL, token: String, code: String) async throws -> (status: String, link: RemoteControlLink?) {
+        ("pending", nil)
+    }
+    func deleteLink(relay: URL, token: String, linkID: String) async throws {}
+    func connect(relay: URL, token: String) async throws {}
+    func send(_ object: [String: Any]) async throws { sent.append(object) }
+    func disconnect() {}
+}
+
+final class MockRemotePage: RemoteControlPageWriting {
+    var prepared: [String] = []
+    var statuses: [RemoteControlPageStatus] = []
+
+    func prepare(qrText: String) throws -> URL {
+        prepared.append(qrText)
+        return URL(fileURLWithPath: "/tmp/tocode-remote-page.html")
+    }
+
+    func update(_ status: RemoteControlPageStatus) throws {
+        statuses.append(status)
+    }
+}
+
+final class MockRemoteOpener: RemoteControlPageOpening {
+    var opened: [URL] = []
+    func open(_ url: URL) -> Bool {
+        opened.append(url)
+        return true
+    }
+}
+
+final class RedeemingRemoteTransport: RemoteControlTransporting {
+    var onMessage: (([String: Any]) -> Void)?
+    func register(relay: URL, name: String) async throws -> (id: String, token: String) { ("device", "token") }
+    func createPairing(relay: URL, token: String) async throws -> (code: String, expiresAt: Int) { ("ABCD2345", 0) }
+    func pairingStatus(relay: URL, token: String, code: String) async throws -> (status: String, link: RemoteControlLink?) {
+        ("redeemed", RemoteControlLink(linkID: "link-new", androidID: "phone", androidName: "Pixel"))
+    }
+    func deleteLink(relay: URL, token: String, linkID: String) async throws {}
+    func connect(relay: URL, token: String) async throws {}
+    func send(_ object: [String: Any]) async throws {}
+    func disconnect() {}
+}
+
+func testRemoteControlBrowserPage() {
+    let fm = FileManager.default
+    let directory = fm.temporaryDirectory.appendingPathComponent(
+        "tocode-remote-page-\(UUID().uuidString)",
+        isDirectory: true
+    )
+    defer { try? fm.removeItem(at: directory) }
+    let writer = RemoteControlPageWriter(directory: directory)
+    let page = try! writer.prepare(qrText: "tocode-app://pair?relay=https://totti.xin&code=ABCD2345")
+    var html = try! String(contentsOf: page, encoding: .utf8)
+    expect(fm.fileExists(atPath: directory.appendingPathComponent("qrcode.png").path), "浏览器关联生成本地二维码 PNG")
+    expect(html.contains("等待扫码") && html.contains("http-equiv=\"refresh\""), "等待页面每 2 秒自动刷新状态")
+    expect(!html.contains("device_token") && !html.contains("ABCD2345"), "浏览器页面不写出配对码或设备令牌")
+    try! writer.update(.success)
+    html = try! String(contentsOf: page, encoding: .utf8)
+    expect(html.contains("应用关联成功") && !html.contains("http-equiv=\"refresh\""), "成功页面停止刷新并提示可关闭")
+}
+
+@MainActor
+func testRemoteControlAssociationPage() async {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let store = RemoteControlStore(fileURL: directory.appendingPathComponent("remote-control.json"))
+    var record = RemoteControlRecord.empty
+    record.deviceToken = "token"
+    try? store.save(record)
+    let page = MockRemotePage()
+    let opener = MockRemoteOpener()
+    let service = RemoteControlService(
+        store: store,
+        transport: RedeemingRemoteTransport(),
+        executor: TocodeCommandExecutor(
+            launchAtLogin: MockTocodeLaunchAtLogin(),
+            mouseWheel: MockTocodeWheel(),
+            shortcuts: MockTocodeShortcuts(),
+            codexModels: MockTocodeCodexModels(),
+            weChat: MockTocodeWeChat(),
+            screenBlackout: ScreenBlackoutService(overlay: MockTocodeScreenBlackout()),
+            notify: { _, _ in }
+        ),
+        pageWriter: page,
+        opener: opener,
+        pollInterval: 0.01
+    )
+    expect(!service.isAssociated, "没有安卓时应用关联不勾选")
+    service.startAssociation()
+    _ = await waitUntil { service.isAssociated }
+    expect(opener.opened.count == 1, "应用关联在浏览器打开本地页面")
+    expect(page.prepared.first?.contains("code=ABCD2345") == true, "二维码内容只含中转地址和配对码")
+    expect(page.statuses.contains(.success), "扫码成功后页面改为成功")
+    expect(service.isAssociated, "关联成功后菜单显示勾选")
+}
+
+@MainActor
+func testRemoteControlWhitelist() async {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let store = RemoteControlStore(fileURL: directory.appendingPathComponent("remote-control.json"))
+    var record = RemoteControlRecord.empty
+    record.deviceToken = "token"
+    record.links = [RemoteControlLink(linkID: "link-1", androidID: "phone", androidName: "Pixel")]
+    try? store.save(record)
+    let mode = (try? FileManager.default.attributesOfItem(atPath: store.fileURL.path)[.posixPermissions] as? NSNumber)?.uint16Value
+    expect(mode == 0o600, "遥控关联文件权限 0600")
+    let transport = ScriptedRemoteTransport()
+    let service = RemoteControlService(
+        store: store,
+        transport: transport,
+        executor: TocodeCommandExecutor(
+            launchAtLogin: MockTocodeLaunchAtLogin(),
+            mouseWheel: MockTocodeWheel(),
+            shortcuts: MockTocodeShortcuts(),
+            codexModels: MockTocodeCodexModels(),
+            weChat: MockTocodeWeChat(),
+            screenBlackout: ScreenBlackoutService(overlay: MockTocodeScreenBlackout()),
+            notify: { _, _ in }
+        )
+    )
+    service.handle([
+        "op": "command_inbound", "link_id": "link-1", "request_id": "r1", "action": "status"
+    ])
+    try? await Task.sleep(nanoseconds: 50_000_000)
+    expect(transport.sent.first?["ok"] as? Bool == true, "白名单动作回传结果")
+    service.handle([
+        "op": "command_inbound", "link_id": "link-1", "request_id": "r2", "action": "shell"
+    ])
+    try? await Task.sleep(nanoseconds: 50_000_000)
+    expect(transport.sent.last?["text"] as? String == "动作不在白名单", "未知动作不执行")
+    expect(RemoteControlPayload.qr(relay: "https://totti.xin", code: "ABCD2345").contains("code=ABCD2345"), "二维码只含中转和配对码")
+    expect(RemoteControlAction.allCases.count == 11, "固定按钮数量")
+}
+
 @MainActor
 func testWeChatCommandConsumption() async {
-    // 命令消息：首项文本 `.lshp`，应执行命令但不归档。
-    let commandMessage = WeChatMessage(
-        fromUserID: "u",
-        contextToken: "ctx-command",
-        messageType: 1,
-        messageID: "msg-command",
-        items: [WeChatItem(type: 1, textItem: WeChatTextItem(text: "  .lshp  "))]
-    )
-
-    do {
+    let samples = [
+        ("  .lshp  ", "msg-dot"),
+        ("\u{201C}你好\u{201D}{enter}", "msg-quick"),
+        ("普通归档", "msg-plain"),
+    ]
+    for (body, messageID) in samples {
+        let message = WeChatMessage(
+            fromUserID: "u",
+            contextToken: "ctx",
+            messageType: 1,
+            messageID: messageID,
+            items: [WeChatItem(type: 1, textItem: WeChatTextItem(text: body))]
+        )
         let transport = MockWeChatTransport()
         transport.updates = [
-            .success(WeChatUpdates(
-                ret: 0,
-                messages: [commandMessage],
-                cursor: "cursor-command"
-            )),
+            .success(WeChatUpdates(ret: 0, messages: [message], cursor: "cursor-\(messageID)")),
             .failure(CancellationError())
         ]
         let archiver = MockWeChatArchiver()
         let states = MemoryWeChatStateStore()
-        let notifier = MockWeChatNotifier()
         let blackout = MockTocodeScreenBlackout()
         let executor = TocodeCommandExecutor(
             launchAtLogin: MockTocodeLaunchAtLogin(),
@@ -5869,191 +5715,32 @@ func testWeChatCommandConsumption() async {
             archiver: archiver,
             pageWriter: MockWeChatBindingPage(),
             opener: MockWeChatOpener(),
-            notifier: notifier,
+            notifier: MockWeChatNotifier(),
             commandExecutor: executor,
             sleeper: MockWeChatSleeper()
         )
         service.startBoundListener()
-        _ = await waitUntil { states.state.cursor == "cursor-command" }
-        expect(archiver.messages.isEmpty, "命令消息不写入归档")
-        expect(states.state.recentKeys.count == 1, "命令消息计入去重键")
-        expect(blackout.activateCount == 1, "`.lshp` 命令执行临时黑屏")
-        expect(transport.sentTexts.count == 1, "命令结果回复到微信")
-        expect(transport.sentTexts.first?.text.contains("已触发临时黑屏") == true, "命令回复包含执行结果")
+        _ = await waitUntil { states.state.cursor == "cursor-\(messageID)" }
+        expect(archiver.messages.count == 1, "\(messageID) 写入归档")
+        expect(transport.sentTexts.isEmpty, "\(messageID) 不自动回复")
+        expect(blackout.activateCount == 0, "\(messageID) 不执行黑屏")
         service.stop()
     }
 
-    // 未知命令：静默消费 + 本地通知，不归档，游标推进。
-    let unknownMessage = WeChatMessage(
-        fromUserID: "u",
-        contextToken: "ctx-unknown",
-        messageType: 1,
-        messageID: "msg-unknown",
-        items: [WeChatItem(type: 1, textItem: WeChatTextItem(text: ".nope"))]
+    let mockWeChat = MockTocodeWeChat()
+    mockWeChat.bound = true
+    let executor = TocodeCommandExecutor(
+        launchAtLogin: MockTocodeLaunchAtLogin(),
+        mouseWheel: MockTocodeWheel(),
+        shortcuts: MockTocodeShortcuts(),
+        codexModels: MockTocodeCodexModels(),
+        weChat: mockWeChat,
+        screenBlackout: ScreenBlackoutService(overlay: MockTocodeScreenBlackout()),
+        notify: { _, _ in }
     )
-    do {
-        let transport = MockWeChatTransport()
-        transport.updates = [
-            .success(WeChatUpdates(ret: 0, messages: [unknownMessage], cursor: "cursor-unknown")),
-            .failure(CancellationError())
-        ]
-        let archiver = MockWeChatArchiver()
-        let states = MemoryWeChatStateStore()
-        let notifier = MockWeChatNotifier()
-        let executor = TocodeCommandExecutor(
-            launchAtLogin: MockTocodeLaunchAtLogin(),
-            mouseWheel: MockTocodeWheel(),
-            shortcuts: MockTocodeShortcuts(),
-            codexModels: MockTocodeCodexModels(),
-            weChat: MockTocodeWeChat(),
-            screenBlackout: ScreenBlackoutService(overlay: MockTocodeScreenBlackout()),
-            notify: { _, _ in }
-        )
-        let service = WeChatAssociationService(
-            transport: transport,
-            credentialStore: MemoryWeChatCredentialStore(
-                WeChatCredential(token: "t", baseURL: WeChatILinkClient.officialBaseURL)
-            ),
-            stateStore: states,
-            archiver: archiver,
-            pageWriter: MockWeChatBindingPage(),
-            opener: MockWeChatOpener(),
-            notifier: notifier,
-            commandExecutor: executor,
-            sleeper: MockWeChatSleeper()
-        )
-        service.startBoundListener()
-        _ = await waitUntil { states.state.cursor == "cursor-unknown" }
-        expect(archiver.messages.isEmpty, "未知命令不写入归档")
-        expect(states.state.recentKeys.count == 1, "未知命令仍计入去重并推进游标")
-        expect(transport.sentTexts.count == 1, "未知命令回复到微信")
-        expect(transport.sentTexts.first?.text.contains("未知命令") == true, "未知命令回复包含错误信息")
-        service.stop()
-    }
-
-    let quotedHello = "\u{201C}你好\u{201D}{enter}"
-    let quickMessage = weChatTextMessage(quotedHello, id: "msg-quick")
-    do {
-        let transport = MockWeChatTransport()
-        transport.updates = [
-            .success(WeChatUpdates(ret: 0, messages: [quickMessage], cursor: "cursor-quick")),
-            .failure(CancellationError())
-        ]
-        let archiver = MockWeChatArchiver()
-        let states = MemoryWeChatStateStore()
-        let injector = MockWeChatQuickInput()
-        let service = WeChatAssociationService(
-            transport: transport,
-            credentialStore: MemoryWeChatCredentialStore(
-                WeChatCredential(token: "t", baseURL: WeChatILinkClient.officialBaseURL)
-            ),
-            stateStore: states,
-            archiver: archiver,
-            pageWriter: MockWeChatBindingPage(),
-            opener: MockWeChatOpener(),
-            notifier: MockWeChatNotifier(),
-            commandExecutor: TocodeCommandExecutor(
-                launchAtLogin: MockTocodeLaunchAtLogin(),
-                mouseWheel: MockTocodeWheel(),
-                shortcuts: MockTocodeShortcuts(),
-                codexModels: MockTocodeCodexModels(),
-                weChat: MockTocodeWeChat(),
-                screenBlackout: ScreenBlackoutService(overlay: MockTocodeScreenBlackout()),
-                notify: { _, _ in }
-            ),
-            quickInput: injector,
-            sleeper: MockWeChatSleeper()
-        )
-        service.startBoundListener()
-        _ = await waitUntil { states.state.cursor == "cursor-quick" }
-        expect(archiver.messages.isEmpty, "快捷输入不写入归档")
-        expect(states.state.recentKeys.count == 1, "快捷输入计入去重键")
-        expect(injector.segmentsLog == [[.text("你好"), .key(raw: "enter")]], "快捷输入按拆段顺序执行")
-        expect(transport.sentTexts.count == 1, "快捷输入结果回复到微信")
-        expect(transport.sentTexts.first?.text.contains("已注入快捷输入") == true, "快捷输入回复成功文案")
-        service.stop()
-    }
-
-    let deniedMessage = weChatTextMessage("{space}", id: "msg-denied")
-    do {
-        let transport = MockWeChatTransport()
-        transport.updates = [
-            .success(WeChatUpdates(ret: 0, messages: [deniedMessage], cursor: "cursor-denied")),
-            .failure(CancellationError())
-        ]
-        let archiver = MockWeChatArchiver()
-        let states = MemoryWeChatStateStore()
-        let injector = MockWeChatQuickInput()
-        injector.result = .failure(.operationFailed("需要辅助功能权限才能注入快捷输入"))
-        let service = WeChatAssociationService(
-            transport: transport,
-            credentialStore: MemoryWeChatCredentialStore(
-                WeChatCredential(token: "t", baseURL: WeChatILinkClient.officialBaseURL)
-            ),
-            stateStore: states,
-            archiver: archiver,
-            pageWriter: MockWeChatBindingPage(),
-            opener: MockWeChatOpener(),
-            notifier: MockWeChatNotifier(),
-            commandExecutor: TocodeCommandExecutor(
-                launchAtLogin: MockTocodeLaunchAtLogin(),
-                mouseWheel: MockTocodeWheel(),
-                shortcuts: MockTocodeShortcuts(),
-                codexModels: MockTocodeCodexModels(),
-                weChat: MockTocodeWeChat(),
-                screenBlackout: ScreenBlackoutService(overlay: MockTocodeScreenBlackout()),
-                notify: { _, _ in }
-            ),
-            quickInput: injector,
-            sleeper: MockWeChatSleeper()
-        )
-        service.startBoundListener()
-        _ = await waitUntil { states.state.cursor == "cursor-denied" }
-        expect(archiver.messages.isEmpty, "辅助功能拒绝时快捷输入不归档")
-        expect(states.state.recentKeys.count == 1, "辅助功能拒绝仍消费并推进游标")
-        expect(transport.sentTexts.first?.text.contains("辅助功能") == true, "辅助功能拒绝回复失败")
-        service.stop()
-    }
-
-    let leftover = weChatTextMessage("你好{enter}", id: "msg-plain")
-    do {
-        let transport = MockWeChatTransport()
-        transport.updates = [
-            .success(WeChatUpdates(ret: 0, messages: [leftover], cursor: "cursor-plain")),
-            .failure(CancellationError())
-        ]
-        let archiver = MockWeChatArchiver()
-        let states = MemoryWeChatStateStore()
-        let injector = MockWeChatQuickInput()
-        let service = WeChatAssociationService(
-            transport: transport,
-            credentialStore: MemoryWeChatCredentialStore(
-                WeChatCredential(token: "t", baseURL: WeChatILinkClient.officialBaseURL)
-            ),
-            stateStore: states,
-            archiver: archiver,
-            pageWriter: MockWeChatBindingPage(),
-            opener: MockWeChatOpener(),
-            notifier: MockWeChatNotifier(),
-            commandExecutor: TocodeCommandExecutor(
-                launchAtLogin: MockTocodeLaunchAtLogin(),
-                mouseWheel: MockTocodeWheel(),
-                shortcuts: MockTocodeShortcuts(),
-                codexModels: MockTocodeCodexModels(),
-                weChat: MockTocodeWeChat(),
-                screenBlackout: ScreenBlackoutService(overlay: MockTocodeScreenBlackout()),
-                notify: { _, _ in }
-            ),
-            quickInput: injector,
-            sleeper: MockWeChatSleeper()
-        )
-        service.startBoundListener()
-        _ = await waitUntil { states.state.cursor == "cursor-plain" }
-        expect(archiver.messages.count == 1, "未包裹组合按普通消息归档")
-        expect(injector.segmentsLog.isEmpty, "未包裹组合不走快捷输入")
-        expect(transport.sentTexts.isEmpty, "普通消息不回复")
-        service.stop()
-    }
+    let mapped = await executor.executeAsync("wechat send --text ping")
+    expect(mapped.isSuccess, "执行器异步转发 wechat send")
+    expect(mockWeChat.sendPayloads.first?.text == "ping", "执行器把载荷交给微信服务")
 }
 
 @MainActor
@@ -6216,18 +5903,6 @@ func testWeChatCLISend() async {
     expect(mockWeChat.sendPayloads.first?.text == "ping", "执行器把载荷交给微信服务")
 }
 
-@MainActor
-func testWeChatHelpFormatting() {
-    let text = TocodeCommandParser.weChatHelpText
-    expect(text.contains("```\n.help\n```"), "微信 help 每条命令用代码框包裹")
-    expect(text.contains("```\n.status\n```"), "微信 help 的 status 以 . 开头")
-    expect(text.contains(".blackout"), "微信 help 包含 blackout 命令")
-    expect(text.contains("{space}"), "微信 help 文末含 {space} 示例")
-    expect(text.contains("\u{201C}你好\u{201D}"), "微信 help 文末含中文引号文字示例")
-    expect(text.contains("\u{201C}你好\u{201D}{enter}"), "微信 help 文末含组合示例")
-    expect(!text.contains(".{space}"), "快捷输入示例不是 . 命令")
-    expect(text.contains("wechat send"), "微信 help 包含 wechat send")
-}
 
 @main
 struct TestRunnerMain {
@@ -6305,12 +5980,12 @@ struct TestRunnerMain {
         await testWeChatBindingStatusNormalization()
         await testWeChatAssociationAndFaults()
         await testWeChatBindingToArchiveIntegration()
+        testRemoteControlBrowserPage()
+        await testRemoteControlAssociationPage()
+        await testRemoteControlWhitelist()
         await testWeChatCommandConsumption()
         await testWeChatCLISend()
-        testWeChatHelpFormatting()
         testTocodeCommandParser()
-        testTocodeWeChatCommandGate()
-        testWeChatQuickInputParseAndInject()
         await testTocodeCommandExecutorMapping()
         testTocodeCLIRunnerAndIPC()
 
