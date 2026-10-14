@@ -14,6 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var shortcuts: GlobalShortcutService?
     private var trackpadShortcuts: TrackpadShortcutService?
     private var keyboardRemaps: KeyboardShortcutRemapService?
+    private var spaceModifier: SpaceModifierService?
     private var mouseWheel: MouseWheelReverseService?
     private var dockAutohideRestrict: DockAutohideRestrictService?
     private var macTimers: MacTimerService?
@@ -37,6 +38,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         keyboardRemaps.applySavedSettings()
         self.keyboardRemaps = keyboardRemaps
+        let spaceModifier = SpaceModifierService()
+        service.onKeyboardTapInstalled = { [weak spaceModifier] in
+            spaceModifier?.reassertHeadPosition()
+        }
+        keyboardRemaps.onKeyboardTapInstalled = { [weak spaceModifier] in
+            spaceModifier?.reassertHeadPosition()
+        }
+        spaceModifier.applySavedSettings()
+        self.spaceModifier = spaceModifier
         let wheel = MouseWheelReverseService()
         wheel.applySavedSettings()
         mouseWheel = wheel
@@ -90,6 +100,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             shortcuts: service,
             trackpadShortcuts: trackpad,
             keyboardRemaps: keyboardRemaps,
+            spaceModifier: spaceModifier,
             mouseWheel: wheel,
             dockAutohideRestrict: dockRestrict,
             macTimers: macTimers,
@@ -107,6 +118,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             controller?.performMappedAction(action)
         }
         keyboardRemaps.shouldYieldAllEvents = { [weak blackout] in
+            blackout?.isPresented == true
+        }
+        spaceModifier.shouldYieldAllEvents = { [weak blackout] in
             blackout?.isPresented == true
         }
         macTimers.fireHandler = { [weak controller] target in
@@ -157,6 +171,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         shortcuts?.shutdown()
         trackpadShortcuts?.shutdown()
         keyboardRemaps?.shutdown()
+        spaceModifier?.shutdown()
         mouseWheel?.shutdown()
         dockAutohideRestrict?.shutdown()
         macTimers?.shutdown()

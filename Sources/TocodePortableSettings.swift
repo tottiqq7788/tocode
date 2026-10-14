@@ -89,11 +89,11 @@ enum TocodePortableSettingsTransfer {
         KeyboardShortcutMappingStore(defaults: defaults).replaceAll(settings.keyboardMappings)
         let pad = TrackpadShortcutStore(defaults: defaults)
         for gesture in TrackpadTapGesture.allCases {
-            if let binding = settings.trackpad[String(gesture.rawValue)] {
-                pad.setBinding(binding, for: gesture)
-            } else {
-                pad.removeBinding(for: gesture)
+            if let binding = settings.trackpad[String(gesture.rawValue)],
+               pad.setBinding(binding, for: gesture) {
+                continue
             }
+            pad.removeBinding(for: gesture)
         }
         let shortcuts = ShortcutSettingsStore(defaults: defaults)
         shortcuts.finderMoveHotkeysEnabled = settings.shortcuts.finderMove

@@ -19,6 +19,7 @@ enum TocodePreferences {
                 MacTimerStore.defaultsKey,
                 MouseWheelReverseStore.verticalKey,
                 MouseWheelReverseStore.horizontalKey,
+                SpaceModifierStore.enabledKey,
                 DockAutohideRestrictStore.enabledKey,
                 DockAutohideRestrictStore.backupDelayKey,
                 ExtendedSettingsStore.akEnabledKey,

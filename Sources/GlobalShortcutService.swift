@@ -61,6 +61,8 @@ final class GlobalShortcutService {
     private var engine = GlobalShortcutEngine()
     private var inputCaptureSuspended = false
     private var externalEventBypass: ((CGEventType, CGEvent) -> Bool)?
+    /// 新键盘钩子插入队首后通知空格修饰键，让它重新占据最前位置。不改变本服务的按键状态机。
+    var onKeyboardTapInstalled: (() -> Void)?
 
     init(
         settings: ShortcutSettingsStore = ShortcutSettingsStore(),
@@ -232,6 +234,7 @@ final class GlobalShortcutService {
             )
             return false
         }
+        onKeyboardTapInstalled?()
         return true
     }
 

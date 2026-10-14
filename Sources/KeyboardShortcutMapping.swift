@@ -77,6 +77,12 @@ enum KeyboardShortcutMappingTarget: Equatable, Hashable {
             return MappedURL.displayText(for: raw)
         }
     }
+
+    /// totti 不是系统修饰键，不能作为要发出去的快捷键。
+    var emitsTotti: Bool {
+        guard case .shortcut(let shortcut) = self else { return false }
+        return shortcut.modifiers.contains(.totti)
+    }
 }
 
 enum MappedURL {
@@ -399,6 +405,7 @@ enum KeyboardShortcutMappingValidationError: Error, Equatable, LocalizedError {
     case duplicateSource
     case mappingNotFound
     case sourceConflictsWithAction
+    case tottiNotEmittable
 
     var errorDescription: String? {
         switch self {
@@ -416,6 +423,8 @@ enum KeyboardShortcutMappingValidationError: Error, Equatable, LocalizedError {
             return "该规则已不存在，请重新打开键盘菜单。"
         case .sourceConflictsWithAction:
             return "源快捷键与所选功能自身的触发键相同，映射后不会有任何效果，请换一个源快捷键。"
+        case .tottiNotEmittable:
+            return "totti 只能作为源修饰键，不能作为要发出的快捷键。"
         }
     }
 }
@@ -451,6 +460,7 @@ struct KeyboardShortcutMappingStore {
         guard !name.isEmpty else { return .failure(.emptyName) }
         guard let source = draft.source else { return .failure(.missingSource) }
         guard let target = draft.target else { return .failure(.missingTarget) }
+        if target.emitsTotti { return .failure(.tottiNotEmittable) }
 
         var mappings = allMappings()
         let otherMappings = mappings.filter { $0.id != draft.id }
@@ -529,21 +539,18 @@ struct KeyboardShortcutEventSnapshot: Equatable {
         let rawKeyCode = event.getIntegerValueField(.keyboardEventKeycode)
         guard rawKeyCode >= 0, rawKeyCode <= Int64(UInt16.max) else { return nil }
 
-        var modifiers: ShortcutModifiers = []
-        let flags = event.flags
-        if flags.contains(.maskControl) { modifiers.insert(.control) }
-        if flags.contains(.maskAlternate) { modifiers.insert(.option) }
-        if flags.contains(.maskShift) { modifiers.insert(.shift) }
-        if flags.contains(.maskCommand) { modifiers.insert(.command) }
-        if flags.contains(.maskSecondaryFn) { modifiers.insert(.function) }
+        var modifiers = ShortcutModifiers(systemFlags: event.flags)
+        let userData = event.getIntegerValueField(.eventSourceUserData)
+        if userData == SpaceModifierEngine.tottiMarker {
+            modifiers.insert(.totti)
+        }
 
         return KeyboardShortcutEventSnapshot(
             keyCode: UInt16(rawKeyCode),
             modifiers: modifiers,
             isKeyDown: type == .keyDown,
             isAutoRepeat: event.getIntegerValueField(.keyboardEventAutorepeat) != 0,
-            isSynthesized: event.getIntegerValueField(.eventSourceUserData)
-                == GlobalShortcutEngine.synthesizerMarker
+            isSynthesized: userData == GlobalShortcutEngine.synthesizerMarker
         )
     }
 }

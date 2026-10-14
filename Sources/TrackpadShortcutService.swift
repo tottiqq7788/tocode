@@ -110,7 +110,7 @@ final class TrackpadShortcutService: NSObject, TrackpadShortcutControlling {
 
     @discardableResult
     func setBinding(_ target: KeyboardShortcutMappingTarget, for gesture: TrackpadTapGesture) -> Bool {
-        store.setBinding(target, for: gesture)
+        guard store.setBinding(target, for: gesture) else { return false }
         lock.lock()
         bindings[gesture] = target
         lock.unlock()

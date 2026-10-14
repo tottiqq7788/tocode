@@ -113,7 +113,16 @@ final class ShortcutRecorderView: NSView {
     }
 
     override func keyDown(with event: NSEvent) {
-        guard !event.isARepeat, let captured = Self.capture(event) else { return }
+        guard !event.isARepeat else { return }
+        let tottiMarked = event.cgEvent.map {
+            $0.getIntegerValueField(.eventSourceUserData) == SpaceModifierEngine.tottiMarker
+        } ?? false
+        guard let captured = Self.capture(
+            keyCode: event.keyCode,
+            flags: event.modifierFlags,
+            tottiMarked: tottiMarked,
+            fallback: event.charactersIgnoringModifiers
+        ) else { return }
         shortcut = captured
     }
 
@@ -125,19 +134,24 @@ final class ShortcutRecorderView: NSView {
         layer?.borderWidth = focused ? 2 : 1
     }
 
-    private static func capture(_ event: NSEvent) -> RecordedShortcut? {
-        let keyCode = event.keyCode
-        guard let label = keyLabel(for: keyCode, fallback: event.charactersIgnoringModifiers) else {
+    nonisolated static func capture(
+        keyCode: UInt16,
+        flags: NSEvent.ModifierFlags,
+        tottiMarked: Bool,
+        fallback: String?
+    ) -> RecordedShortcut? {
+        guard let label = keyLabel(for: keyCode, fallback: fallback) else {
             return nil
         }
 
-        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let deviceFlags = flags.intersection(.deviceIndependentFlagsMask)
         var modifiers: ShortcutModifiers = []
-        if flags.contains(.control) { modifiers.insert(.control) }
-        if flags.contains(.option) { modifiers.insert(.option) }
-        if flags.contains(.shift) { modifiers.insert(.shift) }
-        if flags.contains(.command) { modifiers.insert(.command) }
-        if flags.contains(.function) { modifiers.insert(.function) }
+        if deviceFlags.contains(.control) { modifiers.insert(.control) }
+        if deviceFlags.contains(.option) { modifiers.insert(.option) }
+        if deviceFlags.contains(.shift) { modifiers.insert(.shift) }
+        if deviceFlags.contains(.command) { modifiers.insert(.command) }
+        if deviceFlags.contains(.function) { modifiers.insert(.function) }
+        if tottiMarked { modifiers.insert(.totti) }
 
         return RecordedShortcut(
             keyCode: keyCode,
@@ -146,7 +160,7 @@ final class ShortcutRecorderView: NSView {
         )
     }
 
-    private static func keyLabel(for keyCode: UInt16, fallback: String?) -> String? {
+    nonisolated private static func keyLabel(for keyCode: UInt16, fallback: String?) -> String? {
         let labels: [UInt16: String] = [
             0: "A", 1: "S", 2: "D", 3: "F", 4: "H", 5: "G", 6: "Z", 7: "X",
             8: "C", 9: "V", 11: "B", 12: "Q", 13: "W", 14: "E", 15: "R",

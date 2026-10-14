@@ -17,6 +17,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private let shortcuts: GlobalShortcutService
     private let trackpadShortcuts: TrackpadShortcutControlling
     private let keyboardRemaps: KeyboardShortcutRemapControlling
+    private let spaceModifier: SpaceModifierControlling
     private let mouseWheel: MouseWheelReverseService
     private let dockAutohideRestrict: DockAutohideRestrictService
     private let macTimers: MacTimerControlling
@@ -59,6 +60,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         shortcuts: GlobalShortcutService,
         trackpadShortcuts: TrackpadShortcutControlling,
         keyboardRemaps: KeyboardShortcutRemapControlling,
+        spaceModifier: SpaceModifierControlling,
         mouseWheel: MouseWheelReverseService,
         dockAutohideRestrict: DockAutohideRestrictService = DockAutohideRestrictService(),
         macTimers: MacTimerControlling = MacTimerService(),
@@ -82,6 +84,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         self.shortcuts = shortcuts
         self.trackpadShortcuts = trackpadShortcuts
         self.keyboardRemaps = keyboardRemaps
+        self.spaceModifier = spaceModifier
         self.mouseWheel = mouseWheel
         self.dockAutohideRestrict = dockAutohideRestrict
         self.macTimers = macTimers
@@ -417,6 +420,18 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             }
         }
         keyboardItem.submenu = keyboardMenu
+
+        let remapKeyItem = inputMenu.addItem(withTitle: "改键", action: nil, keyEquivalent: "")
+        remapKeyItem.image = NSImage(systemSymbolName: "arrow.left.arrow.right", accessibilityDescription: nil)
+        let remapKeyMenu = NSMenu()
+        remapKeyMenu.autoenablesItems = false
+        addShortcutToggle(
+            to: remapKeyMenu,
+            title: "空格修饰键",
+            enabled: spaceModifier.isEffective,
+            action: #selector(toggleSpaceModifier(_:))
+        )
+        remapKeyItem.submenu = remapKeyMenu
 
         addShortcutToggle(
             to: inputMenu,
@@ -1294,7 +1309,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         let existing = trackpadShortcuts.binding(for: gesture)
         switch ShortcutRecorderPrompt.prompt(for: gesture, existing: existing) {
         case .save(let target):
-            _ = trackpadShortcuts.setBinding(target, for: gesture)
+            if target.emitsTotti {
+                presentKeyboardMappingError(.tottiNotEmittable, title: "无法保存触控板快捷键")
+            } else {
+                _ = trackpadShortcuts.setBinding(target, for: gesture)
+            }
         case .clear:
             trackpadShortcuts.clearBinding(for: gesture)
         case .cancel:
@@ -1352,7 +1371,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 case .success:
                     return
                 case .failure(let error):
-                    presentKeyboardMappingError(error)
+                    presentKeyboardMappingError(error, title: "无法保存键盘映射")
                     draft = candidate
                 }
             case .delete:
@@ -1366,12 +1385,18 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
     }
 
+    @objc private func toggleSpaceModifier(_ sender: NSMenuItem) {
+        _ = spaceModifier.setEnabled(!spaceModifier.isEffective)
+        ShortcutMenuAppearance.apply(to: sender, enabled: spaceModifier.isEffective)
+    }
+
     private func presentKeyboardMappingError(
-        _ error: KeyboardShortcutMappingValidationError
+        _ error: KeyboardShortcutMappingValidationError,
+        title: String
     ) {
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "无法保存键盘映射"
+        alert.messageText = title
         alert.informativeText = error.localizedDescription
         alert.addButton(withTitle: "好")
         alert.runModal()

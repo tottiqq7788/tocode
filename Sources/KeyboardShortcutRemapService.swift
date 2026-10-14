@@ -75,6 +75,8 @@ final class KeyboardShortcutRemapService: KeyboardShortcutRemapControlling {
     private var inputCaptureSuspended = false
     var actionHandler: ((KeyboardMappingAction) -> Void)?
     var shouldYieldAllEvents: (() -> Bool)?
+    /// 新键盘钩子插入队首后通知空格修饰键，让它重新占据最前位置。不改变映射状态机。
+    var onKeyboardTapInstalled: (() -> Void)?
     private(set) var mappings: [KeyboardShortcutMapping]
 
     init(
@@ -192,6 +194,7 @@ final class KeyboardShortcutRemapService: KeyboardShortcutRemapControlling {
             )
             return false
         }
+        onKeyboardTapInstalled?()
         return true
     }
 

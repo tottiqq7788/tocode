@@ -26,6 +26,22 @@ struct ShortcutModifiers: OptionSet, Codable, Equatable, Hashable {
     static let shift = ShortcutModifiers(rawValue: 1 << 2)
     static let command = ShortcutModifiers(rawValue: 1 << 3)
     static let function = ShortcutModifiers(rawValue: 1 << 4)
+    /// 只在 Tocode 内部匹配。不对应任何 CGEventFlags，也不占用 fn。
+    static let totti = ShortcutModifiers(rawValue: 1 << 5)
+
+    init(rawValue: UInt8) {
+        self.rawValue = rawValue
+    }
+
+    init(systemFlags flags: CGEventFlags) {
+        var modifiers = ShortcutModifiers()
+        if flags.contains(.maskControl) { modifiers.insert(.control) }
+        if flags.contains(.maskAlternate) { modifiers.insert(.option) }
+        if flags.contains(.maskShift) { modifiers.insert(.shift) }
+        if flags.contains(.maskCommand) { modifiers.insert(.command) }
+        if flags.contains(.maskSecondaryFn) { modifiers.insert(.function) }
+        self = modifiers
+    }
 
     var eventFlags: CGEventFlags {
         var flags: CGEventFlags = []
@@ -39,6 +55,7 @@ struct ShortcutModifiers: OptionSet, Codable, Equatable, Hashable {
 
     var symbols: String {
         var value = ""
+        if contains(.totti) { value += "totti+" }
         if contains(.control) { value += "\u{2303}" }
         if contains(.option) { value += "\u{2325}" }
         if contains(.shift) { value += "\u{21E7}" }
@@ -95,9 +112,12 @@ struct TrackpadShortcutStore {
         TrackpadTapGesture.allCases.contains { binding(for: $0) != nil }
     }
 
-    func setBinding(_ target: KeyboardShortcutMappingTarget, for gesture: TrackpadTapGesture) {
-        guard let data = try? JSONEncoder().encode(target) else { return }
+    @discardableResult
+    func setBinding(_ target: KeyboardShortcutMappingTarget, for gesture: TrackpadTapGesture) -> Bool {
+        if target.emitsTotti { return false }
+        guard let data = try? JSONEncoder().encode(target) else { return false }
         defaults.set(data, forKey: key(for: gesture))
+        return true
     }
 
     func setShortcut(_ shortcut: RecordedShortcut, for gesture: TrackpadTapGesture) {

@@ -822,6 +822,7 @@ func testTocodePortableSettingsTransfer() {
     let wheel = MouseWheelReverseStore(defaults: defaults)
     wheel.reverseVerticalEnabled = true
     wheel.reverseHorizontalEnabled = false
+    defaults.set(true, forKey: SpaceModifierStore.enabledKey)
 
     let exported = TocodePortableSettingsTransfer.make(from: defaults)
     let data = try! TocodePortableSettingsTransfer.encode(exported)
@@ -835,6 +836,7 @@ func testTocodePortableSettingsTransfer() {
     expect(!text.contains("akEnabled"), "导出不含 AK 开关")
     expect(!text.contains("wechat"), "导出不含微信字段")
     expect(!text.contains("rootFolder"), "导出不含根目录字段名")
+    expect(!text.contains("spaceModifier"), "导出不含空格修饰键")
 
     do {
         _ = try TocodePortableSettingsTransfer.decode(Data("{\"format\":\"nope\",\"version\":1}".utf8))
@@ -860,6 +862,7 @@ func testTocodePortableSettingsTransfer() {
     other.set(true, forKey: CodexSyncSettingsStore.syncEnabledKey)
     other.set(true, forKey: TerminalFollowSettingsStore.followEnabledKey)
     other.set(true, forKey: HermesFollowSettingsStore.followEnabledKey)
+    other.set(true, forKey: SpaceModifierStore.enabledKey)
     KeyboardShortcutMappingStore(defaults: other).replaceAll([
         KeyboardShortcutMapping(
             id: UUID(),
@@ -888,6 +891,7 @@ func testTocodePortableSettingsTransfer() {
     expect(other.bool(forKey: CodexSyncSettingsStore.syncEnabledKey), "导入不改 codex跟随")
     expect(other.bool(forKey: TerminalFollowSettingsStore.followEnabledKey), "导入不改终端跟随")
     expect(other.bool(forKey: HermesFollowSettingsStore.followEnabledKey), "导入不改 hermes跟随")
+    expect(other.bool(forKey: SpaceModifierStore.enabledKey), "导入不改空格修饰键")
 }
 
 func testUserManualPages() {
@@ -908,6 +912,10 @@ func testUserManualPages() {
     expect(joined.contains("终端跟随（默认关）"), "说明书覆盖终端跟随开关")
     expect(joined.contains("hermes跟随（默认关）"), "说明书覆盖 hermes跟随开关")
     expect(joined.contains("只悬停展开不会更新"), "说明书写明悬停不写入历史")
+    expect(joined.contains("空格修饰键"), "说明书覆盖空格修饰键")
+    expect(joined.contains("totti"), "说明书说明 totti")
+    expect(joined.contains("250 毫秒"), "说明书写明点按时间")
+    expect(joined.contains("不占用 fn"), "说明书写明不占用 fn")
     expect(joined.contains("限制程序坞弹出"), "说明书覆盖限制程序坞弹出")
     expect(joined.contains("自动隐藏和显示程序坞"), "说明书写明需系统自动隐藏")
     expect(joined.contains("定时器"), "说明书覆盖 mac 定时器")
@@ -2696,6 +2704,394 @@ func testKeyboardShortcutMappingStoreAndEngine() {
 
     store.delete(id: first.id)
     expect(store.allMappings().isEmpty, "删除只移除指定键盘映射")
+}
+
+final class MockSpaceModifierTap: SpaceModifierTapControlling {
+    var isInstalled = false
+    var isEnabled = false
+    var installShouldFail = false
+    var reenableShouldFail = false
+    var installCount = 0
+    var handler: ((CGEventType, CGEvent) -> SpaceModifierDisposition)?
+
+    func install(
+        handler: @escaping (CGEventType, CGEvent) -> SpaceModifierDisposition
+    ) -> Bool {
+        if installShouldFail { return false }
+        self.handler = handler
+        isInstalled = true
+        isEnabled = true
+        installCount += 1
+        return true
+    }
+
+    func remove() {
+        isInstalled = false
+        isEnabled = false
+        handler = nil
+    }
+
+    func reenable() -> Bool {
+        if reenableShouldFail {
+            isEnabled = false
+            return false
+        }
+        isEnabled = isInstalled
+        return isEnabled
+    }
+}
+
+final class MockSpaceBarPoster: SpaceBarPosting {
+    var postCount = 0
+    func postSpace() { postCount += 1 }
+}
+
+final class ManualShortcutClock: ShortcutClock {
+    var current = Date(timeIntervalSinceReferenceDate: 10_000)
+    func now() -> Date { current }
+}
+
+func testSpaceTottiModifier() {
+    let tottiV = RecordedShortcut(keyCode: 9, modifiers: [.totti], keyLabel: "V")
+    let control7 = RecordedShortcut(keyCode: 26, modifiers: [.control], keyLabel: "7")
+    expect(tottiV.displayName == "totti+V", "totti 显示在主键前面")
+    expect(tottiV.modifiers.eventFlags.isEmpty, "totti 不写成系统修饰键")
+    expect(
+        ShortcutModifiers([.totti, .function]).eventFlags == .maskSecondaryFn,
+        "totti 不占用 fn 标志"
+    )
+    expect(
+        ShortcutModifiers([.totti, .control]).eventFlags == .maskControl,
+        "totti 与真实修饰键同时存在时只发出真实标志"
+    )
+    expect(TocodePreferences.knownKeys.contains(SpaceModifierStore.enabledKey), "空格修饰键进入已知偏好键")
+
+    let recorded = ShortcutRecorderView.capture(
+        keyCode: 9,
+        flags: [],
+        tottiMarked: true,
+        fallback: nil
+    )
+    expect(recorded == tottiV, "按键监听把 totti 标记录成 totti+V")
+    expect(
+        ShortcutRecorderView.capture(keyCode: 49, flags: [.command], tottiMarked: false, fallback: nil)?.modifiers == [.command],
+        "已有系统修饰键的空格仍录成系统组合"
+    )
+
+    let marked = CGEvent(keyboardEventSource: nil, virtualKey: 9, keyDown: true)!
+    marked.setIntegerValueField(.eventSourceUserData, value: SpaceModifierEngine.tottiMarker)
+    let markedSnapshot = KeyboardShortcutEventSnapshot.capture(type: .keyDown, event: marked)
+    expect(markedSnapshot?.modifiers == [.totti], "映射快照读到 totti 标记")
+    expect(markedSnapshot?.isSynthesized == false, "totti 标记不是合成事件")
+    let functionKey = CGEvent(keyboardEventSource: nil, virtualKey: 9, keyDown: true)!
+    functionKey.flags = .maskSecondaryFn
+    expect(
+        KeyboardShortcutEventSnapshot.capture(type: .keyDown, event: functionKey)?.modifiers == [.function],
+        "物理 fn 仍按 fn 识别"
+    )
+
+    func space(_ down: Bool, at time: TimeInterval, modifiers: ShortcutModifiers = [], synthesized: Bool = false, autoRepeat: Bool = false) -> SpaceModifierEvent {
+        SpaceModifierEvent(
+            keyCode: SpaceModifierEngine.spaceKeyCode,
+            isKeyDown: down,
+            isAutoRepeat: autoRepeat,
+            isSynthesized: synthesized,
+            heldSystemModifiers: modifiers,
+            time: time
+        )
+    }
+    func otherKey(at time: TimeInterval) -> SpaceModifierEvent {
+        SpaceModifierEvent(
+            keyCode: 9,
+            isKeyDown: true,
+            isAutoRepeat: false,
+            isSynthesized: false,
+            heldSystemModifiers: [],
+            time: time
+        )
+    }
+
+    var quick = SpaceModifierEngine()
+    expect(quick.process(space(true, at: 0)) == .suppress, "点按按下时先吞掉空格")
+    expect(quick.process(space(false, at: 0.249)) == .emitSpace, "250 毫秒内单独松开补发空格")
+
+    var boundary = SpaceModifierEngine()
+    expect(boundary.process(space(true, at: 0)) == .suppress, "边界按下仍吞掉")
+    expect(boundary.process(space(false, at: 0.250)) == .suppress, "满 250 毫秒松开不补发空格")
+
+    var chord = SpaceModifierEngine()
+    expect(chord.process(space(true, at: 0)) == .suppress, "搭配其他键前先吞掉空格")
+    expect(chord.process(otherKey(at: 0.01)) == .passMarkingTotti, "按住后的主键标为 totti")
+    expect(chord.process(space(false, at: 0.02)) == .suppress, "搭配其他键后松开不补发空格")
+
+    var held = SpaceModifierEngine()
+    expect(held.process(space(true, at: 0)) == .suppress, "长按一开始就武装 totti")
+    expect(held.process(otherKey(at: 0.4)) == .passMarkingTotti, "超过 250 毫秒后仍是 totti")
+    expect(held.process(space(false, at: 0.5)) == .suppress, "长按搭配主键后不补发空格")
+
+    var commanded = SpaceModifierEngine()
+    expect(commanded.process(space(true, at: 0, modifiers: [.command])) == .pass, "已按 ⌘ 时不武装 totti")
+    expect(commanded.process(otherKey(at: 0.01)) == .pass, "未武装时主键不带 totti")
+    expect(commanded.process(space(false, at: 0.02, modifiers: [.command])) == .pass, "⌘空格松开原样放行")
+
+    var repeated = SpaceModifierEngine()
+    expect(repeated.process(space(true, at: 0)) == .suppress, "重复前的按下被吞掉")
+    expect(repeated.process(space(true, at: 0.05, autoRepeat: true)) == .suppress, "空格自动重复不成为搭配键")
+    expect(repeated.process(space(false, at: 0.1)) == .emitSpace, "只有自动重复时仍按点按补发空格")
+
+    var synthetic = SpaceModifierEngine()
+    expect(synthetic.process(space(true, at: 0, synthesized: true)) == .pass, "合成空格不重新武装")
+    expect(synthetic.process(otherKey(at: 0.01)) == .pass, "合成空格之后的键不带 totti")
+
+    let suite = "tocode-space-totti-\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defaults.removePersistentDomain(forName: suite)
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let oldJSON = """
+    [{"id":"11111111-1111-1111-1111-111111111111","name":"旧规则","source":{"keyCode":0,"modifiers":8,"keyLabel":"A"},"target":{"kind":"shortcut","shortcut":{"keyCode":11,"modifiers":1,"keyLabel":"B"}}}]
+    """
+    defaults.set(Data(oldJSON.utf8), forKey: KeyboardShortcutMappingStore.defaultsKey)
+    let store = KeyboardShortcutMappingStore(defaults: defaults)
+    let legacy = store.allMappings()
+    expect(legacy.count == 1, "旧映射 JSON 可以读入")
+    expect(legacy.first?.source.modifiers == [.command], "旧映射修饰键不含 totti")
+    expect(legacy.first?.target == .shortcut(RecordedShortcut(keyCode: 11, modifiers: [.control], keyLabel: "B")), "旧映射目标保持不变")
+
+    if case .failure(.tottiNotEmittable) = store.save(
+        KeyboardShortcutMappingDraft(name: "不能发出", source: tottiV, target: .shortcut(tottiV))
+    ) {
+        expect(true, "键盘目标含 totti 时拒绝保存")
+    } else {
+        expect(false, "键盘目标含 totti 时拒绝保存")
+    }
+    guard case .success = store.save(
+        KeyboardShortcutMappingDraft(name: "totti V", source: tottiV, target: .shortcut(control7))
+    ) else {
+        expect(false, "totti+V 可以作为源保存")
+        return
+    }
+    guard case .success = store.save(
+        KeyboardShortcutMappingDraft(
+            name: "普通 V",
+            source: RecordedShortcut(keyCode: 9, modifiers: [], keyLabel: "V"),
+            target: .shortcut(control7)
+        )
+    ) else {
+        expect(false, "普通 V 与 totti+V 可以并存")
+        return
+    }
+
+    let mapping = KeyboardShortcutMapping(
+        id: UUID(),
+        name: "七",
+        source: tottiV,
+        target: .shortcut(control7)
+    )
+    var remap = KeyboardShortcutRemapEngine(mappings: [mapping])
+    let hit = KeyboardShortcutEventSnapshot(
+        keyCode: 9,
+        modifiers: [.totti],
+        isKeyDown: true,
+        isAutoRepeat: false,
+        isSynthesized: false
+    )
+    expect(remap.process(hit) == .emit(control7), "totti+V 只产出 ⌃7")
+    expect(
+        remap.process(
+            KeyboardShortcutEventSnapshot(
+                keyCode: 9,
+                modifiers: [.totti],
+                isKeyDown: false,
+                isAutoRepeat: false,
+                isSynthesized: false
+            )
+        ) == .suppress,
+        "totti+V 的松开仍被吞掉"
+    )
+    var plain = KeyboardShortcutRemapEngine(mappings: [mapping])
+    expect(
+        plain.process(
+            KeyboardShortcutEventSnapshot(
+                keyCode: 9,
+                modifiers: [],
+                isKeyDown: true,
+                isAutoRepeat: false,
+                isSynthesized: false
+            )
+        ) == .pass,
+        "没有 totti 的 V 原样放行"
+    )
+    var echoed = KeyboardShortcutRemapEngine(mappings: [mapping])
+    expect(
+        echoed.process(
+            KeyboardShortcutEventSnapshot(
+                keyCode: 9,
+                modifiers: [.totti],
+                isKeyDown: true,
+                isAutoRepeat: false,
+                isSynthesized: true
+            )
+        ) == .pass,
+        "合成事件即使带 totti 也不重入"
+    )
+
+    let pad = TrackpadShortcutStore(defaults: defaults)
+    expect(!pad.setBinding(.shortcut(tottiV), for: .fourFingerTap), "触控板快捷键目标含 totti 时拒绝保存")
+    expect(pad.binding(for: .fourFingerTap) == nil, "拒绝后不留下触控板绑定")
+    var portable = TocodePortableSettingsTransfer.make(from: defaults)
+    portable.trackpad[String(TrackpadTapGesture.fourFingerTap.rawValue)] = .shortcut(tottiV)
+    let importedSuite = "tocode-space-totti-import-\(UUID().uuidString)"
+    let imported = UserDefaults(suiteName: importedSuite)!
+    imported.removePersistentDomain(forName: importedSuite)
+    defer { imported.removePersistentDomain(forName: importedSuite) }
+    TrackpadShortcutStore(defaults: imported).setBinding(.action(.blackout), for: .fourFingerTap)
+    TocodePortableSettingsTransfer.apply(portable, to: imported)
+    expect(
+        TrackpadShortcutStore(defaults: imported).binding(for: .fourFingerTap) == nil,
+        "导入含 totti 的触控板快捷键时清除该项"
+    )
+    expect(
+        KeyboardShortcutMappingStore(defaults: imported).allMappings().contains { $0.source.modifiers.contains(.totti) },
+        "含 totti 的键盘映射仍随配置进出"
+    )
+
+    let permissions = MockShortcutPermissions()
+    permissions.accessibility = true
+    let tap = MockSpaceModifierTap()
+    let poster = MockSpaceBarPoster()
+    let clock = ManualShortcutClock()
+    let scheduler = ManualScheduler()
+    let alerts = MockAlerts()
+    let service = SpaceModifierService(
+        store: SpaceModifierStore(defaults: defaults),
+        permissions: permissions,
+        tap: tap,
+        poster: poster,
+        clock: clock,
+        scheduler: scheduler,
+        alerts: alerts
+    )
+    defer { service.shutdown() }
+    service.applySavedSettings()
+    expect(!tap.isInstalled, "默认关闭时不安装空格钩子")
+    expect(service.setEnabled(true), "开启空格修饰键")
+    expect(tap.installCount == 1, "开启后安装独立钩子")
+    expect(service.isEffective, "钩子安装后开关有效")
+
+    func keyEvent(_ keyCode: CGKeyCode, down: Bool, flags: CGEventFlags = []) -> CGEvent {
+        let event = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: down)!
+        event.flags = flags
+        return event
+    }
+    let start = clock.current
+    expect(tap.handler?(.keyDown, keyEvent(49, down: true)) == .suppress, "服务吞掉空格按下")
+    clock.current = start.addingTimeInterval(0.1)
+    expect(tap.handler?(.keyUp, keyEvent(49, down: false)) == .suppress, "点按松开不把物理空格放出去")
+    scheduler.runAll()
+    expect(poster.postCount == 1, "点按松开后补发一次空格")
+
+    poster.postCount = 0
+    clock.current = start
+    expect(tap.handler?(.keyDown, keyEvent(49, down: true)) == .suppress, "再次按下空格")
+    let vee = keyEvent(9, down: true)
+    expect(tap.handler?(.keyDown, vee) == .pass, "搭配的 V 放行")
+    expect(
+        vee.getIntegerValueField(.eventSourceUserData) == SpaceModifierEngine.tottiMarker,
+        "搭配的 V 带上 totti 标记"
+    )
+    clock.current = start.addingTimeInterval(0.05)
+    expect(tap.handler?(.keyUp, keyEvent(49, down: false)) == .suppress, "搭配后松开空格")
+    scheduler.runAll()
+    expect(poster.postCount == 0, "搭配其他键后不补发空格")
+
+    poster.postCount = 0
+    let commandSpace = keyEvent(49, down: true, flags: .maskCommand)
+    expect(tap.handler?(.keyDown, commandSpace) == .pass, "服务放行 ⌘空格")
+    expect(commandSpace.getIntegerValueField(.eventSourceUserData) == 0, "⌘空格不写 totti 标记")
+    expect(tap.handler?(.keyUp, keyEvent(49, down: false, flags: .maskCommand)) == .pass, "服务放行 ⌘空格松开")
+    scheduler.runAll()
+    expect(poster.postCount == 0, "⌘空格不补发额外空格")
+
+    expect(tap.handler?(.keyDown, keyEvent(49, down: true)) == .suppress, "黑屏前吞掉空格")
+    service.shouldYieldAllEvents = { true }
+    expect(tap.handler?(.keyUp, keyEvent(49, down: false)) == .pass, "黑屏时放行空格")
+    scheduler.runAll()
+    expect(poster.postCount == 0, "黑屏中途松开不补发空格")
+    service.shouldYieldAllEvents = nil
+    let afterYield = keyEvent(9, down: true)
+    expect(tap.handler?(.keyDown, afterYield) == .pass, "黑屏重置后不再把后续键当成 totti")
+    expect(afterYield.getIntegerValueField(.eventSourceUserData) == 0, "黑屏重置后不留 totti 标记")
+
+    let echoedSpace = keyEvent(49, down: true)
+    echoedSpace.setIntegerValueField(.eventSourceUserData, value: GlobalShortcutEngine.synthesizerMarker)
+    expect(tap.handler?(.keyDown, echoedSpace) == .pass, "服务放行合成空格")
+    expect(
+        echoedSpace.getIntegerValueField(.eventSourceUserData) == GlobalShortcutEngine.synthesizerMarker,
+        "合成标记不被改写成 totti"
+    )
+
+    service.reassertHeadPosition()
+    expect(tap.installCount == 2, "其他键盘钩子插入后空格钩子重新占到队首")
+    expect(service.setEnabled(false), "关闭空格修饰键")
+    let installsAfterDisable = tap.installCount
+    service.reassertHeadPosition()
+    expect(tap.installCount == installsAfterDisable, "关闭后不再重新安装钩子")
+    expect(!service.isEffective, "关闭后开关无效")
+
+    let deniedPermissions = MockShortcutPermissions()
+    let deniedTap = MockSpaceModifierTap()
+    let deniedAlerts = MockAlerts()
+    let denied = SpaceModifierService(
+        store: SpaceModifierStore(defaults: defaults),
+        permissions: deniedPermissions,
+        tap: deniedTap,
+        poster: MockSpaceBarPoster(),
+        clock: ManualShortcutClock(),
+        scheduler: ManualScheduler(),
+        alerts: deniedAlerts
+    )
+    expect(!denied.setEnabled(true), "没有辅助功能权限时开启失败")
+    expect(!SpaceModifierStore(defaults: defaults).isEnabled, "开启失败后偏好回到关闭")
+    expect(!deniedTap.isInstalled, "开启失败不留下钩子")
+    expect(deniedAlerts.titles.contains("空格修饰键需要辅助功能权限"), "权限失败有明确提示")
+
+    permissions.accessibility = true
+    let brokenTap = MockSpaceModifierTap()
+    brokenTap.installShouldFail = true
+    let brokenAlerts = MockAlerts()
+    let broken = SpaceModifierService(
+        store: SpaceModifierStore(defaults: defaults),
+        permissions: permissions,
+        tap: brokenTap,
+        poster: MockSpaceBarPoster(),
+        clock: ManualShortcutClock(),
+        scheduler: ManualScheduler(),
+        alerts: brokenAlerts
+    )
+    expect(!broken.setEnabled(true), "钩子创建失败时开启失败")
+    expect(!SpaceModifierStore(defaults: defaults).isEnabled, "钩子失败后偏好回到关闭")
+    expect(brokenAlerts.titles.contains("空格修饰键监听未启动"), "钩子失败有明确提示")
+
+    let stoppingTap = MockSpaceModifierTap()
+    let stoppingAlerts = MockAlerts()
+    let stoppingScheduler = ManualScheduler()
+    let stopping = SpaceModifierService(
+        store: SpaceModifierStore(defaults: defaults),
+        permissions: permissions,
+        tap: stoppingTap,
+        poster: MockSpaceBarPoster(),
+        clock: ManualShortcutClock(),
+        scheduler: stoppingScheduler,
+        alerts: stoppingAlerts
+    )
+    expect(stopping.setEnabled(true), "恢复测试前先成功开启")
+    stoppingTap.reenableShouldFail = true
+    stoppingTap.isEnabled = false
+    expect(stoppingTap.handler?(.tapDisabledByTimeout, keyEvent(49, down: true)) == .pass, "钩子被系统停用时先放行")
+    stoppingScheduler.runAll()
+    expect(!SpaceModifierStore(defaults: defaults).isEnabled, "无法恢复时关闭开关")
+    expect(stoppingAlerts.titles.contains("空格修饰键监听已停止"), "无法恢复时明确提示")
+    stopping.shutdown()
 }
 
 func testDirectoryRootResolverPriority() {
@@ -6706,6 +7102,7 @@ struct TestRunnerMain {
         await testTrackpadShortcutServiceLifecycleAndFaults()
         await testTrackpadShortcutActionBindingsAndDispatch()
         testKeyboardShortcutMappingStoreAndEngine()
+        testSpaceTottiModifier()
         testKeyboardShortcutMappingActionTargets()
         await testMappedOpenURL()
         await testKeyboardMappingTargetEditorRetainsBlackout()
