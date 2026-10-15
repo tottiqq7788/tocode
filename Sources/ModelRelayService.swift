@@ -217,6 +217,58 @@ final class ModelRelayService {
         configurationSnapshot()
     }
 
+enum ModelRelayAutomationClient {
+    static func complete(
+        modelAlias: String,
+        systemPrompt: String,
+        userText: String,
+        router: ModelRelayRouter,
+        client: ModelRelayUpstreamClient,
+        metrics: ModelRelayCallMetricsRecording
+    ) async throws -> String {
+        let started = Date()
+        let route: ModelRelayResolvedRoute
+        do {
+            route = try router.resolve(alias: modelAlias)
+        } catch {
+            throw ModelAutomationError.modelUnavailable
+        }
+        let candidate = route.candidates[0]
+        do {
+            let text = try await client.completeChat(
+                route: route,
+                systemPrompt: systemPrompt,
+                userText: userText
+            )
+            router.recordSuccess(keyID: candidate.keyID)
+            metrics.record(
+                ModelRelayCallEvent(
+                    timestamp: Date(),
+                    route: "chat/completions",
+                    providerID: candidate.providerID,
+                    providerName: candidate.providerName,
+                    publishedModel: modelAlias,
+                    upstreamModel: candidate.upstreamModelID,
+                    status: 200,
+                    durationMs: Int(Date().timeIntervalSince(started) * 1000),
+                    ok: true
+                )
+            )
+            return text
+        } catch let error as ModelRelayError {
+            switch error {
+            case .upstreamHTTP(let status):
+                router.recordFailure(keyID: candidate.keyID, statusCode: status)
+            case .upstream:
+                router.recordFailure(keyID: candidate.keyID, statusCode: nil)
+            default:
+                break
+            }
+            throw error
+        }
+    }
+}
+
     func completeAutomation(
         modelAlias: String,
         systemPrompt: String,

@@ -431,6 +431,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                     symbolName = action.menuSymbolName
                 case .openURL:
                     symbolName = "link"
+                case .automation:
+                    symbolName = "wand.and.stars"
                 }
                 item.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "已配置")
                 item.toolTip = "\(mapping.source.displayName) → \(mapping.target.displayText)"
