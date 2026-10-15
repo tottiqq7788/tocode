@@ -47,7 +47,8 @@ enum MacTimerPrompt {
 
     static func prompt(
         draft: MacTimerDraft,
-        mode: MacTimerPromptMode
+        mode: MacTimerPromptMode,
+        automations: [ModelAutomation] = []
     ) -> MacTimerPromptResult {
         let alert = NSAlert()
         alert.alertStyle = .informational
@@ -116,7 +117,8 @@ enum MacTimerPrompt {
         let targetLabel = NSTextField(labelWithString: "事项")
         let targetEditor = KeyboardMappingTargetEditor(
             target: draft.target,
-            actionTriggerPhrase: "到点后"
+            actionTriggerPhrase: "到点后",
+            automations: automations
         )
 
         let stack = NSStackView()

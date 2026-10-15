@@ -217,6 +217,21 @@ final class ModelRelayService {
         configurationSnapshot()
     }
 
+    func completeAutomation(
+        modelAlias: String,
+        systemPrompt: String,
+        userText: String
+    ) async throws -> String {
+        try await ModelRelayAutomationClient.complete(
+            modelAlias: modelAlias,
+            systemPrompt: systemPrompt,
+            userText: userText,
+            router: router,
+            client: upstreamClient,
+            metrics: callMetrics
+        )
+    }
+
     func updatePort(
         _ value: Int,
         completion: @escaping (Result<Void, Error>) -> Void

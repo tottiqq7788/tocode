@@ -37,6 +37,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private let screenBlackout: ScreenBlackoutService
     private let commandExecutor: TocodeCommandExecutor
     private let modelRelay: ModelRelayService
+    private let automationRunner: ModelAutomationRunner
     private let actionDispatcher = KeyboardMappingActionDispatcher()
     private var activeModelMenu: NSMenu?
     private var activeModelParentItem: NSMenuItem?
@@ -103,6 +104,22 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         self.extendedSettings = extendedSettings
         self.screenBlackout = screenBlackout ?? ScreenBlackoutService(overlay: ScreenBlackoutOverlay())
         self.modelRelay = modelRelay
+        self.automationRunner = ModelAutomationRunner(
+            lookup: { ModelAutomationStore().automation(id: $0) },
+            readSelection: { await SystemSelectedTextReader().readSelectedText() },
+            complete: { alias, prompt, text in
+                try await modelRelay.completeAutomation(
+                    modelAlias: alias,
+                    systemPrompt: prompt,
+                    userText: text
+                )
+            },
+            copy: { ClipboardService().copy($0) },
+            paste: { KeyboardEventSynthesizer().postCommandV() },
+            notify: { title, body in
+                ModelAutomationNotification.post(title: title, body: body)
+            }
+        )
         self.commandExecutor = commandExecutor
         let terminalWindows = DirectoryTerminalWindowStore()
         self.terminalWindows = terminalWindows
@@ -806,6 +823,35 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             ))
         }
         keysItem.submenu = keysMenu
+
+        let automationsItem = menu.addItem(withTitle: "自动化", action: nil, keyEquivalent: "")
+        automationsItem.image = NSImage(systemSymbolName: "wand.and.stars", accessibilityDescription: nil)
+        let automationsMenu = NSMenu()
+        automationsMenu.autoenablesItems = false
+        let addAutomation = automationsMenu.addItem(
+            withTitle: "新增",
+            action: #selector(createModelAutomation),
+            keyEquivalent: ""
+        )
+        addAutomation.target = self
+        addAutomation.image = NSImage(systemSymbolName: "plus", accessibilityDescription: nil)
+        let savedAutomations = ModelAutomationStore().all().sorted {
+            $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }
+        if !savedAutomations.isEmpty {
+            automationsMenu.addItem(.separator())
+        }
+        for automation in savedAutomations {
+            let item = automationsMenu.addItem(
+                withTitle: automation.name,
+                action: #selector(editModelAutomation(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = automation.id.uuidString
+            item.toolTip = automation.modelAlias
+        }
+        automationsItem.submenu = automationsMenu
         root.submenu = menu
         return root
     }
@@ -1307,7 +1353,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
 
         let existing = trackpadShortcuts.binding(for: gesture)
-        switch ShortcutRecorderPrompt.prompt(for: gesture, existing: existing) {
+        switch ShortcutRecorderPrompt.prompt(
+            for: gesture,
+            existing: existing,
+            automations: ModelAutomationStore().all()
+        ) {
         case .save(let target):
             if target.emitsTotti {
                 presentKeyboardMappingError(.tottiNotEmittable, title: "无法保存触控板快捷键")
@@ -1364,7 +1414,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         while true {
             switch KeyboardShortcutMappingPrompt.prompt(
                 draft: draft,
-                isEditing: isEditing
+                isEditing: isEditing,
+                automations: ModelAutomationStore().all()
             ) {
             case .save(let candidate):
                 switch keyboardRemaps.saveMapping(candidate) {
@@ -1431,7 +1482,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
         var draft = initialDraft
         while true {
-            switch MacTimerPrompt.prompt(draft: draft, mode: mode) {
+            switch MacTimerPrompt.prompt(
+                draft: draft,
+                mode: mode,
+                automations: ModelAutomationStore().all()
+            ) {
             case .save(let candidate):
                 switch macTimers.saveAndStart(candidate) {
                 case .success:
@@ -1505,6 +1560,65 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         actionDispatcher.perform(action)
     }
 
+    func runModelAutomation(_ id: UUID) {
+        automationRunner.run(id: id)
+    }
+
+    @objc private func createModelAutomation() {
+        presentModelAutomationEditor(draft: ModelAutomationDraft(), isEditing: false)
+    }
+
+    @objc private func editModelAutomation(_ sender: NSMenuItem) {
+        guard
+            let rawID = sender.representedObject as? String,
+            let id = UUID(uuidString: rawID),
+            let automation = ModelAutomationStore().automation(id: id)
+        else {
+            return
+        }
+        presentModelAutomationEditor(
+            draft: ModelAutomationDraft(automation: automation),
+            isEditing: true
+        )
+    }
+
+    private func presentModelAutomationEditor(
+        draft initialDraft: ModelAutomationDraft,
+        isEditing: Bool
+    ) {
+        var draft = initialDraft
+        let store = ModelAutomationStore()
+        while true {
+            let aliases = modelRelay.router.availableAliases()
+            switch ModelAutomationPrompt.prompt(
+                draft: draft,
+                isEditing: isEditing,
+                modelAliases: aliases
+            ) {
+            case .save(let candidate):
+                switch store.save(candidate, availableAliases: Set(aliases)) {
+                case .success:
+                    return
+                case .failure(let error):
+                    let alert = NSAlert()
+                    alert.alertStyle = .warning
+                    alert.messageText = "无法保存自动化"
+                    alert.informativeText = error.localizedDescription
+                    alert.addButton(withTitle: "好")
+                    alert.runModal()
+                    draft = candidate
+                }
+            case .delete:
+                if let id = draft.id {
+                    store.delete(id: id)
+                }
+                return
+            case .cancel:
+                return
+            }
+        }
+    }
+
     /// 定时器到点：桌面切换与快捷键合成走 poster，其余走动作 dispatcher。
     func performMappedTarget(_ target: KeyboardShortcutMappingTarget) {
         switch target.remapStep() {
@@ -1520,6 +1634,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             }
         case .emitDown, .emitRepeat, .emitUp, .pass, .suppress:
             break
+        case .runAutomation(let id):
+            runModelAutomation(id)
         }
     }
 

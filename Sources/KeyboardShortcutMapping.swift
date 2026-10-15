@@ -35,11 +35,12 @@ struct KeyboardShortcutMappingDraft: Equatable {
     }
 }
 
-/// 目标可以是用户录入的组合键、内置命名功能，或一个带协议的网址。
+/// 目标可以是用户录入的组合键、内置命名功能、一个带协议的网址，或一个已保存的自动化。
 enum KeyboardShortcutMappingTarget: Equatable, Hashable {
     case shortcut(RecordedShortcut)
     case action(KeyboardMappingAction)
     case openURL(String)
+    case automation(UUID)
 
     /// 快捷键目标，或桌面切换解析出的组合键；Tocode 动作和打开网址没有组合键。
     var resolvedShortcut: RecordedShortcut? {
@@ -49,6 +50,8 @@ enum KeyboardShortcutMappingTarget: Equatable, Hashable {
         case .action(let action):
             return action.synthesizedShortcut
         case .openURL:
+            return nil
+        case .automation:
             return nil
         }
     }
@@ -64,6 +67,8 @@ enum KeyboardShortcutMappingTarget: Equatable, Hashable {
             return .invoke(action)
         case .openURL(let raw):
             return .openURL(raw)
+        case .automation(let id):
+            return .runAutomation(id)
         }
     }
 
@@ -75,6 +80,11 @@ enum KeyboardShortcutMappingTarget: Equatable, Hashable {
             return action.title
         case .openURL(let raw):
             return MappedURL.displayText(for: raw)
+        case .automation(let id):
+            if let name = ModelAutomationLookup.name(id) {
+                return "自动化 \(name)"
+            }
+            return "自动化"
         }
     }
 
@@ -121,12 +131,14 @@ extension KeyboardShortcutMappingTarget: Codable {
         case shortcut
         case action
         case url
+        case automation
     }
 
     private enum Kind: String, Codable {
         case shortcut
         case action
         case openURL
+        case automation
     }
 
     init(from decoder: Decoder) throws {
@@ -139,6 +151,8 @@ extension KeyboardShortcutMappingTarget: Codable {
                 self = .action(try container.decode(KeyboardMappingAction.self, forKey: .action))
             case .openURL:
                 self = .openURL(try container.decode(String.self, forKey: .url))
+            case .automation:
+                self = .automation(try container.decode(UUID.self, forKey: .automation))
             }
             return
         }
@@ -158,6 +172,9 @@ extension KeyboardShortcutMappingTarget: Codable {
         case .openURL(let url):
             try container.encode(Kind.openURL, forKey: .kind)
             try container.encode(url, forKey: .url)
+        case .automation(let id):
+            try container.encode(Kind.automation, forKey: .kind)
+            try container.encode(id, forKey: .automation)
         }
     }
 }
@@ -566,6 +583,7 @@ enum KeyboardShortcutRemapStep: Equatable {
     case emitUp(RecordedShortcut)
     case invoke(KeyboardMappingAction)
     case openURL(String)
+    case runAutomation(UUID)
 }
 
 struct KeyboardShortcutRemapEngine {

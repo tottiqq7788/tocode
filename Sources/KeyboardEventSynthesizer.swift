@@ -16,16 +16,22 @@ struct KeyboardEventSynthesizer: KeyboardEventSynthesizing {
     }
 
     func postCommandC() {
-        post(keyCode: CGKeyCode(ShortcutKeyClassifier.keyC), flags: .maskCommand)
+        _ = post(keyCode: CGKeyCode(ShortcutKeyClassifier.keyC), flags: .maskCommand)
     }
 
-    private func post(keyCode: CGKeyCode, flags: CGEventFlags) {
+    @discardableResult
+    func postCommandV() -> Bool {
+        post(keyCode: CGKeyCode(ShortcutKeyClassifier.keyV), flags: .maskCommand)
+    }
+
+    @discardableResult
+    private func post(keyCode: CGKeyCode, flags: CGEventFlags) -> Bool {
         let source = CGEventSource(stateID: .hidSystemState)
         guard
             let down = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true),
             let up = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false)
         else {
-            return
+            return false
         }
         down.flags = flags
         up.flags = flags
@@ -33,5 +39,6 @@ struct KeyboardEventSynthesizer: KeyboardEventSynthesizing {
         up.setIntegerValueField(.eventSourceUserData, value: Self.marker)
         down.post(tap: tapLocation)
         up.post(tap: tapLocation)
+        return true
     }
 }

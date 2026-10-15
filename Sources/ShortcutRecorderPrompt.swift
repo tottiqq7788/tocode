@@ -10,19 +10,21 @@ enum ShortcutRecorderResult {
 enum ShortcutRecorderPrompt {
     static func prompt(
         for gesture: TrackpadTapGesture,
-        existing: KeyboardShortcutMappingTarget?
+        existing: KeyboardShortcutMappingTarget?,
+        automations: [ModelAutomation] = []
     ) -> ShortcutRecorderResult {
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.messageText = gesture.title
-        alert.informativeText = "选择映射快捷键或映射功能。"
+        alert.informativeText = "选择映射快捷键、映射功能或一个自动化。"
         alert.addButton(withTitle: "保存")
         alert.addButton(withTitle: "取消")
         alert.addButton(withTitle: "清除配置")
 
         let targetEditor = KeyboardMappingTargetEditor(
             target: existing,
-            actionTriggerPhrase: "轻点后"
+            actionTriggerPhrase: "轻点后",
+            automations: automations
         )
         targetEditor.view.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([

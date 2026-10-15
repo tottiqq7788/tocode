@@ -92,6 +92,9 @@ swiftc Tests/TestRunner.swift \
   Sources/ModelRelayService.swift \
   Sources/ModelRelayPrompts.swift \
   Sources/ModelRelayStatusPanel.swift \
+  Sources/ModelAutomation.swift \
+  Sources/ModelAutomationPrompt.swift \
+  Sources/ModelAutomationRunner.swift \
   -o build/tests \
   -framework AppKit \
   -framework ApplicationServices \

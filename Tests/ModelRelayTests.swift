@@ -1361,7 +1361,7 @@ func testModelRelayPortRollback() async {
 func testModelRelayManualAndLegacyAKContract() {
     let manual = UserManual.pages.map { $0.title + "\n" + $0.body }.joined(separator: "\n")
     expect(manual.contains("顶层「模型」"), "说明书标明独立顶层模型中转站")
-    expect(manual.contains("「状态」「端口」「厂家」「密钥」"), "说明书标明四项菜单文案")
+    expect(manual.contains("「状态」「端口」「厂家」「密钥」「自动化」"), "说明书标明五项菜单文案")
     expect(manual.contains("打开当日调用明细日志文件"), "说明书标明状态窗打开日志文件")
     expect(manual.contains("不统计 token"), "说明书标明按调用次数而非 token")
     expect(manual.contains("直接打开与新增相同的编辑弹窗"), "说明书写明厂家点击直达编辑弹窗")

@@ -20,6 +20,7 @@ enum TocodePreferences {
                 MouseWheelReverseStore.verticalKey,
                 MouseWheelReverseStore.horizontalKey,
                 SpaceModifierStore.enabledKey,
+                ModelAutomationStore.defaultsKey,
                 DockAutohideRestrictStore.enabledKey,
                 DockAutohideRestrictStore.backupDelayKey,
                 ExtendedSettingsStore.akEnabledKey,

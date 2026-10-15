@@ -810,7 +810,22 @@ func testTocodePortableSettingsTransfer() {
         source: RecordedShortcut(keyCode: 11, modifiers: [.control], keyLabel: "B"),
         target: .action(.blackout)
     )
-    KeyboardShortcutMappingStore(defaults: defaults).replaceAll([mapping])
+    let automationID = UUID()
+    _ = ModelAutomationStore(defaults: defaults).save(
+        ModelAutomationDraft(
+            id: automationID,
+            name: "中译英",
+            prompt: "PROMPT-SECRET-074",
+            modelAlias: "demo-model"
+        ),
+        availableAliases: ["demo-model"]
+    )
+    KeyboardShortcutMappingStore(defaults: defaults).replaceAll([mapping, KeyboardShortcutMapping(
+        id: UUID(),
+        name: "翻译",
+        source: RecordedShortcut(keyCode: 16, modifiers: [.totti], keyLabel: "Y"),
+        target: .automation(automationID)
+    )])
     TrackpadShortcutStore(defaults: defaults).setBinding(
         .action(.switchDesktopLeft),
         for: .threeFingerTap
@@ -837,6 +852,9 @@ func testTocodePortableSettingsTransfer() {
     expect(!text.contains("wechat"), "导出不含微信字段")
     expect(!text.contains("rootFolder"), "导出不含根目录字段名")
     expect(!text.contains("spaceModifier"), "导出不含空格修饰键")
+    expect(text.contains(automationID.uuidString), "导出的键盘映射只带走自动化 ID")
+    expect(!text.contains("PROMPT-SECRET-074"), "导出不含自动化提示词")
+    expect(!text.contains("demo-model"), "导出不含自动化模型名")
 
     do {
         _ = try TocodePortableSettingsTransfer.decode(Data("{\"format\":\"nope\",\"version\":1}".utf8))
@@ -863,6 +881,16 @@ func testTocodePortableSettingsTransfer() {
     other.set(true, forKey: TerminalFollowSettingsStore.followEnabledKey)
     other.set(true, forKey: HermesFollowSettingsStore.followEnabledKey)
     other.set(true, forKey: SpaceModifierStore.enabledKey)
+    let keptAutomationID = UUID()
+    _ = ModelAutomationStore(defaults: other).save(
+        ModelAutomationDraft(
+            id: keptAutomationID,
+            name: "保留",
+            prompt: "KEEP-PROMPT-074",
+            modelAlias: "kept-model"
+        ),
+        availableAliases: ["kept-model"]
+    )
     KeyboardShortcutMappingStore(defaults: other).replaceAll([
         KeyboardShortcutMapping(
             id: UUID(),
@@ -875,7 +903,7 @@ func testTocodePortableSettingsTransfer() {
     let decoded = try! TocodePortableSettingsTransfer.decode(data)
     TocodePortableSettingsTransfer.apply(decoded, to: other)
     let applied = KeyboardShortcutMappingStore(defaults: other).allMappings()
-    expect(applied.map(\.name) == ["黑屏"], "导入整段替换键盘映射")
+    expect(applied.map(\.name) == ["黑屏", "翻译"], "导入整段替换键盘映射")
     expect(
         TrackpadShortcutStore(defaults: other).binding(for: .threeFingerTap) == .action(.switchDesktopLeft),
         "导入写入触控板绑定"
@@ -892,6 +920,231 @@ func testTocodePortableSettingsTransfer() {
     expect(other.bool(forKey: TerminalFollowSettingsStore.followEnabledKey), "导入不改终端跟随")
     expect(other.bool(forKey: HermesFollowSettingsStore.followEnabledKey), "导入不改 hermes跟随")
     expect(other.bool(forKey: SpaceModifierStore.enabledKey), "导入不改空格修饰键")
+    expect(
+        ModelAutomationStore(defaults: other).automation(id: keptAutomationID)?.prompt == "KEEP-PROMPT-074",
+        "导入不改模型自动化"
+    )
+}
+
+func testModelAutomation() async {
+    expect(TocodePreferences.knownKeys.contains(ModelAutomationStore.defaultsKey), "模型自动化进入已知偏好键")
+
+    let stringBody = Data(#"{"choices":[{"message":{"content":" Hello "}}]}"#.utf8)
+    expect(ModelAutomationResponse.assistantText(from: stringBody) == "Hello", "助手正文字符串去掉空白")
+    let partsBody = Data(
+        #"{"choices":[{"message":{"content":[{"type":"text","text":"A"},{"type":"text","text":"B"}]}}]}"#.utf8
+    )
+    expect(ModelAutomationResponse.assistantText(from: partsBody) == "AB", "助手正文拼接文本片段")
+    let blankBody = Data(#"{"choices":[{"message":{"content":"  "}}]}"#.utf8)
+    expect(ModelAutomationResponse.assistantText(from: blankBody) == nil, "空白正文不当作结果")
+    let reasoningBody = Data(#"{"choices":[{"message":{"content":null,"reasoning":"secret"}}]}"#.utf8)
+    expect(ModelAutomationResponse.assistantText(from: reasoningBody) == nil, "不读取思考字段")
+
+    let suite = "tocode-automation-\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defaults.removePersistentDomain(forName: suite)
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let store = ModelAutomationStore(defaults: defaults)
+    let draft = ModelAutomationDraft(name: " 中译英 ", prompt: " 翻译 ", modelAlias: " demo-model ")
+    guard case .success(let saved) = store.save(draft, availableAliases: ["demo-model"]) else {
+        expect(false, "可保存自动化")
+        return
+    }
+    expect(saved.name == "中译英" && saved.prompt == "翻译" && saved.modelAlias == "demo-model", "保存时去掉空白")
+    if case .failure = store.save(
+        ModelAutomationDraft(name: "中译英", prompt: "另一段", modelAlias: "demo-model"),
+        availableAliases: ["demo-model"]
+    ) {
+        expect(true, "名称不能重复")
+    } else {
+        expect(false, "名称不能重复")
+    }
+    expect(
+        store.save(
+            ModelAutomationDraft(name: "  ", prompt: "翻译", modelAlias: "demo-model"),
+            availableAliases: ["demo-model"]
+        ) == .failure(.emptyName),
+        "空名称不能保存"
+    )
+    expect(
+        store.save(
+            ModelAutomationDraft(name: "空提示", prompt: "  ", modelAlias: "demo-model"),
+            availableAliases: ["demo-model"]
+        ) == .failure(.emptyPrompt),
+        "空提示词不能保存"
+    )
+    expect(
+        store.save(
+            ModelAutomationDraft(name: "无模型", prompt: "翻译", modelAlias: "missing"),
+            availableAliases: ["demo-model"]
+        ) == .failure(.modelUnavailable),
+        "不可用模型不能新增"
+    )
+    guard case .success(let edited) = store.save(
+        ModelAutomationDraft(id: saved.id, name: "中译英", prompt: "改过的提示", modelAlias: "demo-model"),
+        availableAliases: []
+    ) else {
+        expect(false, "编辑时可以保留原来的模型名")
+        return
+    }
+    expect(edited.id == saved.id && edited.prompt == "改过的提示", "编辑保留稳定 ID")
+    store.delete(id: saved.id)
+    expect(store.automation(id: saved.id) == nil, "删除后规则还在也不再能查到自动化")
+
+    let source = RecordedShortcut(keyCode: 16, modifiers: [.totti], keyLabel: "Y")
+    let mapping = KeyboardShortcutMapping(
+        id: UUID(),
+        name: "翻译",
+        source: source,
+        target: .automation(saved.id)
+    )
+    let encoded = try! JSONEncoder().encode(mapping)
+    let decoded = try! JSONDecoder().decode(KeyboardShortcutMapping.self, from: encoded)
+    expect(decoded.target == .automation(saved.id), "自动化目标可编解码")
+    var engine = KeyboardShortcutRemapEngine(mappings: [mapping])
+    let down = KeyboardShortcutEventSnapshot(
+        keyCode: source.keyCode,
+        modifiers: source.modifiers,
+        isKeyDown: true,
+        isAutoRepeat: false,
+        isSynthesized: false
+    )
+    expect(engine.process(down) == .runAutomation(saved.id), "自动化只在首次按下执行")
+    let repeated = KeyboardShortcutEventSnapshot(
+        keyCode: source.keyCode,
+        modifiers: source.modifiers,
+        isKeyDown: true,
+        isAutoRepeat: true,
+        isSynthesized: false
+    )
+    expect(engine.process(repeated) == .suppress, "按住自动化不重复执行")
+    let up = KeyboardShortcutEventSnapshot(
+        keyCode: source.keyCode,
+        modifiers: [],
+        isKeyDown: false,
+        isAutoRepeat: false,
+        isSynthesized: false
+    )
+    expect(engine.process(up) == .suppress, "松开自动化不再次执行")
+
+    let previousLookup = ModelAutomationLookup.name
+    defer { ModelAutomationLookup.name = previousLookup }
+    ModelAutomationLookup.name = { $0 == saved.id ? "中译英" : nil }
+    expect(KeyboardShortcutMappingTarget.automation(saved.id).displayText == "自动化 中译英", "菜单显示自动化名称")
+    expect(KeyboardShortcutMappingTarget.automation(UUID()).displayText == "自动化", "缺失自动化仍有兜底名称")
+
+    let changed = FakeAutomationPasteboard()
+    changed.value = "你好"
+    let reader = SystemSelectedTextReader(
+        pasteboard: changed,
+        copySelection: { changed.changeCount += 1 },
+        timeout: 0.2,
+        sleep: { _ in }
+    )
+    expect(await reader.readSelectedText() == "你好", "复制后读到选中文字")
+    let unchanged = FakeAutomationPasteboard()
+    unchanged.value = "旧剪贴板"
+    let stale = SystemSelectedTextReader(
+        pasteboard: unchanged,
+        copySelection: {},
+        timeout: 0.05,
+        sleep: { _ in }
+    )
+    expect(await stale.readSelectedText() == nil, "剪贴板没变时不读取")
+
+    let automation = ModelAutomation(id: saved.id, name: "中译英", prompt: "翻译", modelAlias: "demo-model")
+    let log = AutomationTestLog()
+    var runner: ModelAutomationRunner!
+    runner = ModelAutomationRunner(
+        lookup: { requested in requested == automation.id ? automation : nil },
+        readSelection: { "你好" },
+        complete: { alias, prompt, user in
+            log.completions += 1
+            expect(alias == "demo-model" && prompt == "翻译" && user == "你好", "调用带上模型、提示词和选中文字")
+            runner.run(id: automation.id)
+            return "Hello"
+        },
+        copy: { log.copies.append($0) },
+        paste: {
+            log.pastes += 1
+            return true
+        },
+        notify: { title, _ in log.notes.append(title) }
+    )
+    runner.onFinish = { log.done = true }
+    runner.run(id: automation.id)
+    expect(await waitUntil { log.done }, "自动化执行结束")
+    expect(log.completions == 1, "执行中再次触发不再调用模型")
+    expect(log.notes == ["自动化正在执行"], "执行中再次触发只提示")
+    expect(log.copies == ["Hello"] && log.pastes == 1, "成功时写入正文并粘贴一次")
+
+    log.notes.removeAll()
+    log.copies.removeAll()
+    log.done = false
+    let missingRunner = ModelAutomationRunner(
+        lookup: { _ in nil },
+        readSelection: { "你好" },
+        complete: { _, _, _ in
+            expect(false, "自动化不存在时不调用模型")
+            return "nope"
+        },
+        copy: { _ in expect(false, "自动化不存在时不改剪贴板") },
+        paste: { false },
+        notify: { title, _ in log.notes.append(title) }
+    )
+    missingRunner.onFinish = { log.done = true }
+    missingRunner.run(id: UUID())
+    expect(log.notes == ["自动化不存在"], "自动化不存在时只提示")
+    try? await Task.sleep(nanoseconds: 30_000_000)
+    expect(!log.done, "不存在的自动化不会启动执行")
+
+    log.notes.removeAll()
+    log.done = false
+    let emptyRunner = ModelAutomationRunner(
+        lookup: { _ in automation },
+        readSelection: { nil },
+        complete: { _, _, _ in
+            expect(false, "没有选中文字时不调用模型")
+            return "nope"
+        },
+        copy: { _ in expect(false, "没有选中文字时不改剪贴板") },
+        paste: { false },
+        notify: { title, _ in log.notes.append(title) }
+    )
+    emptyRunner.onFinish = { log.done = true }
+    emptyRunner.run(id: automation.id)
+    expect(await waitUntil { log.done }, "没有选中文字的执行结束")
+    expect(log.notes == ["没有读到选中的文字"], "没有选中文字时只提示")
+
+    log.notes.removeAll()
+    log.copies.removeAll()
+    log.done = false
+    let blankRunner = ModelAutomationRunner(
+        lookup: { _ in automation },
+        readSelection: { "你好" },
+        complete: { _, _, _ in "  " },
+        copy: { log.copies.append($0) },
+        paste: { true },
+        notify: { title, _ in log.notes.append(title) }
+    )
+    blankRunner.onFinish = { log.done = true }
+    blankRunner.run(id: automation.id)
+    expect(await waitUntil { log.done }, "空正文执行结束")
+    expect(log.notes == ["自动化没有结果"] && log.copies.isEmpty, "空正文不粘贴")
+}
+
+private final class AutomationTestLog {
+    var notes: [String] = []
+    var copies: [String] = []
+    var pastes = 0
+    var completions = 0
+    var done = false
+}
+
+private final class FakeAutomationPasteboard: AutomationPasteboardReading {
+    var changeCount = 1
+    var value: String?
+    func string() -> String? { value }
 }
 
 func testUserManualPages() {
@@ -916,6 +1169,7 @@ func testUserManualPages() {
     expect(joined.contains("totti"), "说明书说明 totti")
     expect(joined.contains("250 毫秒"), "说明书写明点按时间")
     expect(joined.contains("不占用 fn"), "说明书写明不占用 fn")
+    expect(joined.contains("「自动化 → 新增」"), "说明书覆盖模型自动化")
     expect(joined.contains("限制程序坞弹出"), "说明书覆盖限制程序坞弹出")
     expect(joined.contains("自动隐藏和显示程序坞"), "说明书写明需系统自动隐藏")
     expect(joined.contains("定时器"), "说明书覆盖 mac 定时器")
@@ -3629,9 +3883,27 @@ func testKeyboardMappingTargetEditorRetainsBlackout() {
         actionTriggerPhrase: "轻点后"
     )
     expect(trackpad.target == .action(.blackout), "触控板弹窗复用同一编辑器并回填临时黑屏")
+    let automation = ModelAutomation(
+        id: UUID(),
+        name: "中译英",
+        prompt: "翻译",
+        modelAlias: "demo-model"
+    )
+    let automationEditor = KeyboardMappingTargetEditor(
+        target: .automation(automation.id),
+        automations: [automation]
+    )
+    expect(automationEditor.target == .automation(automation.id), "编辑已有自动化目标时回填")
+    let missingAutomation = KeyboardMappingTargetEditor(
+        target: .automation(UUID()),
+        automations: [automation]
+    )
+    expect(missingAutomation.target == nil, "自动化已删除时不能保存原目标")
     editor.detach()
     desktop.detach()
     trackpad.detach()
+    automationEditor.detach()
+    missingAutomation.detach()
 }
 
 @MainActor
@@ -7143,6 +7415,7 @@ struct TestRunnerMain {
         await testTrackpadShortcutActionBindingsAndDispatch()
         testKeyboardShortcutMappingStoreAndEngine()
         testSpaceTottiModifier()
+        await testModelAutomation()
         testKeyboardShortcutMappingActionTargets()
         await testMappedOpenURL()
         await testKeyboardMappingTargetEditorRetainsBlackout()

@@ -56,6 +56,58 @@ final class ModelRelayUpstreamClient: ModelRelayCatalogFetching {
         return unique
     }
 
+    /// 非流式读取助手正文。不把请求或响应正文写入日志。
+    func completeChat(
+        route: ModelRelayResolvedRoute,
+        systemPrompt: String,
+        userText: String
+    ) async throws -> String {
+        let candidate = route.candidates[0]
+        let url = try ModelRelayValidation.endpoint(
+            baseURL: candidate.baseURL,
+            route: "chat/completions"
+        )
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(candidate.secret)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+        let body: [String: Any] = [
+            "model": candidate.upstreamModelID,
+            "stream": false,
+            "messages": [
+                ["role": "system", "content": systemPrompt],
+                ["role": "user", "content": userText]
+            ]
+        ]
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let redirect = ModelRelayRedirectDelegate(origin: url, secret: candidate.secret)
+        let session = URLSession(
+            configuration: sessionConfiguration,
+            delegate: redirect,
+            delegateQueue: nil
+        )
+        defer { session.finishTasksAndInvalidate() }
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            throw ModelRelayError.upstream(error.localizedDescription)
+        }
+        guard let http = response as? HTTPURLResponse else {
+            throw ModelRelayError.upstream("没有 HTTP 响应")
+        }
+        guard (200...299).contains(http.statusCode) else {
+            throw ModelRelayError.upstreamHTTP(http.statusCode)
+        }
+        guard let text = ModelAutomationResponse.assistantText(from: data) else {
+            throw ModelAutomationError.emptyResponse
+        }
+        return text
+    }
+
     func makeProxyOperation(
         request: ModelRelayHTTPRequest,
         route: ModelRelayResolvedRoute,

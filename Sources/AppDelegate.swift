@@ -114,8 +114,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         keyboardRemaps.actionHandler = { [weak controller] action in
             controller?.performMappedAction(action)
         }
+        keyboardRemaps.automationHandler = { [weak controller] id in
+            controller?.runModelAutomation(id)
+        }
         trackpad.actionHandler = { [weak controller] action in
             controller?.performMappedAction(action)
+        }
+        trackpad.automationHandler = { [weak controller] id in
+            controller?.runModelAutomation(id)
         }
         keyboardRemaps.shouldYieldAllEvents = { [weak blackout] in
             blackout?.isPresented == true
