@@ -558,7 +558,12 @@ struct KeyboardShortcutEventSnapshot: Equatable {
 enum KeyboardShortcutRemapStep: Equatable {
     case pass
     case suppress
+    /// 点按一次目标键。用于功能、桌面切换和定时器，不跟随按住。
     case emit(RecordedShortcut)
+    /// 按住源键期间持续按住目标键。
+    case emitDown(RecordedShortcut)
+    case emitRepeat(RecordedShortcut)
+    case emitUp(RecordedShortcut)
     case invoke(KeyboardMappingAction)
     case openURL(String)
 }
@@ -566,6 +571,8 @@ enum KeyboardShortcutRemapStep: Equatable {
 struct KeyboardShortcutRemapEngine {
     private var mappingsBySource: [KeyboardShortcutSignature: KeyboardShortcutMapping] = [:]
     private var activeSourceKeyCodes: Set<UInt16> = []
+    /// 目标是快捷键时记住要在松开时抬起的键。功能与打开网址不进入这里。
+    private var heldShortcuts: [UInt16: RecordedShortcut] = [:]
 
     init(mappings: [KeyboardShortcutMapping] = []) {
         replaceMappings(mappings)
@@ -605,6 +612,10 @@ struct KeyboardShortcutRemapEngine {
         }
 
         if !event.isKeyDown {
+            if let shortcut = heldShortcuts.removeValue(forKey: event.keyCode) {
+                activeSourceKeyCodes.remove(event.keyCode)
+                return .emitUp(shortcut)
+            }
             if activeSourceKeyCodes.remove(event.keyCode) != nil {
                 return .suppress
             }
@@ -612,6 +623,9 @@ struct KeyboardShortcutRemapEngine {
         }
 
         if activeSourceKeyCodes.contains(event.keyCode) {
+            if event.isAutoRepeat, let shortcut = heldShortcuts[event.keyCode] {
+                return .emitRepeat(shortcut)
+            }
             return .suppress
         }
 
@@ -630,6 +644,20 @@ struct KeyboardShortcutRemapEngine {
         }
 
         activeSourceKeyCodes.insert(event.keyCode)
+        if case .shortcut(let shortcut) = mapping.target {
+            heldShortcuts[event.keyCode] = shortcut
+            return .emitDown(shortcut)
+        }
         return mapping.target.remapStep()
+    }
+
+    /// 黑屏、录入或钩子停止时抬起还按着的目标键，避免右箭头一类键卡住。
+    mutating func releaseHeldShortcuts() -> [RecordedShortcut] {
+        let shortcuts = heldShortcuts.keys.sorted().compactMap { heldShortcuts[$0] }
+        for key in heldShortcuts.keys {
+            activeSourceKeyCodes.remove(key)
+        }
+        heldShortcuts.removeAll()
+        return shortcuts
     }
 }

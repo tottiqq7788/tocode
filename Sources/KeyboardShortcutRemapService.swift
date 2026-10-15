@@ -123,10 +123,14 @@ final class KeyboardShortcutRemapService: KeyboardShortcutRemapControlling {
 
     func shutdown() {
         inputCaptureSuspended = false
+        releaseHeldTargets()
         tap.remove()
     }
 
     func setInputCaptureSuspended(_ suspended: Bool) {
+        if suspended {
+            releaseHeldTargets()
+        }
         inputCaptureSuspended = suspended
     }
 
@@ -146,7 +150,10 @@ final class KeyboardShortcutRemapService: KeyboardShortcutRemapControlling {
     @discardableResult
     func handleSnapshot(_ snapshot: KeyboardShortcutEventSnapshot) -> KeyboardShortcutRemapStep {
         guard !inputCaptureSuspended else { return .pass }
-        if shouldYieldAllEvents?() == true { return .pass }
+        if shouldYieldAllEvents?() == true {
+            releaseHeldTargets()
+            return .pass
+        }
         let step = engine.process(snapshot)
         perform(step)
         return step
@@ -214,6 +221,7 @@ final class KeyboardShortcutRemapService: KeyboardShortcutRemapControlling {
             return .pass
         }
         if shouldYieldAllEvents?() == true {
+            releaseHeldTargets()
             return .pass
         }
         guard let snapshot = KeyboardShortcutEventSnapshot.capture(type: type, event: event) else {
@@ -225,7 +233,7 @@ final class KeyboardShortcutRemapService: KeyboardShortcutRemapControlling {
         switch step {
         case .pass:
             return .pass
-        case .suppress, .emit, .invoke, .openURL:
+        case .suppress, .emit, .emitDown, .emitRepeat, .emitUp, .invoke, .openURL:
             return .suppress
         }
     }
@@ -244,6 +252,12 @@ final class KeyboardShortcutRemapService: KeyboardShortcutRemapControlling {
                     )
                 }
             }
+        case .emitDown(let target):
+            schedulePhase(target, .down)
+        case .emitRepeat(let target):
+            schedulePhase(target, .automaticRepeat)
+        case .emitUp(let target):
+            schedulePhase(target, .up)
         case .invoke(let action):
             scheduler.async { [weak self] in
                 self?.actionHandler?(action)
@@ -261,7 +275,26 @@ final class KeyboardShortcutRemapService: KeyboardShortcutRemapControlling {
         }
     }
 
+    private func schedulePhase(_ shortcut: RecordedShortcut, _ phase: ShortcutKeyPhase) {
+        scheduler.async { [weak self] in
+            guard let self else { return }
+            if !self.poster.postPhase(shortcut, phase: phase) {
+                self.alerts.notify(
+                    title: "键盘映射发送失败",
+                    body: "目标快捷键未能发送。规则已保留，其他输入功能不受影响。"
+                )
+            }
+        }
+    }
+
+    private func releaseHeldTargets() {
+        for shortcut in engine.releaseHeldShortcuts() {
+            schedulePhase(shortcut, .up)
+        }
+    }
+
     private func stopListeningAfterFailure() {
+        releaseHeldTargets()
         tap.remove()
         alerts.notify(
             title: "键盘映射监听已停止",

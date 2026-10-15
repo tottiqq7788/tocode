@@ -1518,7 +1518,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             if !MappedURLLaunch.openStored(raw) {
                 notifyMappedAction("定时器执行失败", "系统没有打开该网址。任务已保留。")
             }
-        case .pass, .suppress:
+        case .emitDown, .emitRepeat, .emitUp, .pass, .suppress:
             break
         }
     }

@@ -2108,8 +2108,14 @@ final class MockMultitouchMonitor: MultitouchMonitoring {
     }
 }
 
+struct PostedShortcutPhase: Equatable {
+    var phase: ShortcutKeyPhase
+    var shortcut: RecordedShortcut
+}
+
 final class MockTrackpadShortcutPoster: TrackpadShortcutEventPosting {
     var posted: [RecordedShortcut] = []
+    var phases: [PostedShortcutPhase] = []
     var shouldSucceed = true
     var failOnCount: Int?
 
@@ -2118,6 +2124,11 @@ final class MockTrackpadShortcutPoster: TrackpadShortcutEventPosting {
         if let failOnCount, posted.count == failOnCount {
             return false
         }
+        return shouldSucceed
+    }
+
+    func postPhase(_ shortcut: RecordedShortcut, phase: ShortcutKeyPhase) -> Bool {
+        phases.append(PostedShortcutPhase(phase: phase, shortcut: shortcut))
         return shouldSucceed
     }
 }
@@ -2661,7 +2672,7 @@ func testKeyboardShortcutMappingStoreAndEngine() {
         isSynthesized: false
     )
     expect(engine.claims(exactDown), "键盘映射声明精确源 keyDown")
-    expect(engine.process(exactDown) == .emit(targetB), "精确源组合首次 keyDown 合成目标")
+    expect(engine.process(exactDown) == .emitDown(targetB), "精确源组合首次 keyDown 按下目标")
 
     let repeated = KeyboardShortcutEventSnapshot(
         keyCode: sourceA.keyCode,
@@ -2670,7 +2681,7 @@ func testKeyboardShortcutMappingStoreAndEngine() {
         isAutoRepeat: true,
         isSynthesized: false
     )
-    expect(engine.process(repeated) == .suppress, "源组合自动重复只吞掉不重复合成")
+    expect(engine.process(repeated) == .emitRepeat(targetB), "源组合自动重复继续按住目标")
 
     let releasedModifiersUp = KeyboardShortcutEventSnapshot(
         keyCode: sourceA.keyCode,
@@ -2680,7 +2691,7 @@ func testKeyboardShortcutMappingStoreAndEngine() {
         isSynthesized: false
     )
     expect(engine.claims(releasedModifiersUp), "键盘映射声明已激活源的 keyUp")
-    expect(engine.process(releasedModifiersUp) == .suppress, "源 keyUp 在修饰键先释放后仍吞掉")
+    expect(engine.process(releasedModifiersUp) == .emitUp(targetB), "源 keyUp 在修饰键先释放后仍抬起目标")
 
     let wrongModifiers = KeyboardShortcutEventSnapshot(
         keyCode: sourceA.keyCode,
@@ -2895,7 +2906,19 @@ func testSpaceTottiModifier() {
         isAutoRepeat: false,
         isSynthesized: false
     )
-    expect(remap.process(hit) == .emit(control7), "totti+V 只产出 ⌃7")
+    expect(remap.process(hit) == .emitDown(control7), "totti+V 按下时只按下 ⌃7")
+    expect(
+        remap.process(
+            KeyboardShortcutEventSnapshot(
+                keyCode: 9,
+                modifiers: [.totti],
+                isKeyDown: true,
+                isAutoRepeat: true,
+                isSynthesized: false
+            )
+        ) == .emitRepeat(control7),
+        "按住 totti+V 时继续按住 ⌃7"
+    )
     expect(
         remap.process(
             KeyboardShortcutEventSnapshot(
@@ -2905,8 +2928,8 @@ func testSpaceTottiModifier() {
                 isAutoRepeat: false,
                 isSynthesized: false
             )
-        ) == .suppress,
-        "totti+V 的松开仍被吞掉"
+        ) == .emitUp(control7),
+        "松开 totti+V 时抬起 ⌃7"
     )
     var plain = KeyboardShortcutRemapEngine(mappings: [mapping])
     expect(
@@ -3853,12 +3876,21 @@ func testKeyboardShortcutRemapServiceLifecycleAndFaults() {
     expect(service.claims(type: .keyDown, event: down), "服务向既有钩子声明源 keyDown")
     expect(tap.handler?(.keyDown, down) == .suppress, "事件钩子吞掉命中的源 keyDown")
     scheduler.runAll()
-    expect(poster.posted == [target], "事件钩子只发送目标快捷键")
+    expect(
+        poster.phases == [PostedShortcutPhase(phase: .down, shortcut: target)],
+        "事件钩子按下目标快捷键"
+    )
 
     down.setIntegerValueField(.keyboardEventAutorepeat, value: 1)
     expect(tap.handler?(.keyDown, down) == .suppress, "事件钩子吞掉自动重复")
     scheduler.runAll()
-    expect(poster.posted == [target], "自动重复不再次发送目标快捷键")
+    expect(
+        poster.phases == [
+            PostedShortcutPhase(phase: .down, shortcut: target),
+            PostedShortcutPhase(phase: .automaticRepeat, shortcut: target)
+        ],
+        "自动重复继续按住目标快捷键"
+    )
 
     let up = CGEvent(
         keyboardEventSource: nil,
@@ -3887,7 +3919,15 @@ func testKeyboardShortcutRemapServiceLifecycleAndFaults() {
     service.setInputCaptureSuspended(false)
     expect(tap.handler?(.keyDown, down) == .suppress, "键盘映射录入结束后本服务恢复")
     scheduler.runAll()
-    expect(poster.posted == [target, target], "录入结束后源组合再次发送一次目标快捷键")
+    expect(
+        poster.phases == [
+            PostedShortcutPhase(phase: .down, shortcut: target),
+            PostedShortcutPhase(phase: .automaticRepeat, shortcut: target),
+            PostedShortcutPhase(phase: .up, shortcut: target),
+            PostedShortcutPhase(phase: .down, shortcut: target)
+        ],
+        "录入结束后源组合再次按下目标快捷键"
+    )
     expect(tap.handler?(.keyUp, up) == .suppress, "录入结束后的源 keyUp 仍吞掉")
 
     service.deleteMapping(id: saved.id)

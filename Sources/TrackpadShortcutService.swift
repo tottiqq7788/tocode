@@ -14,9 +14,17 @@ protocol TrackpadShortcutControlling: AnyObject {
     func clearShortcut(for gesture: TrackpadTapGesture)
 }
 
+enum ShortcutKeyPhase: Equatable {
+    case down
+    case automaticRepeat
+    case up
+}
+
 protocol TrackpadShortcutEventPosting {
     @discardableResult
     func post(_ shortcut: RecordedShortcut) -> Bool
+    @discardableResult
+    func postPhase(_ shortcut: RecordedShortcut, phase: ShortcutKeyPhase) -> Bool
 }
 
 struct SystemTrackpadShortcutEventPoster: TrackpadShortcutEventPosting {
@@ -50,6 +58,29 @@ struct SystemTrackpadShortcutEventPoster: TrackpadShortcutEventPosting {
         )
         down.post(tap: .cghidEventTap)
         up.post(tap: .cghidEventTap)
+        return true
+    }
+
+    @discardableResult
+    func postPhase(_ shortcut: RecordedShortcut, phase: ShortcutKeyPhase) -> Bool {
+        let source = CGEventSource(stateID: .hidSystemState)
+        guard let event = CGEvent(
+            keyboardEventSource: source,
+            virtualKey: CGKeyCode(shortcut.keyCode),
+            keyDown: phase != .up
+        ) else {
+            return false
+        }
+        event.flags = shortcut.modifiers.eventFlags
+        event.setIntegerValueField(
+            .eventSourceUserData,
+            value: GlobalShortcutEngine.synthesizerMarker
+        )
+        event.setIntegerValueField(
+            .keyboardEventAutorepeat,
+            value: phase == .automaticRepeat ? 1 : 0
+        )
+        event.post(tap: .cghidEventTap)
         return true
     }
 }
@@ -257,7 +288,7 @@ final class TrackpadShortcutService: NSObject, TrackpadShortcutControlling {
                     body: "系统没有打开该网址。配置已保留，其他输入功能不受影响。"
                 )
             }
-        case .pass, .suppress:
+        case .emitDown, .emitRepeat, .emitUp, .pass, .suppress:
             break
         }
     }
