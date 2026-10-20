@@ -442,6 +442,340 @@ func testHermesCurrentProfileDatabase() {
     expect(defaultProfile?.name == "family", "没有路由时跟随默认档案里仍有效的项目")
 }
 
+func testHermesOpenSessionSelectsProfile() {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("tocode-hermes-open-session-\(UUID().uuidString)", isDirectory: true)
+    let home = root.appendingPathComponent("home", isDirectory: true)
+    let storage = root.appendingPathComponent("leveldb", isDirectory: true)
+    let namedRoot = root.appendingPathComponent("Eonline", isDirectory: true)
+    let defaultRoot = root.appendingPathComponent("study-root", isDirectory: true)
+    let otherRoot = root.appendingPathComponent("other", isDirectory: true)
+    try! FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+    try! FileManager.default.createDirectory(at: storage, withIntermediateDirectories: true)
+    try! FileManager.default.createDirectory(at: namedRoot, withIntermediateDirectories: true)
+    try! FileManager.default.createDirectory(at: defaultRoot, withIntermediateDirectories: true)
+    try! FileManager.default.createDirectory(at: otherRoot, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    func writeProject(profile: String?, name: String, path: String) {
+        let file = HermesProjectService.projectsDatabasePath(home: home.path, profile: profile)
+        try! FileManager.default.createDirectory(
+            atPath: (file as NSString).deletingLastPathComponent,
+            withIntermediateDirectories: true
+        )
+        var pointer: OpaquePointer?
+        expect(sqlite3_open(file, &pointer) == SQLITE_OK, "可打开 \(profile ?? "default") 项目库")
+        guard let pointer else { return }
+        defer { sqlite3_close(pointer) }
+        let sql = """
+        CREATE TABLE projects (
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, primary_path TEXT, archived INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE project_meta (key TEXT PRIMARY KEY, value TEXT);
+        INSERT INTO projects (id, name, primary_path, archived)
+        VALUES ('p_active', '\(name)', '\(path.replacingOccurrences(of: "'", with: "''"))', 0);
+        INSERT INTO project_meta (key, value) VALUES ('active_id', 'p_active');
+        """
+        expect(sqlite3_exec(pointer, sql, nil, nil, nil) == SQLITE_OK, "写入 \(profile ?? "default") 当前项目")
+    }
+    func writeSession(profile: String, sessionID: String) {
+        let file = HermesProjectService.stateDatabasePath(home: home.path, profile: profile)
+        try! FileManager.default.createDirectory(
+            atPath: (file as NSString).deletingLastPathComponent,
+            withIntermediateDirectories: true
+        )
+        var pointer: OpaquePointer?
+        expect(sqlite3_open(file, &pointer) == SQLITE_OK, "可打开 \(profile) 会话库")
+        guard let pointer else { return }
+        defer { sqlite3_close(pointer) }
+        let sql = """
+        CREATE TABLE sessions (id TEXT PRIMARY KEY, cwd TEXT, git_repo_root TEXT);
+        INSERT INTO sessions (id, cwd, git_repo_root) VALUES ('\(sessionID)', '\(namedRoot.path)', NULL);
+        """
+        expect(sqlite3_exec(pointer, sql, nil, nil, nil) == SQLITE_OK, "写入当前打开会话")
+    }
+
+    writeProject(profile: nil, name: "root", path: defaultRoot.path)
+    writeProject(profile: "liubei", name: "地球online", path: namedRoot.path)
+    writeProject(profile: "po-jie", name: "tocode", path: otherRoot.path)
+    let session = "20261013_193152_02ef04"
+    writeSession(profile: "liubei", sessionID: session)
+
+    let marker = Data("hermes.desktop.rightRailActiveTab".utf8)
+        + Data("file:\(session):file:///tmp/Eonline/chapter.md".utf8)
+    let current = storage.appendingPathComponent("current.log")
+    try! marker.write(to: current)
+    let followed = HermesProjectService(
+        home: home.path,
+        storageDirectory: storage.path,
+        visibleEntry: { .entered("地球online") }
+    ).resolveProject()
+    expect(followed?.name == "地球online", "没有旧路由时跟随当前会话所属档案")
+    expect(
+        followed?.rootPath == (namedRoot.path as NSString).standardizingPath,
+        "不落到 default 档案的当前项目"
+    )
+
+    let routed = Data("hermes.desktop.lastRoute.profile.po-jie".utf8) + Data([0x01]) + marker
+    try! routed.write(to: current)
+    let routeWins = HermesProjectService(
+        home: home.path,
+        storageDirectory: storage.path,
+        visibleEntry: { .entered("地球online") }
+    ).resolveProject()
+    expect(routeWins?.name == "tocode", "已有旧路由时仍用该档案")
+
+    let unknown = Data("hermes.desktop.rightRailActiveTab".utf8)
+        + Data("file:20260101_000000_abcd:file:///tmp/missing".utf8)
+    try! unknown.write(to: current)
+    let fallback = HermesProjectService(
+        home: home.path,
+        storageDirectory: storage.path,
+        visibleEntry: { nil }
+    ).resolveProject()
+    expect(fallback?.name == "root", "会话对不上档案时仍读 default")
+}
+
+func testHermesFollowsVisibleSessionInsteadOfFirstProject() {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("tocode-hermes-visible-session-\(UUID().uuidString)", isDirectory: true)
+    let home = root.appendingPathComponent("home", isDirectory: true)
+    let storage = root.appendingPathComponent("leveldb", isDirectory: true)
+    let firstRoot = root.appendingPathComponent("Eonline", isDirectory: true)
+    let switched = root.appendingPathComponent("blacker", isDirectory: true)
+    try! FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+    try! FileManager.default.createDirectory(at: storage, withIntermediateDirectories: true)
+    try! FileManager.default.createDirectory(at: firstRoot, withIntermediateDirectories: true)
+    try! FileManager.default.createDirectory(at: switched, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let projects = HermesProjectService.projectsDatabasePath(home: home.path, profile: "liubei")
+    try! FileManager.default.createDirectory(
+        atPath: (projects as NSString).deletingLastPathComponent,
+        withIntermediateDirectories: true
+    )
+    var projectDB: OpaquePointer?
+    expect(sqlite3_open(projects, &projectDB) == SQLITE_OK, "可打开切换项目库")
+    guard let projectDB else { return }
+    let projectSQL = """
+    CREATE TABLE projects (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, primary_path TEXT, archived INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE project_folders (
+        project_id TEXT NOT NULL, path TEXT NOT NULL, is_primary INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE project_meta (key TEXT PRIMARY KEY, value TEXT);
+    INSERT INTO projects (id, name, primary_path, archived) VALUES
+      ('p_first', '地球online', '\(firstRoot.path)', 0),
+      ('p_next', 'blacker', '\(switched.path)', 0);
+    INSERT INTO project_folders (project_id, path, is_primary) VALUES
+      ('p_first', '\(firstRoot.path)', 1),
+      ('p_next', '\(switched.path)', 1);
+    INSERT INTO project_meta (key, value) VALUES ('active_id', 'p_first');
+    """
+    expect(sqlite3_exec(projectDB, projectSQL, nil, nil, nil) == SQLITE_OK, "第一个项目仍是 active_id")
+    sqlite3_close(projectDB)
+
+    let state = HermesProjectService.stateDatabasePath(home: home.path, profile: "liubei")
+    var stateDB: OpaquePointer?
+    expect(sqlite3_open(state, &stateDB) == SQLITE_OK, "可打开切换会话库")
+    guard let stateDB else { return }
+    let stateSQL = """
+    CREATE TABLE sessions (
+        id TEXT PRIMARY KEY, cwd TEXT, git_repo_root TEXT, title TEXT, archived INTEGER NOT NULL DEFAULT 0
+    );
+    INSERT INTO sessions (id, cwd, git_repo_root, title, archived) VALUES
+      ('20261013_193152_02ef04', '\(firstRoot.path)', NULL, '旧会话', 0),
+      ('20261020_185000_abcd01', '\(switched.path)', NULL, '写入背景与规范内容', 0);
+    """
+    expect(sqlite3_exec(stateDB, stateSQL, nil, nil, nil) == SQLITE_OK, "当前会话在后切换的项目里")
+    sqlite3_close(stateDB)
+
+    let route = Data("hermes.desktop.lastRoute.profile.liubei".utf8) + Data([0x01])
+    try! route.write(to: storage.appendingPathComponent("current.log"))
+    let followed = HermesProjectService(
+        home: home.path,
+        storageDirectory: storage.path,
+        visibleEntry: { .session("写入背景与规范内容") }
+    ).resolveProject()
+    expect(followed?.name == "blacker", "切换后跟随当前会话所在项目")
+    expect(
+        followed?.rootPath == (switched.path as NSString).standardizingPath,
+        "不停在档案记住的第一个项目"
+    )
+}
+
+func testHermesVisibleSessionSwitchesProfile() {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("tocode-hermes-switch-profile-\(UUID().uuidString)", isDirectory: true)
+    let home = root.appendingPathComponent("home", isDirectory: true)
+    let storage = root.appendingPathComponent("leveldb", isDirectory: true)
+    let namedRoot = root.appendingPathComponent("Eonline", isDirectory: true)
+    let defaultRoot = root.appendingPathComponent("study-root", isDirectory: true)
+    try! FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+    try! FileManager.default.createDirectory(at: storage, withIntermediateDirectories: true)
+    try! FileManager.default.createDirectory(at: namedRoot, withIntermediateDirectories: true)
+    try! FileManager.default.createDirectory(at: defaultRoot, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    func writeProject(profile: String?, name: String, path: String, id: String) {
+        let file = HermesProjectService.projectsDatabasePath(home: home.path, profile: profile)
+        try! FileManager.default.createDirectory(
+            atPath: (file as NSString).deletingLastPathComponent,
+            withIntermediateDirectories: true
+        )
+        var pointer: OpaquePointer?
+        expect(sqlite3_open(file, &pointer) == SQLITE_OK, "可打开 \(profile ?? "default") 项目库")
+        guard let pointer else { return }
+        defer { sqlite3_close(pointer) }
+        let sql = """
+        CREATE TABLE projects (
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, primary_path TEXT, archived INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE project_folders (
+            project_id TEXT NOT NULL, path TEXT NOT NULL, is_primary INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE project_meta (key TEXT PRIMARY KEY, value TEXT);
+        INSERT INTO projects (id, name, primary_path, archived) VALUES ('\(id)', '\(name)', '\(path)', 0);
+        INSERT INTO project_folders (project_id, path, is_primary) VALUES ('\(id)', '\(path)', 1);
+        INSERT INTO project_meta (key, value) VALUES ('active_id', '\(id)');
+        """
+        expect(sqlite3_exec(pointer, sql, nil, nil, nil) == SQLITE_OK, "写入 \(profile ?? "default") 项目")
+    }
+    func writeSession(profile: String?, title: String, path: String) {
+        let file = HermesProjectService.stateDatabasePath(home: home.path, profile: profile)
+        try! FileManager.default.createDirectory(
+            atPath: (file as NSString).deletingLastPathComponent,
+            withIntermediateDirectories: true
+        )
+        var pointer: OpaquePointer?
+        expect(sqlite3_open(file, &pointer) == SQLITE_OK, "可打开 \(profile ?? "default") 会话库")
+        guard let pointer else { return }
+        defer { sqlite3_close(pointer) }
+        let sql = """
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY, cwd TEXT, git_repo_root TEXT, title TEXT, archived INTEGER NOT NULL DEFAULT 0
+        );
+        INSERT INTO sessions (id, cwd, git_repo_root, title, archived)
+        VALUES ('s_\(profile ?? "default")', '\(path)', NULL, '\(title)', 0);
+        """
+        expect(sqlite3_exec(pointer, sql, nil, nil, nil) == SQLITE_OK, "写入 \(profile ?? "default") 会话")
+    }
+
+    writeProject(profile: "liubei", name: "地球online", path: namedRoot.path, id: "p_named")
+    writeProject(profile: nil, name: "root", path: defaultRoot.path, id: "p_default")
+    writeSession(profile: "liubei", title: "写入背景与规范内容", path: namedRoot.path)
+    writeSession(profile: nil, title: "用adb检测设备root状态", path: defaultRoot.path)
+    let route = Data("hermes.desktop.lastRoute.profile.liubei".utf8) + Data([0x01])
+    try! route.write(to: storage.appendingPathComponent("current.log"))
+
+    let followed = HermesProjectService(
+        home: home.path,
+        storageDirectory: storage.path,
+        visibleEntry: { .session("用adb检测设备root状态") }
+    ).resolveProject()
+    expect(followed?.name == "root", "切到 default 后跟随该档案的项目")
+    expect(
+        followed?.rootPath == (defaultRoot.path as NSString).standardizingPath,
+        "不被上一个档案的旧路由留下"
+    )
+}
+
+func testHermesEnteredProjectBeatsLeftoverSession() {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("tocode-hermes-entered-\(UUID().uuidString)", isDirectory: true)
+    let home = root.appendingPathComponent("home", isDirectory: true)
+    let storage = root.appendingPathComponent("leveldb", isDirectory: true)
+    let leftover = root.appendingPathComponent("personal", isDirectory: true)
+    let parent = root.appendingPathComponent("study", isDirectory: true)
+    let child = parent.appendingPathComponent("root", isDirectory: true)
+    try! FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+    try! FileManager.default.createDirectory(at: storage, withIntermediateDirectories: true)
+    try! FileManager.default.createDirectory(at: leftover, withIntermediateDirectories: true)
+    try! FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    func writeProject(profile: String?, name: String, path: String, id: String) {
+        let file = HermesProjectService.projectsDatabasePath(home: home.path, profile: profile)
+        try! FileManager.default.createDirectory(
+            atPath: (file as NSString).deletingLastPathComponent,
+            withIntermediateDirectories: true
+        )
+        var pointer: OpaquePointer?
+        expect(sqlite3_open(file, &pointer) == SQLITE_OK, "可打开 \(profile ?? "default") 项目库")
+        guard let pointer else { return }
+        defer { sqlite3_close(pointer) }
+        let sql = """
+        CREATE TABLE IF NOT EXISTS projects (
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, primary_path TEXT, archived INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS project_folders (
+            project_id TEXT NOT NULL, path TEXT NOT NULL, is_primary INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS project_meta (key TEXT PRIMARY KEY, value TEXT);
+        INSERT OR REPLACE INTO projects (id, name, primary_path, archived) VALUES ('\(id)', '\(name)', '\(path)', 0);
+        INSERT INTO project_folders (project_id, path, is_primary) VALUES ('\(id)', '\(path)', 1);
+        INSERT OR REPLACE INTO project_meta (key, value) VALUES ('active_id', '\(id)');
+        """
+        expect(sqlite3_exec(pointer, sql, nil, nil, nil) == SQLITE_OK, "写入项目 \(name)")
+    }
+    func writeSession(profile: String?, id: String, title: String, path: String) {
+        let file = HermesProjectService.stateDatabasePath(home: home.path, profile: profile)
+        try! FileManager.default.createDirectory(
+            atPath: (file as NSString).deletingLastPathComponent,
+            withIntermediateDirectories: true
+        )
+        var pointer: OpaquePointer?
+        expect(sqlite3_open(file, &pointer) == SQLITE_OK, "可打开会话库")
+        guard let pointer else { return }
+        defer { sqlite3_close(pointer) }
+        let sql = """
+        CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY, cwd TEXT, git_repo_root TEXT, title TEXT, archived INTEGER NOT NULL DEFAULT 0
+        );
+        INSERT OR REPLACE INTO sessions (id, cwd, git_repo_root, title, archived)
+        VALUES ('\(id)', '\(path)', NULL, '\(title)', 0);
+        """
+        expect(sqlite3_exec(pointer, sql, nil, nil, nil) == SQLITE_OK, "写入会话 \(title)")
+    }
+    func remember(_ scope: String) {
+        var data = Data("hermes.desktop.lastRoute.profile.liubei".utf8)
+        data.append(contentsOf: [0x02, 0x01, 0x2f])
+        var scopeData = Data("hermes.desktop.projectScope".utf8)
+        let payload = Data([0x01]) + Data(scope.utf8)
+        scopeData.append(UInt8(payload.count))
+        scopeData.append(payload)
+        data.append(scopeData)
+        try! data.write(to: storage.appendingPathComponent("current.log"))
+    }
+
+    writeProject(profile: "liubei", name: "地球online", path: leftover.path, id: "p_named")
+    writeProject(profile: nil, name: "study", path: parent.path, id: "p_parent")
+    writeProject(profile: nil, name: "root", path: child.path, id: "p_child")
+    writeSession(profile: nil, id: "s_left", title: "问候与协助开始", path: leftover.path)
+    writeSession(profile: nil, id: "s_child", title: "用adb检测设备root状态", path: child.path)
+
+    remember("p_child")
+    let switched = HermesProjectService(
+        home: home.path,
+        storageDirectory: storage.path,
+        visibleEntry: { .session("问候与协助开始") }
+    ).resolveProject()
+    expect(switched?.name == "root", "点进其他项目后不再停在留下的会话")
+    expect(
+        switched?.rootPath == (child.path as NSString).standardizingPath,
+        "跟随新进入的项目目录"
+    )
+
+    remember("p_parent")
+    let nested = HermesProjectService(
+        home: home.path,
+        storageDirectory: storage.path,
+        visibleEntry: { .session("用adb检测设备root状态") }
+    ).resolveProject()
+    expect(nested?.name == "root", "会话落在进入的项目里面时仍跟随该会话")
+}
+
 func testHermesWALDatabaseRead() {
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("tocode-hermes-wal-\(UUID().uuidString)", isDirectory: true)
@@ -574,6 +908,10 @@ func testHermesVisibleEntryDoesNotWaitForStorage() {
     expect(
         HermesVisibleEntryReader.entry(fromTitles: ["主页", "显示项目", "全部项目"]) == .home,
         "进入主页时不再沿用上一个项目"
+    )
+    expect(
+        HermesVisibleEntryReader.entry(fromTitles: ["项目", "写入背景与规范内容", "写入背景与规范内容 关闭", "已思考"]) == .session("写入背景与规范内容"),
+        "当前会话用关闭标记识别"
     )
 
     let root = FileManager.default.temporaryDirectory
@@ -1164,6 +1502,10 @@ func testUserManualPages() {
     expect(joined.contains("分隔线 →「历史」→「配置」→「终端」→「新增」"), "说明书写明根菜单底部结构")
     expect(joined.contains("终端跟随（默认关）"), "说明书覆盖终端跟随开关")
     expect(joined.contains("hermes跟随（默认关）"), "说明书覆盖 hermes跟随开关")
+    expect(joined.contains("当前打开的会话"), "说明书写明用当前打开会话找档案")
+    expect(joined.contains("带关闭标记"), "说明书写明当前会话带关闭标记")
+    expect(joined.contains("只属于另一个档案"), "说明书写明会话可改跟随另一个档案")
+    expect(joined.contains("跟随新项目"), "说明书写明点进新项目后跟随新项目")
     expect(joined.contains("只悬停展开不会更新"), "说明书写明悬停不写入历史")
     expect(joined.contains("空格修饰键"), "说明书覆盖空格修饰键")
     expect(joined.contains("totti"), "说明书说明 totti")
@@ -7632,6 +7974,10 @@ struct TestRunnerMain {
         testTerminalWindowFollow()
         testHermesProjectFollow()
         testHermesCurrentProfileDatabase()
+        testHermesOpenSessionSelectsProfile()
+        testHermesFollowsVisibleSessionInsteadOfFirstProject()
+        testHermesVisibleSessionSwitchesProfile()
+        testHermesEnteredProjectBeatsLeftoverSession()
         testHermesWALDatabaseRead()
         testHermesFollowsOpenedProjectInsteadOfActivePointer()
         testHermesVisibleEntryDoesNotWaitForStorage()

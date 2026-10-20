@@ -3,9 +3,10 @@ import ApplicationServices
 import Foundation
 import SQLite3
 
-/// 侧边栏已经进入的项目。本地存储还没落盘时，窗口上的标题已经是这个项目。
+/// 侧边栏已经进入的项目，或当前打开的会话。本地存储还没落盘时，窗口上的标题已经是这个项目或会话。
 enum HermesVisibleEntry: Equatable {
     case entered(String)
+    case session(String)
     case home
 }
 
@@ -19,6 +20,10 @@ struct HermesProject: Equatable {
 struct HermesProjectService {
     private static let routeMarker = Data("hermes.desktop.lastRoute.profile.".utf8)
     private static let remoteRouteSuffix = Data(".remote.".utf8)
+    private static let openSessionMarkers: [Data] = [
+        Data("hermes.desktop.rightRailActiveTab".utf8),
+        Data("hermes.desktop.inflightTurnJournal.v2:".utf8)
+    ]
     private static let scopeKey = "hermes.desktop.projectScope"
     private static let sessionKeyPrefix = "hermes.desktop.lastSessionId.profile."
     private static let ignoredScopes: Set<String> = ["__all_projects__", "__no_project__"]
@@ -89,6 +94,15 @@ struct HermesProjectService {
         return nil
     }
 
+    /// 桌面当前打开的会话编号。旧路由缺失时用来找出所属档案。
+    static func openSessionID(in storageDirectory: String) -> String? {
+        for file in storageFiles(in: storageDirectory) {
+            guard let data = readStorage(file), let sessionID = lastMarkedSessionID(in: data) else { continue }
+            return sessionID
+        }
+        return nil
+    }
+
     /// 最新一份含该键的本地存储里，最后一次写出的值。
     static func lastStorageValue(in storageDirectory: String, key: String) -> String? {
         let marker = Data(key.utf8)
@@ -111,10 +125,19 @@ struct HermesProjectService {
             }
             return activeProject(in: databasePath)
         }
-        let profile = Self.currentProfileName(in: storageDirectory) ?? "default"
+        let profile = profileName(home: home, storageDirectory: storageDirectory)
         let databasePath = Self.projectsDatabasePath(home: home, profile: profile)
         if case .entered(let label) = entry,
            let visible = project(matchingLabel: label, databasePath: databasePath, home: home, profile: profile) {
+            return visible
+        }
+        if case .session(let title) = entry,
+           let visible = project(matchingVisibleSession: title, home: home)
+            ?? project(matchingSessionTitle: title, databasePath: databasePath, home: home, profile: profile) {
+            if let scoped = enteredScopeProject(home: home, storageDirectory: storageDirectory),
+               !isPath(scoped.rootPath, prefixOf: visible.rootPath) {
+                return scoped
+            }
             return visible
         }
         let scopeAgrees = scopeAgreesWithVisibleEntry(entry, databasePath: databasePath)
@@ -127,6 +150,39 @@ struct HermesProjectService {
             return focused
         }
         return activeProject(in: databasePath)
+    }
+
+    /// 旧路由优先。没有旧路由时，用当前打开会话所属的唯一档案；对不上才用 default。
+    private func profileName(home: String, storageDirectory: String) -> String {
+        if let routed = Self.currentProfileName(in: storageDirectory) {
+            return routed
+        }
+        if let sessionID = Self.openSessionID(in: storageDirectory),
+           let owner = profileOwning(sessionID, home: home) {
+            return owner
+        }
+        return "default"
+    }
+
+    private func profileOwning(_ sessionID: String, home: String) -> String? {
+        let profilesRoot = (home as NSString).appendingPathComponent(".hermes/profiles")
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: profilesRoot)) ?? []
+        let matches = names.filter { Self.isProfileName($0) && stateContains(sessionID, home: home, profile: $0) }
+        if matches.count == 1 { return matches[0] }
+        if matches.count > 1 { return nil }
+        if stateContains(sessionID, home: home, profile: nil) { return "default" }
+        return nil
+    }
+
+    private func stateContains(_ sessionID: String, home: String, profile: String?) -> Bool {
+        let path = Self.stateDatabasePath(home: home, profile: profile)
+        guard let database = openReadOnly(path) else { return false }
+        defer { sqlite3_close(database) }
+        return queryOne(
+            database,
+            sql: "SELECT id FROM sessions WHERE id = ? LIMIT 1",
+            bindings: [sessionID]
+        ) != nil
     }
 
     /// 窗口已经进入别的项目时，磁盘上的旧 projectScope 不能继续挡住新项目。
@@ -211,6 +267,90 @@ struct HermesProjectService {
         }
         guard let path = matches.first else { return nil }
         return HermesProject(name: label, rootPath: path)
+    }
+
+    /// 侧边栏当前会话的标题。重名时不猜。目录落在项目内部时仍用项目主目录。
+    private func project(
+        matchingSessionTitle title: String,
+        databasePath: String,
+        home: String,
+        profile: String?
+    ) -> HermesProject? {
+        let statePath = Self.stateDatabasePath(home: home, profile: profile)
+        guard let database = openReadOnly(statePath) else { return nil }
+        defer { sqlite3_close(database) }
+        let rows = queryAll(
+            database,
+            sql: "SELECT cwd, git_repo_root, title, archived FROM sessions"
+        )
+        var matches: [(cwd: String, repo: String)] = []
+        for row in rows where row.count == 4 {
+            if row[3] == "1" { continue }
+            let name = (row[2] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard name == title else { continue }
+            matches.append((
+                (row[0] ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+                (row[1] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            ))
+        }
+        guard matches.count == 1 else { return nil }
+        let cwd = matches[0].cwd
+        let repo = matches[0].repo
+        if let owned = owningProject(cwd: cwd, repoRoot: repo, databasePath: databasePath) {
+            return owned
+        }
+        for candidate in [repo, cwd] where !candidate.isEmpty {
+            let path = (candidate as NSString).standardizingPath
+            if fs.isExistingDirectory(path) {
+                let name = (path as NSString).lastPathComponent
+                return HermesProject(name: name.isEmpty ? "未命名项目" : name, rootPath: path)
+            }
+        }
+        return nil
+    }
+
+    /// 当前会话标题只属于一个档案时，用那个档案。多个档案都有同名会话时不猜。
+    private func project(matchingVisibleSession title: String, home: String) -> HermesProject? {
+        var found: HermesProject?
+        for profile in candidateProfiles(home: home) {
+            let databasePath = Self.projectsDatabasePath(home: home, profile: profile)
+            guard let project = project(
+                matchingSessionTitle: title,
+                databasePath: databasePath,
+                home: home,
+                profile: profile
+            ) else { continue }
+            if found != nil { return nil }
+            found = project
+        }
+        return found
+    }
+
+    private func candidateProfiles(home: String) -> [String?] {
+        let profilesRoot = (home as NSString).appendingPathComponent(".hermes/profiles")
+        let names = ((try? FileManager.default.contentsOfDirectory(atPath: profilesRoot)) ?? [])
+            .filter { Self.isProfileName($0) }
+            .sorted()
+        return names.map { Optional.some($0) } + [nil]
+    }
+
+    /// 侧边栏已经点进的项目。会话标签可能还留着上一个会话，项目编号可能在另一个档案。
+    private func enteredScopeProject(home: String, storageDirectory: String) -> HermesProject? {
+        guard let scope = Self.lastStorageValue(in: storageDirectory, key: Self.scopeKey) else { return nil }
+        let trimmed = scope.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !Self.ignoredScopes.contains(trimmed) else { return nil }
+        if trimmed.hasPrefix("/") {
+            let path = (trimmed as NSString).standardizingPath
+            guard fs.isExistingDirectory(path) else { return nil }
+            let name = (path as NSString).lastPathComponent
+            return HermesProject(name: name.isEmpty ? "未命名项目" : name, rootPath: path)
+        }
+        guard trimmed.hasPrefix("p_") else { return nil }
+        for profile in candidateProfiles(home: home) {
+            let databasePath = Self.projectsDatabasePath(home: home, profile: profile)
+            if let project = project(id: trimmed, in: databasePath) { return project }
+        }
+        return nil
     }
 
     private func focusedSessionProject(profile: String, databasePath: String, home: String, storage: String) -> HermesProject? {
@@ -381,6 +521,71 @@ struct HermesProjectService {
         }
     }
 
+    /// 同一文件里后出现的当前会话覆盖先出现的。只认右侧栏和进行中回合上的会话编号。
+    private static func lastMarkedSessionID(in data: Data) -> String? {
+        let bytes = [UInt8](data)
+        var found: String?
+        var cursor = 0
+        while cursor < bytes.count {
+            guard let markerEnd = nextOpenSessionMarkerEnd(in: bytes, from: cursor) else { break }
+            let windowEnd = min(bytes.count, markerEnd + 256)
+            if let sessionID = sessionID(in: bytes, from: markerEnd, until: windowEnd) {
+                found = sessionID
+            }
+            cursor = markerEnd
+        }
+        return found
+    }
+
+    private static func nextOpenSessionMarkerEnd(in bytes: [UInt8], from start: Int) -> Int? {
+        var chosen: (start: Int, end: Int)?
+        for marker in openSessionMarkers {
+            let needle = [UInt8](marker)
+            guard let index = range(of: needle, in: bytes, from: start) else { continue }
+            if chosen == nil || index < chosen!.start {
+                chosen = (index, index + needle.count)
+            }
+        }
+        return chosen?.end
+    }
+
+    private static func range(of needle: [UInt8], in bytes: [UInt8], from start: Int) -> Int? {
+        guard !needle.isEmpty, start < bytes.count else { return nil }
+        var index = start
+        let last = bytes.count - needle.count
+        while index <= last {
+            if bytes[index..<index + needle.count].elementsEqual(needle) { return index }
+            index += 1
+        }
+        return nil
+    }
+
+    private static func sessionID(in bytes: [UInt8], from start: Int, until end: Int) -> String? {
+        var index = start
+        while index < end {
+            if let sessionID = parseSessionID(bytes, at: index) { return sessionID }
+            index += 1
+        }
+        return nil
+    }
+
+    /// 形如 20261013_193152_02ef04。
+    private static func parseSessionID(_ bytes: [UInt8], at index: Int) -> String? {
+        func isDigit(_ byte: UInt8) -> Bool { byte >= 48 && byte <= 57 }
+        func isHex(_ byte: UInt8) -> Bool {
+            isDigit(byte) || (byte >= 97 && byte <= 102) || (byte >= 65 && byte <= 70)
+        }
+        guard index + 20 <= bytes.count else { return nil }
+        for offset in 0..<8 where !isDigit(bytes[index + offset]) { return nil }
+        guard bytes[index + 8] == 0x5f else { return nil }
+        for offset in 9..<15 where !isDigit(bytes[index + offset]) { return nil }
+        guard bytes[index + 15] == 0x5f else { return nil }
+        var hexEnd = index + 16
+        while hexEnd < bytes.count, isHex(bytes[hexEnd]) { hexEnd += 1 }
+        guard hexEnd - (index + 16) >= 4 else { return nil }
+        return String(bytes: bytes[index..<hexEnd], encoding: .utf8)
+    }
+
     /// 同一文件里后出现的本地路由覆盖先出现的。`.remote.` 后缀属于远程连接，不采用。
     private static func lastLocalProfileName(in data: Data) -> String? {
         var found: String?
@@ -499,16 +704,31 @@ enum HermesVisibleEntryReader {
         return readWindow()
     }
 
-    /// 从已按界面顺序排好的标题里找出「已经进入」的项目。供测试和窗口读取共用。
+    /// 从已按界面顺序排好的标题里找出「已经进入」的项目或当前会话。供测试和窗口读取共用。
     static func entry(fromTitles titles: [String]) -> HermesVisibleEntry? {
-        guard let backIndex = titles.lastIndex(where: { backTitles.contains($0) }) else { return nil }
-        for title in titles[..<backIndex].reversed() {
-            let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.isEmpty || trimmed.count > 80 || chromeTitles.contains(trimmed) || hasChromePrefix(trimmed) {
-                continue
+        if let backIndex = titles.lastIndex(where: { backTitles.contains($0) }) {
+            for title in titles[..<backIndex].reversed() {
+                let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.isEmpty || trimmed.count > 80 || chromeTitles.contains(trimmed) || hasChromePrefix(trimmed) {
+                    continue
+                }
+                if homeTitles.contains(trimmed) { return .home }
+                return .entered(trimmed)
             }
-            if homeTitles.contains(trimmed) { return .home }
-            return .entered(trimmed)
+        }
+        for title in titles {
+            if let session = openSessionTitle(title) { return .session(session) }
+        }
+        return nil
+    }
+
+    /// 侧边栏正在打开的会话行带关闭标记，例如「写入背景与规范内容 关闭」。
+    private static func openSessionTitle(_ title: String) -> String? {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        for suffix in [" 关闭", " 關閉", " Close"] where trimmed.hasSuffix(suffix) {
+            let name = String(trimmed.dropLast(suffix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            if name.isEmpty || name.count > 80 || chromeTitles.contains(name) || hasChromePrefix(name) { return nil }
+            return name
         }
         return nil
     }
@@ -522,14 +742,14 @@ enum HermesVisibleEntryReader {
             return nil
         }
         let application = AXUIElementCreateApplication(app.processIdentifier)
-        AXUIElementSetMessagingTimeout(application, 0.05)
+        AXUIElementSetMessagingTimeout(application, 0.25)
         let started = Date()
         guard let window = firstWindow(application) else { return nil }
         var titles: [String] = []
         var seen = 0
         var stop = false
         func walk(_ element: AXUIElement, depth: Int) {
-            if stop || depth > 24 || seen > 180 || Date().timeIntervalSince(started) > 0.05 { return }
+            if stop || depth > 24 || seen > 240 || Date().timeIntervalSince(started) > 0.25 { return }
             seen += 1
             if let title = attribute(element, kAXTitleAttribute), !title.isEmpty {
                 titles.append(title)
