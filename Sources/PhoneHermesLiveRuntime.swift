@@ -1,6 +1,28 @@
 import AppKit
 import Foundation
 
+struct PhoneHermesHTTPError: Error {
+    let status: Int
+    let body: Data
+}
+
+/// Hermes 不允许两个会话同名；手机默认都叫「新会话」。
+enum PhoneHermesSessionTitle {
+    static let attempts = 20
+
+    static func candidate(_ base: String, attempt: Int) -> String {
+        attempt <= 1 ? base : "\(base) \(attempt)"
+    }
+
+    static func isTaken(_ error: PhoneHermesHTTPError) -> Bool {
+        guard error.status == 400,
+              let json = try? JSONSerialization.jsonObject(with: error.body) as? [String: Any],
+              let detail = json["error"] as? [String: Any] else { return false }
+        return detail["code"] as? String == "invalid_title"
+            && (detail["message"] as? String)?.contains("already in use") == true
+    }
+}
+
 /// 只连本机 Hermes 接口。密钥留在这台 Mac，不交给手机或中转。
 final class PhoneHermesLiveRuntime: PhoneHermesRuntime {
     private let envURL: URL
@@ -39,12 +61,23 @@ final class PhoneHermesLiveRuntime: PhoneHermesRuntime {
     }
 
     func createSession(title: String) async throws -> PhoneHermesSession {
-        let json = try await request(
-            method: "POST",
-            path: "/api/sessions",
-            body: ["title": title, "source": "api_server"],
-            timeout: 15
-        )
+        var attempt = 1
+        var json: [String: Any] = [:]
+        while true {
+            let candidate = PhoneHermesSessionTitle.candidate(title, attempt: attempt)
+            do {
+                json = try await request(
+                    method: "POST",
+                    path: "/api/sessions",
+                    body: ["title": candidate, "source": "api_server"],
+                    timeout: 15
+                )
+                break
+            } catch let error as PhoneHermesHTTPError
+                where PhoneHermesSessionTitle.isTaken(error) && attempt < PhoneHermesSessionTitle.attempts {
+                attempt += 1
+            }
+        }
         let row = json["session"] as? [String: Any] ?? [:]
         guard let id = row["id"] as? String, !id.isEmpty else { throw URLError(.badServerResponse) }
         let saved = (row["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -108,8 +141,9 @@ final class PhoneHermesLiveRuntime: PhoneHermesRuntime {
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
         }
         let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            throw URLError(.badServerResponse)
+        guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+        guard (200..<300).contains(http.statusCode) else {
+            throw PhoneHermesHTTPError(status: http.statusCode, body: data)
         }
         return (try JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
     }

@@ -8089,6 +8089,17 @@ func testWeChatCLISend() async {
 }
 
 
+func testPhoneHermesSessionTitleSkipsTakenNames() {
+    expect(PhoneHermesSessionTitle.candidate("新会话", attempt: 1) == "新会话", "第一次用原名")
+    expect(PhoneHermesSessionTitle.candidate("新会话", attempt: 2) == "新会话 2", "撞名后加序号")
+    let taken = Data(#"{"error": {"message": "Title '新会话' is already in use by session api_1", "type": "invalid_request_error", "code": "invalid_title"}}"#.utf8)
+    expect(PhoneHermesSessionTitle.isTaken(PhoneHermesHTTPError(status: 400, body: taken)), "识别会话名被占用")
+    let other = Data(#"{"error": {"message": "Title too long", "code": "invalid_title"}}"#.utf8)
+    expect(!PhoneHermesSessionTitle.isTaken(PhoneHermesHTTPError(status: 400, body: other)), "其他标题错误不重试")
+    expect(!PhoneHermesSessionTitle.isTaken(PhoneHermesHTTPError(status: 401, body: taken)), "鉴权错误不重试")
+    expect(!PhoneHermesSessionTitle.isTaken(PhoneHermesHTTPError(status: 400, body: Data("oops".utf8))), "非 JSON 不重试")
+}
+
 func testHermesGatewayEnvOnlyFillsMissing() {
     let kept = "API_SERVER_ENABLED=false\n# API_SERVER_KEY=comment\nOTHER=1\nAPI_SERVER_PORT=9000\n"
     let filled = HermesGatewayEnv.completed(envText: kept, newKey: "new-key")
@@ -8364,6 +8375,7 @@ struct TestRunnerMain {
         await testRemoteControlWhitelist()
         await testPhoneHermesChatGate()
         await testPhoneHermesAppChannel()
+        testPhoneHermesSessionTitleSkipsTakenNames()
         testHermesGatewayEnvOnlyFillsMissing()
         await testHermesGatewayFollowsTocodeAndStopsRetrying()
         await testWeChatCommandConsumption()
