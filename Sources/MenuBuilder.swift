@@ -13,7 +13,7 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
     private var menuDirectoryMap: [ObjectIdentifier: String] = [:]
     private var includeHidden = true
     private var mode: DirectoryMenuMode = .normal
-    private var treeRoot: String = RootPathStore.defaultRoot
+    private var treeRoot: String = RootPathStore.documentsDirectory()
 
     private var entryItems: [EntryItem] = []
     private var bottomItems: [BottomItem] = []

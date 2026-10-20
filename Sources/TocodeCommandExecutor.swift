@@ -257,9 +257,9 @@ final class TocodeCommandExecutor {
             notify("根目录已更新", path)
             return .success(TocodeCommandOutput("已设置根目录：\(path)"))
         case .reset:
-            store.reset()
-            notify("根目录已更新", RootPathStore.defaultRoot)
-            return .success(TocodeCommandOutput("已重置根目录：\(RootPathStore.defaultRoot)"))
+            let path = store.reset(isDirectory: fs.isExistingDirectory)
+            notify("根目录已更新", path)
+            return .success(TocodeCommandOutput("已重置根目录：\(path)"))
         case .finderFollow(let toggle):
             return applyToggle(toggle, current: finderFollow.followEnabled) { target in
                 finderFollow.followEnabled = target

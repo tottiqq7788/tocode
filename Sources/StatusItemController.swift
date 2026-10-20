@@ -703,10 +703,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
     }
 
-    /// 重置初始目录：把根文件夹设回默认目录并通知。
+    /// 重置初始目录：把根文件夹设回现存默认目录并通知。
     @objc private func resetRoot() {
-        store.reset()
-        notifyRootChanged(RootPathStore.defaultRoot)
+        let path = store.reset(isDirectory: { fs.isExistingDirectory($0) })
+        notifyRootChanged(path)
     }
 
     /// 切换「hermes跟随」开关并更新勾选圆。

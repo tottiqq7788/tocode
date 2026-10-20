@@ -1187,6 +1187,8 @@ func testUserManualPages() {
     expect(!joined.contains("设置 → 密钥"), "说明书不再写设置下密钥")
     expect(joined.contains("文稿/wechat"), "说明书写明归档在本机文稿/wechat")
     expect(!joined.contains("/Users/admin/Documents/wechat"), "说明书不写死 admin 用户路径")
+    expect(joined.contains("已保存路径不存在时，会把固定根改写成该文稿目录"), "说明书写明失效根改写文稿")
+    expect(!joined.contains("/Users/admin/Documents"), "说明书不写死 admin 文稿路径")
     expect(joined.contains("wechat send") || joined.contains("快捷输入"), "说明书覆盖微信命令或快捷输入")
     expect(joined.contains("tocode help"), "说明书覆盖 CLI")
     expect(joined.contains("root clipboard"), "说明书覆盖 root clipboard")
@@ -1222,7 +1224,17 @@ func testRootPathStore() {
     defer { defaults.removePersistentDomain(forName: suite) }
 
     let fm = FileManager.default
-    let store = RootPathStore(defaults: defaults)
+    let home = fm.temporaryDirectory.appendingPathComponent("tocode-home-\(UUID().uuidString)", isDirectory: true)
+    let documents = home.appendingPathComponent("Documents", isDirectory: true)
+    try! fm.createDirectory(at: documents, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: home) }
+    let documentsPath = (documents.path as NSString).standardizingPath
+    let homePath = (home.path as NSString).standardizingPath
+    let store = RootPathStore(defaults: defaults, homeDirectory: home)
+    func isDirectory(_ path: String) -> Bool {
+        var isDir: ObjCBool = false
+        return fm.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
+    }
 
     // 初始为 nil
     expect(store.load() == nil, "RootPathStore 初始为 nil")
@@ -1231,29 +1243,42 @@ func testRootPathStore() {
     store.save("/tmp/some/path")
     expect(store.load() == "/tmp/some/path", "RootPathStore 保存后读取一致")
 
-    // 已保存且存在 → 返回保存值
-    let savedDir = "/tmp/tocode-saved-\(UUID().uuidString)"
+    // 已保存且存在 → 返回保存值，不改写
+    let savedDir = fm.temporaryDirectory
+        .appendingPathComponent("tocode-saved-\(UUID().uuidString)", isDirectory: true).path
     try! fm.createDirectory(atPath: savedDir, withIntermediateDirectories: true)
     defer { try? fm.removeItem(atPath: savedDir) }
-    store.save(savedDir)
-    expect(store.resolveRoot(isDirectory: { fm.fileExists(atPath: $0, isDirectory: nil) }) == savedDir,
-           "resolveRoot 已保存且存在时返回保存值")
+    let savedPath = (savedDir as NSString).standardizingPath
+    store.save(savedPath)
+    expect(store.resolveRoot(isDirectory: isDirectory) == savedPath, "resolveRoot 已保存且存在时返回保存值")
+    expect(store.load() == savedPath, "现存路径不被改写")
 
-    // 已保存但不存在 → 回退默认目录
-    store.save("/tmp/tocode-nonexistent-\(UUID().uuidString)")
-    expect(store.resolveRoot(isDirectory: { $0 == RootPathStore.defaultRoot }) == RootPathStore.defaultRoot,
-           "resolveRoot 保存值不存在时回退默认目录")
+    // 已保存但不存在 → 覆盖为文稿目录
+    let missing = "/tmp/tocode-nonexistent-\(UUID().uuidString)"
+    store.save(missing)
+    expect(store.resolveRoot(isDirectory: isDirectory) == documentsPath, "失效路径改写为文稿目录")
+    expect(store.load() == documentsPath, "失效路径已覆盖偏好")
+    expect(store.load() != missing, "不再保留失效路径")
 
-    // 未保存 → 回退默认目录
+    // 未保存 → 写入文稿目录
     defaults.removePersistentDomain(forName: suite)
-    expect(store.resolveRoot(isDirectory: { $0 == RootPathStore.defaultRoot }) == RootPathStore.defaultRoot,
-           "resolveRoot 未保存时回退默认目录")
+    expect(store.resolveRoot(isDirectory: isDirectory) == documentsPath, "未保存时写入文稿目录")
+    expect(store.load() == documentsPath, "未保存解析后偏好为文稿目录")
 
-    // reset → 默认目录
-    store.save("/tmp/other/path")
-    store.reset()
-    expect(store.load() == RootPathStore.defaultRoot, "reset 后根目录为默认目录")
-    expect(RootPathStore.defaultRoot == "/Users/admin/Documents", "默认目录为 /Users/admin/Documents")
+    // 文稿目录不存在 → 写入主目录
+    try! fm.removeItem(at: documents)
+    store.save(missing)
+    expect(store.resolveRoot(isDirectory: isDirectory) == homePath, "文稿不存在时改写为主目录")
+    expect(store.load() == homePath, "文稿不存在时偏好为主目录")
+
+    // reset → 同一现存默认目录；文稿恢复后改回文稿
+    store.save(savedPath)
+    expect(store.reset(isDirectory: isDirectory) == homePath, "文稿缺失时 reset 写入主目录")
+    expect(store.load() == homePath, "reset 后偏好为主目录")
+    try! fm.createDirectory(at: documents, withIntermediateDirectories: true)
+    expect(store.reset(isDirectory: isDirectory) == documentsPath, "文稿存在时 reset 写入文稿目录")
+    expect(store.load() == documentsPath, "reset 后偏好为文稿目录")
+    expect(documentsPath != "/Users/admin/Documents", "默认目录不再写死 admin")
 }
 
 func testClipboardService() {
