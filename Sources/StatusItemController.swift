@@ -226,33 +226,47 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     private func makeDesktopSpaceItem(_ space: DesktopMenuSpace) -> NSMenuItem {
+        if space.target.kind == .fullscreen {
+            return makeFullscreenSpaceItem(space)
+        }
+        return makeDesktopFolderItem(space)
+    }
+
+    private func makeFullscreenSpaceItem(_ space: DesktopMenuSpace) -> NSMenuItem {
+        let item = NSMenuItem(
+            title: space.title,
+            action: #selector(performDesktopCommand(_:)),
+            keyEquivalent: ""
+        )
+        item.target = self
+        item.state = space.isCurrent ? .on : .off
+        item.representedObject = DesktopWindowCommandBox(.space(space.target))
+        return item
+    }
+
+    private func makeDesktopFolderItem(_ space: DesktopMenuSpace) -> NSMenuItem {
         let item = NSMenuItem(title: space.title, action: nil, keyEquivalent: "")
         item.state = space.isCurrent ? .on : .off
-        item.image = NSImage(systemSymbolName: "rectangle.split.2x1", accessibilityDescription: space.title)
+        item.representedObject = DesktopWindowCommandBox(.space(space.target))
+        let row = DesktopSpaceMenuRow(title: space.title, checked: space.isCurrent)
+        let command = DesktopWindowCommand.space(space.target)
+        row.onClick = { [weak self] in
+            self?.runDesktopCommand(command)
+        }
+        item.view = row
         let submenu = NSMenu()
         submenu.autoenablesItems = false
-        let jump = NSMenuItem(title: "切换到此桌面", action: #selector(performDesktopCommand(_:)), keyEquivalent: "")
-        jump.target = self
-        jump.representedObject = DesktopWindowCommandBox(.space(space.target))
-        submenu.addItem(jump)
-        submenu.addItem(.separator())
-        if space.windows.isEmpty {
-            let empty = NSMenuItem(title: "（空）", action: nil, keyEquivalent: "")
-            empty.isEnabled = false
-            submenu.addItem(empty)
-        } else {
-            for window in space.windows {
-                let child = NSMenuItem(
-                    title: window.title,
-                    action: #selector(performDesktopCommand(_:)),
-                    keyEquivalent: ""
-                )
-                child.target = self
-                child.representedObject = DesktopWindowCommandBox(
-                    .window(window.target, windowID: window.windowID, pid: window.pid)
-                )
-                submenu.addItem(child)
-            }
+        for window in space.windows {
+            let child = NSMenuItem(
+                title: window.title,
+                action: #selector(performDesktopCommand(_:)),
+                keyEquivalent: ""
+            )
+            child.target = self
+            child.representedObject = DesktopWindowCommandBox(
+                .window(window.target, windowID: window.windowID, pid: window.pid)
+            )
+            submenu.addItem(child)
         }
         item.submenu = submenu
         return item
@@ -260,12 +274,20 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     @objc private func performDesktopCommand(_ sender: NSMenuItem) {
         guard let command = (sender.representedObject as? DesktopWindowCommandBox)?.command else { return }
-        let steps = command.steps
-        guard case .switchSpace(let target) = steps.first, desktopSwitcher.switchToSpace(target) else {
-            notifyDesktopSwitch("无法切换桌面", "系统没有切到所选桌面。")
+        DispatchQueue.main.async { [weak self] in
+            self?.runDesktopCommand(command)
+        }
+    }
+
+    private func runDesktopCommand(_ command: DesktopWindowCommand) {
+        let switched = desktopSwitcher.switchToSpace(command.spaceTarget)
+        guard DesktopWindowActivation.shouldRaise(switched: switched, command: command) else {
+            if !switched {
+                notifyDesktopSwitch("无法切换桌面", "系统没有切到所选桌面。")
+            }
             return
         }
-        guard steps.count > 1, case .raiseWindow(let pid, let windowID) = steps[1] else { return }
+        guard case .window(_, let windowID, let pid) = command else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
             guard let self else { return }
             if !self.desktopSwitcher.raiseWindow(pid: pid, windowID: windowID) {
@@ -1852,5 +1874,71 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             trigger: nil
         )
         UNUserNotificationCenter.current().add(request) { _ in }
+    }
+}
+
+/// 桌面夹这一行可点击。带 submenu 的菜单项本身不会触发 action，所以用行视图接收点击，悬停仍展开窗口。
+private final class DesktopSpaceMenuRow: NSView {
+    var onClick: (() -> Void)?
+    private let title: String
+    private let checked: Bool
+
+    init(title: String, checked: Bool) {
+        self.title = title
+        self.checked = checked
+        super.init(frame: .zero)
+        let font = NSFont.menuFont(ofSize: 0)
+        let width = ceil((title as NSString).size(withAttributes: [.font: font]).width) + 64
+        frame = NSRect(x: 0, y: 0, width: max(width, 160), height: 24)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        return nil
+    }
+
+    override var isFlipped: Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let highlighted = enclosingMenuItem?.isHighlighted ?? false
+        if highlighted {
+            NSColor.selectedContentBackgroundColor.setFill()
+            bounds.fill()
+        }
+        let color: NSColor = highlighted ? .selectedMenuItemTextColor : .labelColor
+        let font = NSFont.menuFont(ofSize: 0)
+        let style = NSMutableParagraphStyle()
+        style.lineBreakMode = .byTruncatingTail
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: color,
+            .paragraphStyle: style
+        ]
+        if checked {
+            ("✓" as NSString).draw(in: NSRect(x: 6, y: 3, width: 16, height: bounds.height - 4), withAttributes: attributes)
+        }
+        (title as NSString).draw(
+            in: NSRect(x: 24, y: 3, width: max(0, bounds.width - 52), height: bounds.height - 4),
+            withAttributes: attributes
+        )
+        let chevron = NSBezierPath()
+        let tipX = bounds.width - 14
+        let midY = bounds.midY
+        chevron.move(to: NSPoint(x: tipX - 4, y: midY - 4))
+        chevron.line(to: NSPoint(x: tipX, y: midY))
+        chevron.line(to: NSPoint(x: tipX - 4, y: midY + 4))
+        chevron.lineWidth = 1.4
+        chevron.lineCapStyle = .round
+        chevron.lineJoinStyle = .round
+        color.setStroke()
+        chevron.stroke()
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        enclosingMenuItem?.menu?.cancelTracking()
+        let click = onClick
+        DispatchQueue.main.async {
+            click?()
+        }
     }
 }

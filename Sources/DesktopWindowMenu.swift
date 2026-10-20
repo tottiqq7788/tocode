@@ -20,6 +20,23 @@ enum DesktopSpaceKind: Equatable {
 struct DesktopSpaceTarget: Equatable {
     let displayID: String
     let spaceID: UInt64
+    var kind: DesktopSpaceKind
+    var pid: Int32
+    var focusWindowID: UInt32
+
+    init(
+        displayID: String,
+        spaceID: UInt64,
+        kind: DesktopSpaceKind = .desktop,
+        pid: Int32 = 0,
+        focusWindowID: UInt32 = 0
+    ) {
+        self.displayID = displayID
+        self.spaceID = spaceID
+        self.kind = kind
+        self.pid = pid
+        self.focusWindowID = focusWindowID
+    }
 }
 
 struct DesktopWindowFacts: Equatable {
@@ -30,12 +47,25 @@ struct DesktopWindowFacts: Equatable {
     var appName: String
     var layer: Int
     var minimized: Bool
+    var alpha: Double = 1
+    /// 系统仍把它算在这个桌面上，但已经撤出显示时为 false。
+    var orderedIn: Bool = true
 }
 
 struct SkyLightSpaceDump: Equatable {
     let spaceID: UInt64
     let type: Int
-    let windowIDs: [UInt32]
+    var pid: Int32
+    var appName: String
+    var windowIDs: [UInt32]
+
+    init(spaceID: UInt64, type: Int, pid: Int32 = 0, appName: String = "", windowIDs: [UInt32]) {
+        self.spaceID = spaceID
+        self.type = type
+        self.pid = pid
+        self.appName = appName
+        self.windowIDs = windowIDs
+    }
 
     var kind: DesktopSpaceKind? {
         switch type {
@@ -96,6 +126,92 @@ enum DesktopWindowCommand: Equatable {
             return [.switchSpace(target), .raiseWindow(pid: pid, windowID: windowID)]
         }
     }
+
+    /// 实际切换使用的目标。点窗口时把焦点窗口改成被点的那一个。
+    var spaceTarget: DesktopSpaceTarget {
+        switch self {
+        case .space(let target):
+            return target
+        case .window(let target, let windowID, let pid):
+            return DesktopSpaceTarget(
+                displayID: target.displayID,
+                spaceID: target.spaceID,
+                kind: target.kind,
+                pid: pid > 0 ? pid : target.pid,
+                focusWindowID: windowID != 0 ? windowID : target.focusWindowID
+            )
+        }
+    }
+}
+
+enum DesktopSpaceStep: Equatable {
+    /// 调度中心顺序里更靠后的一格。
+    case towardHigherIndex
+    /// 调度中心顺序里更靠前的一格。
+    case towardLowerIndex
+}
+
+enum DesktopSpacePath {
+    /// 从当前空间走到目标空间要经过的每一格。已经在目标上时为空。认不出编号时返回 nil。
+    static func steps(spaceIDs: [UInt64], current: UInt64, target: UInt64) -> [DesktopSpaceStep]? {
+        guard let from = spaceIDs.firstIndex(of: current), let to = spaceIDs.firstIndex(of: target) else { return nil }
+        if from == to { return [] }
+        let step: DesktopSpaceStep = to > from ? .towardHigherIndex : .towardLowerIndex
+        return Array(repeating: step, count: abs(to - from))
+    }
+}
+
+enum DesktopWindowActivation {
+    /// 空间没有变成目标时不得前置窗口。点击桌面夹只切空间。
+    static func shouldRaise(switched: Bool, command: DesktopWindowCommand) -> Bool {
+        guard switched else { return false }
+        if case .window = command { return true }
+        return false
+    }
+}
+
+enum DesktopSpaceWindowLists {
+    /// 用按空间查到的窗口编号覆盖对应空间。没查到的空间保留原来的编号。
+    static func apply(_ windowsBySpace: [UInt64: [UInt32]], to displays: [SkyLightDisplayDump]) -> [SkyLightDisplayDump] {
+        displays.map { display in
+            SkyLightDisplayDump(
+                identifier: display.identifier,
+                currentSpaceID: display.currentSpaceID,
+                spaces: display.spaces.map { space in
+                    guard let ids = windowsBySpace[space.spaceID] else { return space }
+                    return SkyLightSpaceDump(
+                        spaceID: space.spaceID,
+                        type: space.type,
+                        pid: space.pid,
+                        appName: space.appName,
+                        windowIDs: ids
+                    )
+                }
+            )
+        }
+    }
+}
+
+enum DesktopSpaceAppNames {
+    static func apply(_ names: [Int32: String], to displays: [SkyLightDisplayDump]) -> [SkyLightDisplayDump] {
+        displays.map { display in
+            SkyLightDisplayDump(
+                identifier: display.identifier,
+                currentSpaceID: display.currentSpaceID,
+                spaces: display.spaces.map { space in
+                    let provided = names[space.pid]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    guard space.pid > 0, !provided.isEmpty else { return space }
+                    return SkyLightSpaceDump(
+                        spaceID: space.spaceID,
+                        type: space.type,
+                        pid: space.pid,
+                        appName: provided,
+                        windowIDs: space.windowIDs
+                    )
+                }
+            )
+        }
+    }
 }
 
 enum SkyLightSpaceDumpParser {
@@ -129,6 +245,7 @@ enum SkyLightSpaceDumpParser {
         return SkyLightSpaceDump(
             spaceID: spaceID,
             type: type,
+            pid: int32(dictionary["pid"]) ?? 0,
             windowIDs: array(dictionary["Windows"]).compactMap(uInt32)
         )
     }
@@ -160,6 +277,24 @@ enum SkyLightSpaceDumpParser {
 
     private static func uInt32(_ value: Any) -> UInt32? {
         (value as? NSNumber)?.uint32Value
+    }
+
+    private static func int32(_ value: Any?) -> Int32? {
+        (value as? NSNumber)?.int32Value
+    }
+}
+
+enum DesktopWindowOrderedState {
+    static func apply(
+        _ flags: [UInt32: Bool],
+        to facts: [UInt32: DesktopWindowFacts]
+    ) -> [UInt32: DesktopWindowFacts] {
+        guard !flags.isEmpty else { return facts }
+        var copy = facts
+        for (windowID, orderedIn) in flags {
+            copy[windowID]?.orderedIn = orderedIn
+        }
+        return copy
     }
 }
 
@@ -198,14 +333,11 @@ enum DesktopWindowMenuBuilder {
     }
 
     static func windowTitle(_ facts: DesktopWindowFacts) -> String {
-        let accessibility = facts.accessibilityTitle?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let listed = facts.listTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         let app = facts.appName.trimmingCharacters(in: .whitespacesAndNewlines)
         let owner = facts.ownerName.trimmingCharacters(in: .whitespacesAndNewlines)
         let base: String
-        if !accessibility.isEmpty {
-            base = accessibility
-        } else if !listed.isEmpty {
+        if !listed.isEmpty {
             base = listed
         } else if !app.isEmpty {
             base = app
@@ -221,6 +353,8 @@ enum DesktopWindowMenuBuilder {
         let owner = facts.ownerName.trimmingCharacters(in: .whitespacesAndNewlines)
         if excludedOwners.contains(owner) { return false }
         if facts.pid <= 0 { return false }
+        if facts.alpha <= 0 { return false }
+        if !facts.orderedIn { return false }
         if facts.layer != 0 && !facts.minimized { return false }
         return true
     }
@@ -234,9 +368,20 @@ enum DesktopWindowMenuBuilder {
         var result: [DesktopMenuSpace] = []
         for space in display.spaces {
             guard let kind = space.kind else { continue }
-            let target = DesktopSpaceTarget(displayID: display.identifier, spaceID: space.spaceID)
-            let included = order(space.windowIDs, frontToBack: frontToBack).compactMap { windowID -> DesktopMenuWindow? in
+            let includedFacts = order(space.windowIDs, frontToBack: frontToBack).compactMap { windowID -> (UInt32, DesktopWindowFacts)? in
                 guard let facts = windows[windowID], include(facts) else { return nil }
+                return (windowID, facts)
+            }
+            let focus = includedFacts.first
+            let target = DesktopSpaceTarget(
+                displayID: display.identifier,
+                spaceID: space.spaceID,
+                kind: kind,
+                pid: space.pid > 0 ? space.pid : (focus?.1.pid ?? 0),
+                focusWindowID: focus?.0 ?? 0
+            )
+            let included: [DesktopMenuWindow] = includedFacts.map { item in
+                let (windowID, facts) = item
                 return DesktopMenuWindow(
                     title: windowTitle(facts),
                     windowID: windowID,
@@ -250,27 +395,30 @@ enum DesktopWindowMenuBuilder {
                 desktopIndex += 1
                 title = "桌面 \(desktopIndex)"
             case .fullscreen:
-                title = fullscreenTitle(included, windows: windows)
+                title = fullscreenTitle(space, windows: included, facts: windows)
             }
             result.append(DesktopMenuSpace(
                 title: title,
                 isCurrent: space.spaceID == display.currentSpaceID,
                 target: target,
-                windows: included
+                windows: kind == .desktop ? included : []
             ))
         }
         return result
     }
 
     private static func fullscreenTitle(
-        _ windows: [DesktopMenuWindow],
-        windows facts: [UInt32: DesktopWindowFacts]
+        _ space: SkyLightSpaceDump,
+        windows: [DesktopMenuWindow],
+        facts: [UInt32: DesktopWindowFacts]
     ) -> String {
+        let named = space.appName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !named.isEmpty { return named }
         guard let first = windows.first, let info = facts[first.windowID] else { return "全屏" }
         let app = info.appName.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !app.isEmpty { return "全屏 · \(app)" }
+        if !app.isEmpty { return app }
         let title = first.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !title.isEmpty { return "全屏 · \(title)" }
+        if !title.isEmpty { return title }
         return "全屏"
     }
 

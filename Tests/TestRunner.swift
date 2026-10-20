@@ -1188,7 +1188,12 @@ func testUserManualPages() {
     expect(joined.contains("文稿/wechat"), "说明书写明归档在本机文稿/wechat")
     expect(!joined.contains("/Users/admin/Documents/wechat"), "说明书不写死 admin 用户路径")
     expect(joined.contains("按住 totti 再左键点图标"), "说明书写明 totti 左键切换窗口")
-    expect(joined.contains("切换到此桌面"), "说明书写明切换到此桌面")
+    expect(joined.contains("点击桌面夹"), "说明书写明点击桌面夹切换")
+    expect(joined.contains("向右箭头"), "说明书写明桌面夹有向右箭头")
+    expect(joined.contains("全屏空间不是夹"), "说明书写明全屏空间不是夹")
+    expect(joined.contains("已撤出显示的窗口不列出"), "说明书写明已撤出显示的窗口不列出")
+    expect(joined.contains("没有切到该桌面时，不会把窗口显示到当前桌面"), "说明书写明未切换时不把窗口带到当前桌面")
+    expect(!joined.contains("切换到此桌面"), "说明书不再提供切换到此桌面")
     expect(joined.contains("已保存路径不存在时，会把固定根改写成该文稿目录"), "说明书写明失效根改写文稿")
     expect(!joined.contains("/Users/admin/Documents"), "说明书不写死 admin 文稿路径")
     expect(joined.contains("wechat send") || joined.contains("快捷输入"), "说明书覆盖微信命令或快捷输入")
@@ -1310,7 +1315,7 @@ func testDesktopWindowSwitch() {
                 [
                     "id64": NSNumber(value: 1),
                     "type": NSNumber(value: 0),
-                    "Windows": [NSNumber(value: 10), NSNumber(value: 11), NSNumber(value: 12)]
+                    "Windows": [NSNumber(value: 10), NSNumber(value: 11), NSNumber(value: 12), NSNumber(value: 13), NSNumber(value: 14)]
                 ],
                 [
                     "id64": NSNumber(value: 2),
@@ -1320,6 +1325,7 @@ func testDesktopWindowSwitch() {
                 [
                     "ManagedSpaceID": NSNumber(value: 3),
                     "type": NSNumber(value: 4),
+                    "pid": NSNumber(value: 4),
                     "Windows": [NSNumber(value: 20)]
                 ]
             ]
@@ -1341,6 +1347,7 @@ func testDesktopWindowSwitch() {
         return
     }
     expect(displays[0].spaces.count == 3, "系统空间仍保留在原始结构里")
+    expect(displays[0].spaces[2].pid == 4, "全屏空间带上所属进程")
     expect(displays[1].spaces[0].spaceID == 4, "第二个显示器的当前空间")
 
     func facts(
@@ -1350,7 +1357,9 @@ func testDesktopWindowSwitch() {
         ax: String? = nil,
         app: String,
         layer: Int = 0,
-        minimized: Bool = false
+        minimized: Bool = false,
+        alpha: Double = 1,
+        orderedIn: Bool = true
     ) -> DesktopWindowFacts {
         DesktopWindowFacts(
             pid: pid,
@@ -1359,19 +1368,24 @@ func testDesktopWindowSwitch() {
             accessibilityTitle: ax,
             appName: app,
             layer: layer,
-            minimized: minimized
+            minimized: minimized,
+            alpha: alpha,
+            orderedIn: orderedIn
         )
     }
     let windows: [UInt32: DesktopWindowFacts] = [
         10: facts(1, owner: "Mail", list: "列表标题", ax: "收件箱", app: "Mail"),
         11: facts(2, owner: "Notes", list: "备忘录", app: "Notes", minimized: true),
         12: facts(3, owner: "Dock", list: "程序坞", app: "Dock"),
+        13: facts(1, owner: "Mail", list: "", app: "Mail", alpha: 0),
+        14: facts(7, owner: "微信", list: "微信", app: "微信", orderedIn: false),
         20: facts(4, owner: "Safari", list: "窗口", app: "Safari"),
         30: facts(5, owner: "Control Center", list: "控制中心", app: "Control Center", layer: 8),
         31: facts(6, owner: "TextEdit", list: "", app: "TextEdit")
     ]
+    let named = DesktopSpaceAppNames.apply([4: "Safari"], to: displays)
     let entries = DesktopWindowMenuBuilder.make(
-        displays: displays,
+        displays: named,
         names: ["display-a": "内建显示器"],
         windows: windows,
         frontToBack: [11, 10, 31, 20]
@@ -1384,11 +1398,17 @@ func testDesktopWindowSwitch() {
     }
     expect(firstName == "内建显示器", "分组使用本地化显示器名")
     expect(secondName == "显示器 2", "对不上的显示器使用序号")
-    expect(firstSpaces.map(\.title) == ["桌面 1", "全屏 · Safari"], "系统空间不列出，全屏空间单独命名")
+    expect(firstSpaces.map(\.title) == ["桌面 1", "Safari"], "系统空间不列出，全屏空间用应用名")
     expect(firstSpaces[0].isCurrent, "当前桌面被标出")
     expect(!firstSpaces[1].isCurrent, "全屏空间不是当前桌面")
-    expect(firstSpaces[0].windows.map(\.title) == ["备忘录（最小化）", "收件箱"], "窗口按前到后排列，最小化保留，程序坞滤掉")
+    expect(firstSpaces[1].windows.isEmpty && firstSpaces[1].target.kind == .fullscreen, "全屏空间不是夹，不列出窗口")
+    expect(firstSpaces[0].windows.map(\.title) == ["备忘录（最小化）", "列表标题"], "窗口按前到后排列，最小化保留，程序坞滤掉")
     expect(firstSpaces[0].windows.map(\.windowID) == [11, 10], "同层窗口保持前到后的编号")
+    expect(!firstSpaces[0].windows.contains { $0.windowID == 13 }, "完全透明的窗口不列入")
+    expect(!firstSpaces[0].windows.contains { $0.windowID == 14 }, "已撤出显示的窗口不列入")
+    let marked = DesktopWindowOrderedState.apply([10: false], to: windows)
+    expect(marked[10]?.orderedIn == false && !DesktopWindowMenuBuilder.include(marked[10]!), "撤出显示的标记会从菜单去掉该窗口")
+    expect(DesktopWindowMenuBuilder.include(windows[11]!), "仍在显示的最小化窗口保留")
     expect(secondSpaces.count == 1 && secondSpaces[0].windows.map(\.title) == ["TextEdit"], "高层系统窗口被滤掉，普通窗口留下")
 
     let single = DesktopWindowMenuBuilder.make(
@@ -1421,10 +1441,41 @@ func testDesktopWindowSwitch() {
     }
     expect(emptySpace.windows.isEmpty, "系统窗口不会出现在窗口区")
 
-    let target = DesktopSpaceTarget(displayID: "display-a", spaceID: 1)
+    let bare = SkyLightSpaceDumpParser.parse([
+        [
+            "Display Identifier": "display-a",
+            "Current Space": ["id64": NSNumber(value: 8)],
+            "Spaces": [[
+                "id64": NSNumber(value: 8),
+                "type": NSNumber(value: 4),
+                "pid": NSNumber(value: 9)
+            ]]
+        ]
+    ])
+    guard let bareDisplays = bare, bareDisplays.first?.spaces.first?.windowIDs.isEmpty == true else {
+        expect(false, "没有 Windows 键时窗口列表为空")
+        return
+    }
+    let filled = DesktopSpaceWindowLists.apply([8: [31]], to: bareDisplays)
+    let namedFullscreen = DesktopSpaceAppNames.apply([9: "Cursor"], to: filled)
+    let filledEntries = DesktopWindowMenuBuilder.make(
+        displays: namedFullscreen,
+        names: [:],
+        windows: windows,
+        frontToBack: [31]
+    )
+    guard case .space(let cursorSpace) = filledEntries.first else {
+        expect(false, "按空间填入窗口后仍列出该桌面")
+        return
+    }
+    expect(filled.first?.spaces.first?.windowIDs == [31], "没有 Windows 键时仍能按空间填入窗口编号")
+    expect(cursorSpace.title == "Cursor", "全屏空间标题跟随应用名")
+    expect(cursorSpace.windows.isEmpty && cursorSpace.target.kind == .fullscreen, "全屏空间不列出窗口")
+
+    let target = DesktopSpaceTarget(displayID: "display-a", spaceID: 1, kind: .desktop, pid: 1, focusWindowID: 10)
     expect(
         DesktopWindowCommand.space(target).steps == [.switchSpace(target)],
-        "切换到此桌面只切空间"
+        "点击桌面夹只切空间"
     )
     expect(
         DesktopWindowCommand.window(target, windowID: 10, pid: 1).steps == [
@@ -1432,6 +1483,31 @@ func testDesktopWindowSwitch() {
             .raiseWindow(pid: 1, windowID: 10)
         ],
         "点窗口先切空间再前置该窗口"
+    )
+    let clicked = DesktopWindowCommand.window(target, windowID: 31, pid: 6)
+    expect(clicked.spaceTarget.focusWindowID == 31 && clicked.spaceTarget.pid == 6, "点窗口时用该窗口送焦点")
+    let order: [UInt64] = [72, 3, 62]
+    expect(DesktopSpacePath.steps(spaceIDs: order, current: 3, target: 3)?.isEmpty == true, "已经在目标桌面时不再移动")
+    expect(
+        DesktopSpacePath.steps(spaceIDs: order, current: 72, target: 62) == [.towardHigherIndex, .towardHigherIndex],
+        "向调度中心顺序更靠后的桌面逐格移动"
+    )
+    expect(
+        DesktopSpacePath.steps(spaceIDs: order, current: 62, target: 3) == [.towardLowerIndex],
+        "向调度中心顺序更靠前的桌面移动一格"
+    )
+    expect(DesktopSpacePath.steps(spaceIDs: order, current: 9, target: 3) == nil, "认不出的空间不移动")
+    expect(
+        !DesktopWindowActivation.shouldRaise(switched: false, command: .window(target, windowID: 10, pid: 1)),
+        "空间没切过去时不前置窗口"
+    )
+    expect(
+        DesktopWindowActivation.shouldRaise(switched: true, command: .window(target, windowID: 10, pid: 1)),
+        "空间已经切过去才前置窗口"
+    )
+    expect(
+        !DesktopWindowActivation.shouldRaise(switched: true, command: .space(target)),
+        "点击桌面夹不前置窗口"
     )
 }
 
