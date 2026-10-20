@@ -27,6 +27,8 @@ struct SpaceModifierEngine {
     private var armedAt: TimeInterval?
     private var chorded = false
 
+    var isTottiHeld: Bool { armedAt != nil }
+
     mutating func reset() {
         armedAt = nil
         chorded = false

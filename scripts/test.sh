@@ -46,6 +46,8 @@ swiftc Tests/TestRunner.swift \
   Sources/KeyboardShortcutRemapService.swift \
   Sources/SpaceModifierEngine.swift \
   Sources/SpaceModifierService.swift \
+  Sources/DesktopWindowMenu.swift \
+  Sources/DesktopWindowCatalog.swift \
   Sources/KeyboardShortcutMappingPrompt.swift \
   Sources/MacTimer.swift \
   Sources/MacTimerService.swift \

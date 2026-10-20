@@ -2,7 +2,7 @@ import AppKit
 import UniformTypeIdentifiers
 import UserNotifications
 
-/// 菜单栏图标控制器：左键弹目录树，右键弹功能菜单。
+/// 菜单栏图标控制器：左键弹目录树，按住 totti 时左键弹桌面窗口菜单，右键弹功能菜单。
 @MainActor
 final class StatusItemController: NSObject, NSMenuDelegate {
     private let statusItem: NSStatusItem
@@ -36,6 +36,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private let extendedSettings: ExtendedSettingsStore
     private let screenBlackout: ScreenBlackoutService
     private let commandExecutor: TocodeCommandExecutor
+    private let desktopCatalog: DesktopWindowCataloging
+    private let desktopSwitcher: DesktopSpaceSwitching
     private let modelRelay: ModelRelayService
     private let automationRunner: ModelAutomationRunner
     private let actionDispatcher = KeyboardMappingActionDispatcher()
@@ -80,7 +82,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         extendedSettings: ExtendedSettingsStore = ExtendedSettingsStore(),
         screenBlackout: ScreenBlackoutService? = nil,
         modelRelay: ModelRelayService,
-        commandExecutor: TocodeCommandExecutor
+        commandExecutor: TocodeCommandExecutor,
+        desktopCatalog: DesktopWindowCataloging = SystemDesktopWindowCatalog(),
+        desktopSwitcher: DesktopSpaceSwitching = SystemDesktopSpaceSwitcher()
     ) {
         self.shortcuts = shortcuts
         self.trackpadShortcuts = trackpadShortcuts
@@ -121,6 +125,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             }
         )
         self.commandExecutor = commandExecutor
+        self.desktopCatalog = desktopCatalog
+        self.desktopSwitcher = desktopSwitcher
         let terminalWindows = DirectoryTerminalWindowStore()
         self.terminalWindows = terminalWindows
         self.terminalFrontWindow = SystemDirectoryTerminalFrontWindowReader()
@@ -169,14 +175,119 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     @objc private func handleClick(_ sender: Any?) {
         guard let event = NSApp.currentEvent else { return }
-        switch event.type {
-        case .rightMouseUp:
+        switch StatusItemPrimaryClick.resolve(
+            isRightClick: event.type == .rightMouseUp,
+            tottiHeld: spaceModifier.isTottiHeld
+        ) {
+        case .actionMenu where event.type == .rightMouseUp:
             showActionMenu()
-        case .leftMouseUp:
+        case .desktopWindows where event.type == .leftMouseUp:
+            showDesktopWindowMenu()
+        case .directory where event.type == .leftMouseUp:
             showDirectoryMenu()
         default:
             break
         }
+    }
+
+    /// 按住 totti 的左键：列出各桌面及其窗口。不读取、不改写固定根。
+    private func showDesktopWindowMenu() {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        if let entries = desktopCatalog.loadMenu() {
+            for entry in entries {
+                menu.addItem(makeDesktopEntry(entry))
+            }
+        }
+        if menu.items.isEmpty {
+            let unavailable = NSMenuItem(title: "无法读取桌面", action: nil, keyEquivalent: "")
+            unavailable.isEnabled = false
+            menu.addItem(unavailable)
+        }
+        guard let button = statusItem.button else { return }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
+    }
+
+    private func makeDesktopEntry(_ entry: DesktopMenuEntry) -> NSMenuItem {
+        switch entry {
+        case .display(let title, let spaces):
+            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            item.image = NSImage(systemSymbolName: "display", accessibilityDescription: title)
+            let submenu = NSMenu()
+            submenu.autoenablesItems = false
+            for space in spaces {
+                submenu.addItem(makeDesktopSpaceItem(space))
+            }
+            item.submenu = submenu
+            return item
+        case .space(let space):
+            return makeDesktopSpaceItem(space)
+        }
+    }
+
+    private func makeDesktopSpaceItem(_ space: DesktopMenuSpace) -> NSMenuItem {
+        let item = NSMenuItem(title: space.title, action: nil, keyEquivalent: "")
+        item.state = space.isCurrent ? .on : .off
+        item.image = NSImage(systemSymbolName: "rectangle.split.2x1", accessibilityDescription: space.title)
+        let submenu = NSMenu()
+        submenu.autoenablesItems = false
+        let jump = NSMenuItem(title: "切换到此桌面", action: #selector(performDesktopCommand(_:)), keyEquivalent: "")
+        jump.target = self
+        jump.representedObject = DesktopWindowCommandBox(.space(space.target))
+        submenu.addItem(jump)
+        submenu.addItem(.separator())
+        if space.windows.isEmpty {
+            let empty = NSMenuItem(title: "（空）", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            submenu.addItem(empty)
+        } else {
+            for window in space.windows {
+                let child = NSMenuItem(
+                    title: window.title,
+                    action: #selector(performDesktopCommand(_:)),
+                    keyEquivalent: ""
+                )
+                child.target = self
+                child.representedObject = DesktopWindowCommandBox(
+                    .window(window.target, windowID: window.windowID, pid: window.pid)
+                )
+                submenu.addItem(child)
+            }
+        }
+        item.submenu = submenu
+        return item
+    }
+
+    @objc private func performDesktopCommand(_ sender: NSMenuItem) {
+        guard let command = (sender.representedObject as? DesktopWindowCommandBox)?.command else { return }
+        let steps = command.steps
+        guard case .switchSpace(let target) = steps.first, desktopSwitcher.switchToSpace(target) else {
+            notifyDesktopSwitch("无法切换桌面", "系统没有切到所选桌面。")
+            return
+        }
+        guard steps.count > 1, case .raiseWindow(let pid, let windowID) = steps[1] else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+            guard let self else { return }
+            if !self.desktopSwitcher.raiseWindow(pid: pid, windowID: windowID) {
+                self.notifyDesktopSwitch(
+                    "无法把窗口带到前台",
+                    "请在“系统设置 → 隐私与安全性 → 辅助功能”中允许 Tocode。桌面已经切换。"
+                )
+            }
+        }
+    }
+
+    private func notifyDesktopSwitch(_ title: String, _ body: String) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        let request = UNNotificationRequest(
+            identifier: "tocode.desktop-window.\(UUID().uuidString)",
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request) { _ in }
     }
 
     /// 左键根目录解析：默认固定目录；访达/Codex/Hermes/终端跟随开启时才临时接管。

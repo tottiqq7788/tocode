@@ -3,6 +3,8 @@ import Foundation
 
 protocol SpaceModifierControlling: AnyObject {
     var isEffective: Bool { get }
+    /// 空格修饰键已生效，且空格正处于按住状态。关闭或未安装钩子时为 false。
+    var isTottiHeld: Bool { get }
     @discardableResult
     func setEnabled(_ enabled: Bool) -> Bool
     func applySavedSettings()
@@ -94,6 +96,10 @@ final class SpaceModifierService: SpaceModifierControlling {
 
     var isEffective: Bool {
         store.isEnabled && engaged && tap.isInstalled && tap.isEnabled
+    }
+
+    var isTottiHeld: Bool {
+        engaged && engine.isTottiHeld
     }
 
     func applySavedSettings() {

@@ -1187,6 +1187,8 @@ func testUserManualPages() {
     expect(!joined.contains("设置 → 密钥"), "说明书不再写设置下密钥")
     expect(joined.contains("文稿/wechat"), "说明书写明归档在本机文稿/wechat")
     expect(!joined.contains("/Users/admin/Documents/wechat"), "说明书不写死 admin 用户路径")
+    expect(joined.contains("按住 totti 再左键点图标"), "说明书写明 totti 左键切换窗口")
+    expect(joined.contains("切换到此桌面"), "说明书写明切换到此桌面")
     expect(joined.contains("已保存路径不存在时，会把固定根改写成该文稿目录"), "说明书写明失效根改写文稿")
     expect(!joined.contains("/Users/admin/Documents"), "说明书不写死 admin 文稿路径")
     expect(joined.contains("wechat send") || joined.contains("快捷输入"), "说明书覆盖微信命令或快捷输入")
@@ -1279,6 +1281,158 @@ func testRootPathStore() {
     expect(store.reset(isDirectory: isDirectory) == documentsPath, "文稿存在时 reset 写入文稿目录")
     expect(store.load() == documentsPath, "reset 后偏好为文稿目录")
     expect(documentsPath != "/Users/admin/Documents", "默认目录不再写死 admin")
+}
+
+func testDesktopWindowSwitch() {
+    expect(
+        StatusItemPrimaryClick.resolve(isRightClick: false, tottiHeld: true) == .desktopWindows,
+        "左键加 totti 进入窗口菜单"
+    )
+    expect(
+        StatusItemPrimaryClick.resolve(isRightClick: false, tottiHeld: false) == .directory,
+        "普通左键进入目录树"
+    )
+    expect(
+        StatusItemPrimaryClick.resolve(isRightClick: true, tottiHeld: true) == .actionMenu,
+        "按住 totti 时右键仍是功能菜单"
+    )
+    expect(
+        StatusItemPrimaryClick.resolve(isRightClick: true, tottiHeld: false) == .actionMenu,
+        "普通右键是功能菜单"
+    )
+    expect(SkyLightSpaceDumpParser.parse(["不是字典"]) == nil, "桌面结构认不出时失败")
+
+    let parsed = SkyLightSpaceDumpParser.parse([
+        [
+            "Display Identifier": "display-a",
+            "Current Space": ["id64": NSNumber(value: 1)],
+            "Spaces": [
+                [
+                    "id64": NSNumber(value: 1),
+                    "type": NSNumber(value: 0),
+                    "Windows": [NSNumber(value: 10), NSNumber(value: 11), NSNumber(value: 12)]
+                ],
+                [
+                    "id64": NSNumber(value: 2),
+                    "type": NSNumber(value: 2),
+                    "Windows": [NSNumber(value: 99)]
+                ],
+                [
+                    "ManagedSpaceID": NSNumber(value: 3),
+                    "type": NSNumber(value: 4),
+                    "Windows": [NSNumber(value: 20)]
+                ]
+            ]
+        ],
+        [
+            "Display Identifier": "display-b",
+            "Current Space": ["id64": NSNumber(value: 4)],
+            "Spaces": [
+                [
+                    "id64": NSNumber(value: 4),
+                    "type": NSNumber(value: 0),
+                    "Windows": [NSNumber(value: 30), NSNumber(value: 31)]
+                ]
+            ]
+        ]
+    ])
+    guard let displays = parsed, displays.count == 2 else {
+        expect(false, "能解析两个显示器")
+        return
+    }
+    expect(displays[0].spaces.count == 3, "系统空间仍保留在原始结构里")
+    expect(displays[1].spaces[0].spaceID == 4, "第二个显示器的当前空间")
+
+    func facts(
+        _ pid: Int32,
+        owner: String,
+        list: String,
+        ax: String? = nil,
+        app: String,
+        layer: Int = 0,
+        minimized: Bool = false
+    ) -> DesktopWindowFacts {
+        DesktopWindowFacts(
+            pid: pid,
+            ownerName: owner,
+            listTitle: list,
+            accessibilityTitle: ax,
+            appName: app,
+            layer: layer,
+            minimized: minimized
+        )
+    }
+    let windows: [UInt32: DesktopWindowFacts] = [
+        10: facts(1, owner: "Mail", list: "列表标题", ax: "收件箱", app: "Mail"),
+        11: facts(2, owner: "Notes", list: "备忘录", app: "Notes", minimized: true),
+        12: facts(3, owner: "Dock", list: "程序坞", app: "Dock"),
+        20: facts(4, owner: "Safari", list: "窗口", app: "Safari"),
+        30: facts(5, owner: "Control Center", list: "控制中心", app: "Control Center", layer: 8),
+        31: facts(6, owner: "TextEdit", list: "", app: "TextEdit")
+    ]
+    let entries = DesktopWindowMenuBuilder.make(
+        displays: displays,
+        names: ["display-a": "内建显示器"],
+        windows: windows,
+        frontToBack: [11, 10, 31, 20]
+    )
+    guard entries.count == 2,
+          case .display(let firstName, let firstSpaces) = entries[0],
+          case .display(let secondName, let secondSpaces) = entries[1] else {
+        expect(false, "多显示器先按显示器分组")
+        return
+    }
+    expect(firstName == "内建显示器", "分组使用本地化显示器名")
+    expect(secondName == "显示器 2", "对不上的显示器使用序号")
+    expect(firstSpaces.map(\.title) == ["桌面 1", "全屏 · Safari"], "系统空间不列出，全屏空间单独命名")
+    expect(firstSpaces[0].isCurrent, "当前桌面被标出")
+    expect(!firstSpaces[1].isCurrent, "全屏空间不是当前桌面")
+    expect(firstSpaces[0].windows.map(\.title) == ["备忘录（最小化）", "收件箱"], "窗口按前到后排列，最小化保留，程序坞滤掉")
+    expect(firstSpaces[0].windows.map(\.windowID) == [11, 10], "同层窗口保持前到后的编号")
+    expect(secondSpaces.count == 1 && secondSpaces[0].windows.map(\.title) == ["TextEdit"], "高层系统窗口被滤掉，普通窗口留下")
+
+    let single = DesktopWindowMenuBuilder.make(
+        displays: [displays[0]],
+        names: [:],
+        windows: windows,
+        frontToBack: [11, 10, 20]
+    )
+    guard case .space(let onlyDesktop) = single.first else {
+        expect(false, "单显示器根上就是桌面")
+        return
+    }
+    expect(single.count == 2 && onlyDesktop.title == "桌面 1", "单显示器不套显示器夹")
+    expect(onlyDesktop.windows.isEmpty == false, "单显示器桌面仍有窗口")
+
+    let emptyDesktop = SkyLightDisplayDump(
+        identifier: "solo",
+        currentSpaceID: 7,
+        spaces: [SkyLightSpaceDump(spaceID: 7, type: 0, windowIDs: [12])]
+    )
+    let emptyEntries = DesktopWindowMenuBuilder.make(
+        displays: [emptyDesktop],
+        names: [:],
+        windows: windows,
+        frontToBack: [12]
+    )
+    guard case .space(let emptySpace) = emptyEntries.first else {
+        expect(false, "只剩系统窗口时桌面夹仍在")
+        return
+    }
+    expect(emptySpace.windows.isEmpty, "系统窗口不会出现在窗口区")
+
+    let target = DesktopSpaceTarget(displayID: "display-a", spaceID: 1)
+    expect(
+        DesktopWindowCommand.space(target).steps == [.switchSpace(target)],
+        "切换到此桌面只切空间"
+    )
+    expect(
+        DesktopWindowCommand.window(target, windowID: 10, pid: 1).steps == [
+            .switchSpace(target),
+            .raiseWindow(pid: 1, windowID: 10)
+        ],
+        "点窗口先切空间再前置该窗口"
+    )
 }
 
 func testClipboardService() {
@@ -3115,9 +3269,12 @@ func testSpaceTottiModifier() {
     expect(chord.process(space(false, at: 0.02)) == .suppress, "搭配其他键后松开不补发空格")
 
     var held = SpaceModifierEngine()
+    expect(!held.isTottiHeld, "未按下时没有按住 totti")
     expect(held.process(space(true, at: 0)) == .suppress, "长按一开始就武装 totti")
+    expect(held.isTottiHeld, "按住空格后正在按住 totti")
     expect(held.process(otherKey(at: 0.4)) == .passMarkingTotti, "超过 250 毫秒后仍是 totti")
     expect(held.process(space(false, at: 0.5)) == .suppress, "长按搭配主键后不补发空格")
+    expect(!held.isTottiHeld, "松开空格后不再按住 totti")
 
     var commanded = SpaceModifierEngine()
     expect(commanded.process(space(true, at: 0, modifiers: [.command])) == .pass, "已按 ⌘ 时不武装 totti")
@@ -3286,9 +3443,12 @@ func testSpaceTottiModifier() {
         return event
     }
     let start = clock.current
+    expect(!service.isTottiHeld, "尚未按空格时没有按住 totti")
     expect(tap.handler?(.keyDown, keyEvent(49, down: true)) == .suppress, "服务吞掉空格按下")
+    expect(service.isTottiHeld, "空格按住期间正在按住 totti")
     clock.current = start.addingTimeInterval(0.1)
     expect(tap.handler?(.keyUp, keyEvent(49, down: false)) == .suppress, "点按松开不把物理空格放出去")
+    expect(!service.isTottiHeld, "松开空格后服务不再报告 totti")
     scheduler.runAll()
     expect(poster.postCount == 1, "点按松开后补发一次空格")
 
@@ -7440,6 +7600,7 @@ struct TestRunnerMain {
         await testTrackpadShortcutActionBindingsAndDispatch()
         testKeyboardShortcutMappingStoreAndEngine()
         testSpaceTottiModifier()
+        testDesktopWindowSwitch()
         await testModelAutomation()
         testKeyboardShortcutMappingActionTargets()
         await testMappedOpenURL()
