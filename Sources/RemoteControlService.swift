@@ -7,6 +7,8 @@ final class RemoteControlService {
     private let executor: TocodeCommandExecutor
     private let pageWriter: RemoteControlPageWriting
     private let opener: RemoteControlPageOpening
+    private let phoneHermes: PhoneHermesRuntime
+    private let phoneHermesPath: PhoneHermesPathStore
     private let pollInterval: TimeInterval
     private var record: RemoteControlRecord
     private var associationTask: Task<Void, Never>?
@@ -17,6 +19,8 @@ final class RemoteControlService {
         executor: TocodeCommandExecutor,
         pageWriter: RemoteControlPageWriting = RemoteControlPageWriter(),
         opener: RemoteControlPageOpening = WorkspaceRemoteControlPageOpener(),
+        phoneHermes: PhoneHermesRuntime = PhoneHermesLiveRuntime(),
+        phoneHermesPath: PhoneHermesPathStore = PhoneHermesPathStore(),
         pollInterval: TimeInterval = 2
     ) {
         self.store = store
@@ -24,6 +28,8 @@ final class RemoteControlService {
         self.executor = executor
         self.pageWriter = pageWriter
         self.opener = opener
+        self.phoneHermes = phoneHermes
+        self.phoneHermesPath = phoneHermesPath
         self.pollInterval = pollInterval
         record = store.load()
         transport.onMessage = { [weak self] message in
@@ -124,12 +130,43 @@ final class RemoteControlService {
             try? store.save(record)
             return
         }
-        guard op == "command_inbound",
-              let linkID = message["link_id"] as? String,
+        guard let linkID = message["link_id"] as? String,
               let requestID = message["request_id"] as? String,
               record.links.contains(where: { $0.linkID == linkID }) else {
             return
         }
+        if op == "app_inbound" {
+            let kind = message["kind"] as? String ?? ""
+            let sessionID = message["session_id"] as? String ?? ""
+            let title = message["title"] as? String ?? ""
+            let text = message["text"] as? String ?? ""
+            let directory = phoneHermesPath.configuredDirectory()
+            let runtime = phoneHermes
+            Task {
+                let reply = await PhoneHermesApp.handle(
+                    kind: kind,
+                    sessionID: sessionID,
+                    title: title,
+                    text: text,
+                    directory: directory,
+                    runtime: runtime
+                )
+                var payload: [String: Any] = [
+                    "op": "app_result",
+                    "link_id": linkID,
+                    "request_id": requestID,
+                    "kind": kind,
+                    "ok": reply.ok,
+                    "text": reply.text
+                ]
+                if !reply.body.isEmpty {
+                    payload["body"] = reply.body
+                }
+                try? await transport.send(payload)
+            }
+            return
+        }
+        guard op == "command_inbound" else { return }
         let action = message["action"] as? String ?? ""
         let outcome: (Bool, String)
         if let mapped = RemoteControlAction(rawValue: action) {

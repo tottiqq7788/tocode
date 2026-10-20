@@ -31,6 +31,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private let terminalFollow: TerminalFollowSettingsStore
     private let hermesFollow: HermesFollowSettingsStore
     private let hermesProjects: HermesProjectService
+    private let phoneHermesPath: PhoneHermesPathStore
+    private let hermesGateway: HermesGatewayControlling
     private let codexModels: CodexModelSwitching
     private let codexRestarter: CodexApplicationRestarting
     private let extendedSettings: ExtendedSettingsStore
@@ -77,6 +79,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         terminalFollow: TerminalFollowSettingsStore = TerminalFollowSettingsStore(),
         hermesFollow: HermesFollowSettingsStore = HermesFollowSettingsStore(),
         hermesProjects: HermesProjectService = HermesProjectService(),
+        phoneHermesPath: PhoneHermesPathStore = PhoneHermesPathStore(),
+        hermesGateway: HermesGatewayControlling,
         codexModels: CodexModelSwitching = CodexModelSwitchService(),
         codexRestarter: CodexApplicationRestarting = CodexApplicationRestarter(),
         extendedSettings: ExtendedSettingsStore = ExtendedSettingsStore(),
@@ -103,6 +107,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         self.terminalFollow = terminalFollow
         self.hermesFollow = hermesFollow
         self.hermesProjects = hermesProjects
+        self.phoneHermesPath = phoneHermesPath
+        self.hermesGateway = hermesGateway
         self.codexModels = codexModels
         self.codexRestarter = codexRestarter
         self.extendedSettings = extendedSettings
@@ -694,17 +700,40 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             }
         }
 
-        let remoteItem = menu.addItem(withTitle: "遥控", action: nil, keyEquivalent: "")
+        let remoteItem = menu.addItem(withTitle: "应用", action: nil, keyEquivalent: "")
         remoteItem.image = NSImage(systemSymbolName: "iphone", accessibilityDescription: nil)
         let remoteMenu = NSMenu()
         remoteMenu.autoenablesItems = false
         let associate = remoteMenu.addItem(
-            withTitle: "应用关联",
+            withTitle: "绑定应用",
             action: #selector(openRemoteAssociation),
             keyEquivalent: ""
         )
         associate.target = self
         ShortcutMenuAppearance.apply(to: associate, enabled: remoteControl.isAssociated)
+        let phonePath = remoteMenu.addItem(
+            withTitle: "路径配置",
+            action: #selector(choosePhoneHermesPath),
+            keyEquivalent: ""
+        )
+        phonePath.target = self
+        ShortcutMenuAppearance.apply(to: phonePath, enabled: phoneHermesPath.configuredDirectory() != nil)
+        let gateway = remoteMenu.addItem(
+            withTitle: HermesGatewayMenu.title,
+            action: #selector(toggleHermesGateway),
+            keyEquivalent: ""
+        )
+        gateway.target = self
+        gateway.isEnabled = hermesGateway.isInstalled
+        gateway.state = .off
+        gateway.toolTip = HermesGatewayMenu.toolTip(
+            phase: hermesGateway.phase,
+            installed: hermesGateway.isInstalled
+        )
+        gateway.image = NSImage(
+            systemSymbolName: HermesGatewayMenu.symbolName(phase: hermesGateway.phase),
+            accessibilityDescription: HermesGatewayMenu.title
+        )
         remoteItem.submenu = remoteMenu
 
         // 微信
@@ -1453,6 +1482,22 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     @objc private func toggleFinderCommandQ(_ sender: NSMenuItem) {
         _ = shortcuts.setFinderCommandQEnabled(!shortcuts.isFinderCommandQEffective)
         ShortcutMenuAppearance.apply(to: sender, enabled: shortcuts.isFinderCommandQEffective)
+    }
+
+    @objc private func toggleHermesGateway() {
+        hermesGateway.toggle()
+    }
+
+    @objc private func choosePhoneHermesPath() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.message = "选择手机对话使用的项目目录"
+        if panel.runModal() == .OK, let url = panel.url {
+            phoneHermesPath.save(url.path)
+        }
     }
 
     @objc private func openRemoteAssociation() {

@@ -23,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var commandExecutor: TocodeCommandExecutor?
     private var ipcServer: TocodeIPCServer?
     private var modelRelay: ModelRelayService?
+    private var hermesGateway: HermesGatewayService?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         TocodePreferences.migrateIfNeeded()
@@ -96,6 +97,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             executor: executor
         )
         remote.start()
+        let hermesGateway = HermesGatewayService()
+        self.hermesGateway = hermesGateway
         let controller = StatusItemController(
             shortcuts: service,
             trackpadShortcuts: trackpad,
@@ -106,6 +109,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             macTimers: macTimers,
             weChat: weChat,
             remoteControl: remote,
+            hermesGateway: hermesGateway,
             screenBlackout: blackout,
             modelRelay: modelRelay,
             commandExecutor: executor
@@ -133,6 +137,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             controller?.performMappedTarget(target)
         }
         macTimers.applySavedSettings()
+        hermesGateway.applySavedPreference()
 
         weChat.startBoundListener()
     }
@@ -170,6 +175,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        hermesGateway?.shutdown()
+        hermesGateway = nil
         ipcServer?.stop()
         ipcServer = nil
         modelRelay?.stop()

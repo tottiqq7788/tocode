@@ -11,7 +11,7 @@ enum RemoteControlPageStatus: Equatable {
     var title: String {
         switch self {
         case .waiting: return "等待扫码"
-        case .success: return "应用关联成功"
+        case .success: return "绑定应用成功"
         case .expired: return "二维码已过期"
         case .failed: return "关联失败"
         }
@@ -24,7 +24,7 @@ enum RemoteControlPageStatus: Equatable {
         case .success:
             return "可以关闭此页面，这部安卓已可以控制这台 Mac。"
         case .expired:
-            return "请回到 Tocode，再次点击“应用关联”。"
+            return "请回到 Tocode，再次点击“绑定应用”。"
         case .failed(let message):
             return message
         }
@@ -106,7 +106,7 @@ final class RemoteControlPageWriter: RemoteControlPageWriting {
           <meta charset="utf-8">
           <meta name="viewport" content="width=device-width,initial-scale=1">
           \(refresh)
-          <title>应用关联 - Tocode</title>
+          <title>绑定应用 - Tocode</title>
           <style>
             :root { color-scheme: light dark; }
             body { margin:0; min-height:100vh; display:grid; place-items:center; font-family:-apple-system,BlinkMacSystemFont,sans-serif; background:#f4f5f7; color:#17191c; }
@@ -124,10 +124,10 @@ final class RemoteControlPageWriter: RemoteControlPageWriting {
         </head>
         <body>
           <main>
-            <div class="brand">Tocode · 应用关联</div>
+            <div class="brand">Tocode · 绑定应用</div>
             <h1>\(escape(status.title))</h1>
             <p>\(escape(status.detail))</p>
-            <img src="qrcode.png" alt="应用关联二维码">
+            <img src="qrcode.png" alt="绑定应用二维码">
           </main>
         </body>
         </html>

@@ -1550,6 +1550,7 @@ func testUserManualPages() {
     expect(!joined.contains("设置 → 密钥 → AI"), "说明书不再写设置下密钥入口")
     expect(joined.contains("顶层「模型」"), "说明书覆盖独立顶层模型中转站")
     expect(joined.contains("不提供人工别名"), "说明书覆盖无模型别名")
+    expect(joined.contains("网关链接"), "说明书覆盖网关链接")
     expect(!joined.contains("录入安克"), "说明书点击路径文案不含安克")
     expect(!joined.contains("ANKER_API_KEY"), "说明书不含密钥字段")
     expect(!joined.contains("wechat-credential.json"), "说明书不展示凭据文件")
@@ -7660,7 +7661,7 @@ func testRemoteControlBrowserPage() {
     expect(!html.contains("device_token") && !html.contains("ABCD2345"), "浏览器页面不写出配对码或设备令牌")
     try! writer.update(.success)
     html = try! String(contentsOf: page, encoding: .utf8)
-    expect(html.contains("应用关联成功") && !html.contains("http-equiv=\"refresh\""), "成功页面停止刷新并提示可关闭")
+    expect(html.contains("绑定应用成功") && !html.contains("http-equiv=\"refresh\""), "成功页面停止刷新并提示可关闭")
 }
 
 @MainActor
@@ -7688,10 +7689,10 @@ func testRemoteControlAssociationPage() async {
         opener: opener,
         pollInterval: 0.01
     )
-    expect(!service.isAssociated, "没有安卓时应用关联不勾选")
+    expect(!service.isAssociated, "没有安卓时绑定应用不勾选")
     service.startAssociation()
     _ = await waitUntil { service.isAssociated }
-    expect(opener.opened.count == 1, "应用关联在浏览器打开本地页面")
+    expect(opener.opened.count == 1, "绑定应用在浏览器打开本地页面")
     expect(page.prepared.first?.contains("code=ABCD2345") == true, "二维码内容只含中转地址和配对码")
     expect(page.statuses.contains(.success), "扫码成功后页面改为成功")
     expect(service.isAssociated, "关联成功后菜单显示勾选")
@@ -7733,6 +7734,129 @@ func testRemoteControlWhitelist() async {
     expect(transport.sent.last?["text"] as? String == "动作不在白名单", "未知动作不执行")
     expect(RemoteControlPayload.qr(relay: "https://totti.xin", code: "ABCD2345").contains("code=ABCD2345"), "二维码只含中转和配对码")
     expect(RemoteControlAction.allCases.count == 11, "固定按钮数量")
+}
+
+final class ScriptedPhoneHermes: PhoneHermesRuntime {
+    var installed = false
+    var running = false
+    var sessions: [PhoneHermesSession] = []
+    var chats: [(String, String, String)] = []
+
+    func snapshot() async -> PhoneHermesSnapshot {
+        PhoneHermesSnapshot(installed: installed, running: running)
+    }
+
+    func listSessions() async throws -> [PhoneHermesSession] { sessions }
+
+    func createSession(title: String) async throws -> PhoneHermesSession {
+        let session = PhoneHermesSession(id: "api_test", title: title)
+        sessions.insert(session, at: 0)
+        return session
+    }
+
+    func messages(sessionID: String) async throws -> [PhoneHermesTurn] { [] }
+
+    func chat(sessionID: String, text: String, directory: String) async throws -> String {
+        chats.append((sessionID, text, directory))
+        return "已收到"
+    }
+}
+
+func testPhoneHermesChatGate() async {
+    let runtime = ScriptedPhoneHermes()
+    let blocked = await PhoneHermesApp.handle(
+        kind: "chat", sessionID: "api_test", title: "", text: "你好", directory: "/work", runtime: runtime
+    )
+    expect(!blocked.ok && blocked.text == "这台电脑没有 Hermes", "没装 Hermes 时不能聊天")
+    let tree = PhoneHermesDirectory.list(root: FileManager.default.temporaryDirectory.path)
+    expect(tree.ok, "没装 Hermes 时已有目录仍可列")
+
+    runtime.installed = true
+    let closed = await PhoneHermesApp.handle(
+        kind: "chat", sessionID: "api_test", title: "", text: "你好", directory: "/work", runtime: runtime
+    )
+    expect(!closed.ok && closed.text == "这台电脑的 Hermes 没开", "Hermes 没开时不能聊天")
+    runtime.running = true
+    let noPath = await PhoneHermesApp.handle(
+        kind: "chat", sessionID: "api_test", title: "", text: "你好", directory: nil, runtime: runtime
+    )
+    expect(!noPath.ok && noPath.text == "还没配置项目目录", "没配路径时可以识别但不能发消息")
+    let sessions = await PhoneHermesApp.handle(
+        kind: "sessions", sessionID: "", title: "", text: "", directory: nil, runtime: runtime
+    )
+    expect(sessions.ok, "没配路径时仍可看会话")
+
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("phone-hermes-\(UUID().uuidString)", isDirectory: true)
+    try! fm.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: root) }
+    let secret = "SECRET_FILE_BYTES"
+    try! secret.write(to: root.appendingPathComponent("note.txt"), atomically: true, encoding: .utf8)
+    try! fm.createDirectory(at: root.appendingPathComponent("src"), withIntermediateDirectories: true)
+    let outside = fm.temporaryDirectory.appendingPathComponent("outside-\(UUID().uuidString)", isDirectory: true)
+    try! fm.createDirectory(at: outside, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: outside) }
+    try! "OUTSIDE_SECRET".write(to: outside.appendingPathComponent("leak.txt"), atomically: true, encoding: .utf8)
+    try! fm.createSymbolicLink(at: root.appendingPathComponent("escape"), withDestinationURL: outside)
+    let listed = PhoneHermesDirectory.list(root: root.path)
+    let entries = listed.body["entries"] as? [[String: String]] ?? []
+    let names = entries.map { $0["name"] ?? "" }
+    expect(names.contains("note.txt") && names.contains("src"), "目录只列出文件夹和文件名")
+    expect(!names.contains("leak.txt") && !names.contains("escape"), "目录不跟着跑出项目文件夹")
+    let dumped = entries.description
+    expect(!dumped.contains(secret) && !dumped.contains("OUTSIDE_SECRET"), "目录结果不含文件内容")
+
+    let defaults = UserDefaults(suiteName: "tocode.phoneHermes.test.\(UUID().uuidString)")!
+    let store = PhoneHermesPathStore(defaults: defaults, isDirectory: { $0 == root.path })
+    store.save(root.path)
+    expect(store.configuredDirectory() == root.path, "路径配置记住这台 Mac 的文件夹")
+
+    let sent = await PhoneHermesApp.handle(
+        kind: "chat", sessionID: "api_test", title: "", text: "你好", directory: store.configuredDirectory(), runtime: runtime
+    )
+    expect(sent.ok && sent.text == "已收到", "配好路径后把消息交给 Hermes")
+    expect(runtime.chats.first?.2 == root.path, "工作目录由 Mac 带上，不由手机指定")
+    expect(PhoneHermesEnvironment.apiKey(from: "API_SERVER_KEY=\"local-key\"\n") == "local-key", "能读本机 Hermes 密钥")
+    expect(!sent.body.keys.contains("api_key"), "回复里不带密钥")
+}
+
+@MainActor
+func testPhoneHermesAppChannel() async {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let store = RemoteControlStore(fileURL: directory.appendingPathComponent("remote-control.json"))
+    var record = RemoteControlRecord.empty
+    record.links = [RemoteControlLink(linkID: "link-1", androidID: "phone", androidName: "Pixel")]
+    try? store.save(record)
+    let transport = ScriptedRemoteTransport()
+    let runtime = ScriptedPhoneHermes()
+    runtime.installed = true
+    runtime.running = true
+    let service = RemoteControlService(
+        store: store,
+        transport: transport,
+        executor: TocodeCommandExecutor(
+            launchAtLogin: MockTocodeLaunchAtLogin(),
+            mouseWheel: MockTocodeWheel(),
+            shortcuts: MockTocodeShortcuts(),
+            codexModels: MockTocodeCodexModels(),
+            weChat: MockTocodeWeChat(),
+            screenBlackout: ScreenBlackoutService(overlay: MockTocodeScreenBlackout()),
+            notify: { _, _ in }
+        ),
+        phoneHermes: runtime,
+        phoneHermesPath: PhoneHermesPathStore(defaults: UserDefaults(suiteName: UUID().uuidString)!, isDirectory: { _ in false })
+    )
+    service.handle([
+        "op": "app_inbound", "link_id": "link-1", "request_id": "c1", "kind": "chat", "text": "你好"
+    ])
+    try? await Task.sleep(nanoseconds: 80_000_000)
+    expect(transport.sent.last?["op"] as? String == "app_result", "聊天走单独回执")
+    expect(transport.sent.last?["text"] as? String == "还没配置项目目录", "没配路径时拒绝发送")
+    service.handle([
+        "op": "command_inbound", "link_id": "link-1", "request_id": "r9", "action": "shell"
+    ])
+    try? await Task.sleep(nanoseconds: 50_000_000)
+    expect(transport.sent.last?["text"] as? String == "动作不在白名单", "聊天通道不放宽旧按钮")
 }
 
 @MainActor
@@ -7965,6 +8089,185 @@ func testWeChatCLISend() async {
 }
 
 
+func testHermesGatewayEnvOnlyFillsMissing() {
+    let kept = "API_SERVER_ENABLED=false\n# API_SERVER_KEY=comment\nOTHER=1\nAPI_SERVER_PORT=9000\n"
+    let filled = HermesGatewayEnv.completed(envText: kept, newKey: "new-key")
+    expect(filled.changed, "缺密钥时要补")
+    expect(filled.text.contains("API_SERVER_ENABLED=false"), "不改已有开关")
+    expect(filled.text.contains("# API_SERVER_KEY=comment"), "注释不算已有密钥")
+    expect(filled.text.contains("API_SERVER_KEY=new-key"), "补上新密钥")
+    expect(filled.text.contains("OTHER=1") && filled.text.contains("API_SERVER_PORT=9000"), "保留其它配置")
+    let again = HermesGatewayEnv.completed(envText: filled.text, newKey: "another")
+    expect(!again.changed && again.text == filled.text, "已有非空值时不再改写")
+
+    let blank = "API_SERVER_ENABLED=\nAPI_SERVER_KEY=\"\"\n"
+    let replaced = HermesGatewayEnv.completed(envText: blank, newKey: "k")
+    expect(replaced.text.contains("API_SERVER_ENABLED=true"), "空开关视为缺失")
+    expect(replaced.text.contains("API_SERVER_KEY=k"), "空密钥视为缺失")
+
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("gw-env-\(UUID().uuidString)")
+    try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let url = directory.appendingPathComponent(".env")
+    try? HermesGatewayEnv.ensure(at: url, makeKey: { "secret-key" })
+    let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+    let mode = (attrs?[.posixPermissions] as? NSNumber)?.intValue
+    expect(mode == 0o600, "新建配置权限是 0600")
+    let body = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+    expect(body.contains("API_SERVER_ENABLED=true") && body.contains("API_SERVER_KEY=secret-key"), "写入缺失项")
+    try? HermesGatewayEnv.ensure(at: url, makeKey: { "should-not-appear" })
+    let second = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+    expect(second == body && !second.contains("should-not-appear"), "第二次不改写已有密钥")
+
+    expect(
+        HermesGatewayBinary.resolve(home: "/Users/t", exists: { $0 == "/Users/t/.local/bin/hermes" }) == "/Users/t/.local/bin/hermes",
+        "优先用 ~/.local/bin/hermes"
+    )
+    expect(
+        HermesGatewayBinary.resolve(home: "/Users/t", exists: { $0.hasSuffix("venv/bin/hermes") }) == "/Users/t/.hermes/hermes-agent/venv/bin/hermes",
+        "否则用 venv 里的 hermes"
+    )
+    expect(HermesGatewayBinary.resolve(home: "/Users/t", exists: { _ in false }) == nil, "找不到命令就不启动")
+    expect(HermesGatewayMenu.symbolName(phase: .running) == "checkmark.circle.fill", "运行中用打勾图标")
+    expect(HermesGatewayMenu.symbolName(phase: .failed) == "exclamationmark.circle", "失败用感叹号")
+    expect(HermesGatewayLaunchScript.source.contains("gateway run --replace"), "包装脚本用 --replace 启动网关")
+    expect(HermesGatewayLaunchScript.source.contains("kill -0 \"$parent\""), "父进程退出时结束网关")
+    expect(HermesGatewayLaunchScript.source.contains("gateway stop"), "父进程消失后调用 gateway stop")
+    expect(!HermesGatewayLaunchScript.source.contains("serve"), "包装脚本不碰桌面端 serve")
+    let key = HermesGatewayEnv.randomKey()
+    expect(!key.contains("+") && !key.contains("/") && !key.contains("=") && key.count >= 32, "密钥只用 URL 安全字符")
+}
+
+@MainActor
+private final class ScriptedGatewayProcess: HermesGatewayProcess {
+    var isRunning = true
+    var onExit: ((Int32) -> Void)?
+    func terminate() { finish(0) }
+    func waitUntilExit(seconds: TimeInterval) -> Bool { !isRunning }
+    func finish(_ code: Int32) {
+        guard isRunning else { return }
+        isRunning = false
+        onExit?(code)
+    }
+}
+
+@MainActor
+private final class ScriptedGatewayLauncher: HermesGatewayLaunching {
+    var launches: [[String]] = []
+    var stops = 0
+    var processes: [ScriptedGatewayProcess] = []
+    func launch(arguments: [String]) -> HermesGatewayProcess {
+        launches.append(arguments)
+        let process = ScriptedGatewayProcess()
+        processes.append(process)
+        return process
+    }
+    func stopManagedGateways() { stops += 1 }
+}
+
+private final class ScriptedGatewayCancel: HermesGatewayCancellable {
+    var cancelled = false
+    func cancel() { cancelled = true }
+}
+
+@MainActor
+private final class ScriptedGatewayScheduler: HermesGatewayScheduling {
+    struct Item {
+        var delay: TimeInterval
+        var work: () -> Void
+        var token: ScriptedGatewayCancel
+    }
+    var pending: [Item] = []
+    func schedule(after seconds: TimeInterval, _ work: @escaping () -> Void) -> HermesGatewayCancellable {
+        let token = ScriptedGatewayCancel()
+        pending.append(Item(delay: seconds, work: work, token: token))
+        return token
+    }
+    func fire(delay: TimeInterval) {
+        guard let index = pending.firstIndex(where: { $0.delay == delay && !$0.token.cancelled }) else { return }
+        pending.remove(at: index).work()
+    }
+}
+
+@MainActor
+private final class ScriptedGatewayHealth: HermesGatewayChecking {
+    var healthy = false
+    func isHealthy() -> Bool { healthy }
+}
+
+@MainActor
+private func scriptedGateway(
+    installed: @escaping () -> Bool = { true },
+    ensureEnv: @escaping () throws -> Void = {}
+) -> (HermesGatewayService, ScriptedGatewayLauncher, ScriptedGatewayScheduler, ScriptedGatewayHealth) {
+    let suite = "tocode.gateway.test.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defaults.removePersistentDomain(forName: suite)
+    let launcher = ScriptedGatewayLauncher()
+    let scheduler = ScriptedGatewayScheduler()
+    let health = ScriptedGatewayHealth()
+    let service = HermesGatewayService(
+        defaults: defaults,
+        launcher: launcher,
+        scheduler: scheduler,
+        health: health,
+        ensureEnv: ensureEnv,
+        binary: { "/bin/hermes" },
+        installed: installed
+    )
+    return (service, launcher, scheduler, health)
+}
+
+@MainActor
+func testHermesGatewayFollowsTocodeAndStopsRetrying() {
+    let (service, launcher, scheduler, health) = scriptedGateway()
+    service.turnOn()
+    expect(launcher.launches == [["/bin/hermes", "gateway", "run", "--replace"]], "用 gateway run --replace 启动")
+    expect(!launcher.launches[0].contains("serve"), "不启动桌面端 hermes serve")
+    expect(service.phase == .starting, "刚启动时还不能算已连接")
+    health.healthy = true
+    scheduler.fire(delay: 1)
+    expect(service.phase == .running, "健康检查通过才显示已连接")
+
+    launcher.processes.last?.finish(1)
+    expect(service.phase == .starting && launcher.launches.count == 1, "意外退出后等 5 秒再重启")
+    scheduler.fire(delay: 5)
+    expect(launcher.launches.count == 2, "第一次自动重启")
+    launcher.processes.last?.finish(1)
+    scheduler.fire(delay: 5)
+    expect(launcher.launches.count == 3, "第二次自动重启")
+    launcher.processes.last?.finish(1)
+    expect(service.phase == .failed, "连续失败 3 次后停住")
+    expect(scheduler.pending.allSatisfy { $0.delay != 5 || $0.token.cancelled }, "失败后不再排重启")
+
+    service.turnOff()
+    expect(!service.preferenceEnabled && service.phase == .off, "再点一次关闭开关")
+    expect(launcher.stops == 1, "关闭时执行 gateway stop")
+
+    let running = scriptedGateway()
+    running.0.turnOn()
+    expect(running.1.processes[0].isRunning, "子进程已启动")
+    running.0.shutdown()
+    expect(running.0.preferenceEnabled && running.0.phase == .off, "退出 Tocode 停网关但保留开关")
+    expect(!running.1.processes[0].isRunning, "退出时结束自己的子进程")
+    expect(running.1.stops == 1, "退出时也停掉别处启动的网关")
+    running.0.applySavedPreference()
+    expect(running.1.launches.count == 2, "下次启动沿用打开的开关")
+
+    let missing = scriptedGateway(installed: { false })
+    missing.0.turnOn()
+    expect(missing.1.launches.isEmpty && missing.0.phase == .failed, "没装 Hermes 不启动")
+    var rejected = false
+    let broken = scriptedGateway(ensureEnv: {
+        if !rejected {
+            rejected = true
+            throw NSError(domain: "tocode", code: 1)
+        }
+    })
+    broken.0.turnOn()
+    expect(broken.1.launches.isEmpty && broken.0.phase == .failed, "配置写不进去时不启动网关")
+}
+
 @main
 struct TestRunnerMain {
     static func main() async {
@@ -8059,6 +8362,10 @@ struct TestRunnerMain {
         testRemoteControlBrowserPage()
         await testRemoteControlAssociationPage()
         await testRemoteControlWhitelist()
+        await testPhoneHermesChatGate()
+        await testPhoneHermesAppChannel()
+        testHermesGatewayEnvOnlyFillsMissing()
+        await testHermesGatewayFollowsTocodeAndStopsRetrying()
         await testWeChatCommandConsumption()
         await testWeChatCLISend()
         testTocodeCommandParser()

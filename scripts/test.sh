@@ -75,6 +75,11 @@ swiftc Tests/TestRunner.swift \
   Sources/RemoteControlClient.swift \
   Sources/RemoteControlService.swift \
   Sources/RemoteControlPage.swift \
+  Sources/PhoneHermesPathStore.swift \
+  Sources/PhoneHermesApp.swift \
+  Sources/PhoneHermesLiveRuntime.swift \
+  Sources/HermesGatewayEnv.swift \
+  Sources/HermesGatewayService.swift \
   Sources/TocodeCommand.swift \
   Sources/TocodeRootChooser.swift \
   Sources/TocodeCommandExecutor.swift \
