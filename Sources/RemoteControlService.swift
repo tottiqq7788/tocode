@@ -239,6 +239,7 @@ final class RemoteControlService {
             let projectID = message["project_id"] as? String ?? ""
             let path = message["path"] as? String ?? ""
             let offset = (message["offset"] as? NSNumber)?.intValue ?? 0
+            let cursor = message["cursor"] as? String ?? ""
             let includeHidden = showHiddenFiles()
             let runtime = phoneHermes
             let profiles = phoneHermesProfiles
@@ -255,6 +256,7 @@ final class RemoteControlService {
                     projectID: projectID,
                     path: path,
                     offset: offset,
+                    cursor: cursor,
                     includeHidden: includeHidden,
                     profileStore: profiles,
                     sessionIndex: sessions,

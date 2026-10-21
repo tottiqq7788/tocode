@@ -17,6 +17,44 @@ struct PhoneHermesTurn: Equatable {
     var text: String
     /// 这一步还要调用工具。结束回复为 false。
     var interim: Bool = false
+    var id: Int = 0
+}
+
+struct PhoneHermesRow: Equatable {
+    var id: Int
+    var role: String
+    var text: String
+    var interim: Bool = false
+}
+
+struct PhoneHermesMessagePage: Equatable {
+    var rows: [PhoneHermesRow]
+    var reachedStart: Bool
+}
+
+struct PhoneHermesMessageCursor: Equatable {
+    enum Direction: Equatable {
+        case tail
+        case older
+    }
+
+    var direction: Direction
+    var id: Int
+
+    static func parse(_ raw: String) -> PhoneHermesMessageCursor? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return PhoneHermesMessageCursor(direction: .tail, id: 0) }
+        let parts = trimmed.split(separator: ":", maxSplits: 1).map(String.init)
+        guard parts.count == 2, let id = Int(parts[1]), id >= 0, parts[1] == String(id) else { return nil }
+        switch parts[0] {
+        case "tail":
+            return PhoneHermesMessageCursor(direction: .tail, id: id)
+        case "older":
+            return id > 0 ? PhoneHermesMessageCursor(direction: .older, id: id) : nil
+        default:
+            return nil
+        }
+    }
 }
 
 protocol PhoneHermesRuntime: AnyObject {
@@ -30,6 +68,7 @@ protocol PhoneHermesRuntime: AnyObject {
     func renameSession(sessionID: String, title: String, profile: String) async throws -> String
     func messages(sessionID: String) async throws -> [PhoneHermesTurn]
     func messages(sessionID: String, profile: String) async throws -> [PhoneHermesTurn]
+    func messagePage(sessionID: String, profile: String, offset: Int, limit: Int) async throws -> PhoneHermesMessagePage
     func chat(sessionID: String, text: String, directory: String) async throws -> String
     func chat(sessionID: String, text: String, directory: String, profile: String) async throws -> String
 }
@@ -57,6 +96,20 @@ extension PhoneHermesRuntime {
 
     func messages(sessionID: String, profile: String) async throws -> [PhoneHermesTurn] {
         try await messages(sessionID: sessionID)
+    }
+
+    func messagePage(sessionID: String, profile: String, offset: Int, limit: Int) async throws -> PhoneHermesMessagePage {
+        if offset > 0 { return PhoneHermesMessagePage(rows: [], reachedStart: true) }
+        let turns = try await messages(sessionID: sessionID, profile: profile)
+        let rows = turns.enumerated().map { index, turn in
+            PhoneHermesRow(
+                id: turn.id > 0 ? turn.id : index + 1,
+                role: turn.role,
+                text: turn.text,
+                interim: turn.interim
+            )
+        }
+        return PhoneHermesMessagePage(rows: rows, reachedStart: true)
     }
 
     func chat(sessionID: String, text: String, directory: String, profile: String) async throws -> String {
@@ -438,6 +491,78 @@ enum PhoneHermesApp {
         "工作目录是 \(directory)。请在这个目录里完成请求。"
     }
 
+    static let messagePageSize = 100
+    static let messagePageCap = 40
+    static let messageByteBudget = 18000
+
+    /// 从最新一页往更早翻。tail 只留下比游标新的可见消息，older 只留下比游标更早的可见消息。
+    static func messageSlice(
+        cursor: PhoneHermesMessageCursor,
+        load: (Int) async throws -> PhoneHermesMessagePage
+    ) async throws -> (messages: [[String: Any]], more: Bool) {
+        var scanned: [PhoneHermesRow] = []
+        var reachedStart = false
+        var covered = false
+        for pageIndex in 0..<messagePageCap {
+            let page = try await load(pageIndex * messagePageSize)
+            if page.rows.isEmpty {
+                reachedStart = true
+                break
+            }
+            scanned.insert(contentsOf: page.rows, at: 0)
+            if page.reachedStart { reachedStart = true }
+            let minId = page.rows.map(\.id).min() ?? 0
+            if cursor.direction == .tail && cursor.id > 0 && minId <= cursor.id {
+                covered = true
+            }
+            let chosen = selectable(scanned, cursor: cursor)
+            let packed = pack(chosen)
+            if cursor.direction == .tail && (covered || packed.truncated || reachedStart) { break }
+            if cursor.direction == .older && (packed.truncated || reachedStart) { break }
+            if reachedStart { break }
+        }
+        let packed = pack(selectable(scanned, cursor: cursor))
+        switch cursor.direction {
+        case .tail:
+            let finished = cursor.id == 0 ? reachedStart : covered
+            return (packed.messages, packed.truncated || !finished)
+        case .older:
+            return (packed.messages, packed.truncated || !reachedStart)
+        }
+    }
+
+    private static func selectable(_ rows: [PhoneHermesRow], cursor: PhoneHermesMessageCursor) -> [PhoneHermesRow] {
+        rows.filter { row in
+            guard row.id > 0 else { return false }
+            let visible = row.role == "user" || (row.role == "assistant" && !row.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            guard visible else { return false }
+            switch cursor.direction {
+            case .tail: return row.id > cursor.id
+            case .older: return row.id < cursor.id
+            }
+        }.sorted { $0.id < $1.id }
+    }
+
+    private static func pack(_ rows: [PhoneHermesRow]) -> (messages: [[String: Any]], truncated: Bool) {
+        var kept: [PhoneHermesRow] = []
+        var size = 2
+        var truncated = false
+        for row in rows.reversed() {
+            let piece = row.text.utf8.count + 96
+            if !kept.isEmpty && size + piece > messageByteBudget {
+                truncated = true
+                break
+            }
+            kept.append(row)
+            size += piece
+        }
+        let chronological = kept.reversed()
+        let messages: [[String: Any]] = chronological.map {
+            ["id": $0.id, "role": $0.role, "text": $0.text, "interim": $0.interim]
+        }
+        return (messages, truncated)
+    }
+
     static func handle(
         kind: String,
         sessionID: String,
@@ -448,6 +573,7 @@ enum PhoneHermesApp {
         projectID: String = "",
         path: String = "",
         offset: Int = 0,
+        cursor: String = "",
         home: String = NSHomeDirectory(),
         includeHidden: Bool = false,
         profileStore: PhoneHermesProfileStore = PhoneHermesProfileStore(
@@ -569,7 +695,8 @@ enum PhoneHermesApp {
                 projectsDatabase: projectsDatabase,
                 isDirectory: isDirectory,
                 activity: activity,
-                home: home
+                home: home,
+                cursor: cursor
             )
         default:
             return .failure("无法处理")
@@ -588,7 +715,8 @@ enum PhoneHermesApp {
         projectsDatabase: (String) -> String,
         isDirectory: (String) -> Bool,
         activity: PhoneHermesActivity,
-        home: String
+        home: String,
+        cursor: String
     ) async -> PhoneHermesAppReply {
         do {
             switch kind {
@@ -639,14 +767,18 @@ enum PhoneHermesApp {
             case "messages":
                 guard validSession(sessionID) else { return .failure("会话不存在") }
                 guard sessionIndex.projectID(profile: profile, sessionID: sessionID) != nil else { return .failure(needProject) }
-                let turns = try await runtime.messages(sessionID: sessionID, profile: profile)
-                let visible = turns.filter {
-                    $0.role == "user" || !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                guard let parsed = PhoneHermesMessageCursor.parse(cursor) else { return .failure("无法读取对话") }
+                let slice = try await messageSlice(cursor: parsed) { pageOffset in
+                    try await runtime.messagePage(
+                        sessionID: sessionID,
+                        profile: profile,
+                        offset: pageOffset,
+                        limit: Self.messagePageSize
+                    )
                 }
                 return .success("", body: [
-                    "messages": visible.map {
-                        ["role": $0.role, "text": $0.text, "interim": $0.interim] as [String: Any]
-                    },
+                    "messages": slice.messages,
+                    "more": slice.more,
                     "running": activity.contains(profile: profile, sessionID: sessionID)
                 ])
             case "chat":

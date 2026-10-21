@@ -7931,6 +7931,7 @@ final class ScriptedPhoneHermes: PhoneHermesRuntime {
     var renamed: [(String, String)] = []
     var titles: [String: String] = [:]
     var messageTurns: [PhoneHermesTurn] = []
+    var messageRows: [PhoneHermesRow] = []
     var chatHook: (() async -> Void)?
 
     func snapshot() async -> PhoneHermesSnapshot {
@@ -7960,6 +7961,22 @@ final class ScriptedPhoneHermes: PhoneHermesRuntime {
     }
 
     func messages(sessionID: String) async throws -> [PhoneHermesTurn] { messageTurns }
+
+    func messagePage(sessionID: String, profile: String, offset: Int, limit: Int) async throws -> PhoneHermesMessagePage {
+        let source: [PhoneHermesRow]
+        if messageRows.isEmpty {
+            source = messageTurns.enumerated().map { index, turn in
+                PhoneHermesRow(id: turn.id > 0 ? turn.id : index + 1, role: turn.role, text: turn.text, interim: turn.interim)
+            }
+        } else {
+            source = messageRows
+        }
+        let ordered = source.sorted { $0.id < $1.id }
+        let end = ordered.count - offset
+        if end <= 0 { return PhoneHermesMessagePage(rows: [], reachedStart: true) }
+        let start = max(0, end - max(limit, 1))
+        return PhoneHermesMessagePage(rows: Array(ordered[start..<end]), reachedStart: start == 0)
+    }
 
     func chat(sessionID: String, text: String, directory: String) async throws -> String {
         chats.append((sessionID, text, directory))
@@ -8014,6 +8031,89 @@ func testPhoneHermesProfileModel() async {
     )
     expect(status.ok && (status.body["model"] as? String) == "mimo-v2.5", "状态里带上当前档案的模型")
     expect(!(status.body.description.contains("hidden")), "状态正文不带密钥")
+}
+
+func testPhoneHermesMessageSlices() async {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("phone-slices-\(UUID().uuidString)", isDirectory: true)
+    try! fm.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: root) }
+    let database = root.appendingPathComponent("projects.db").path
+    let exists: (String) -> Bool = { path in
+        var isDir: ObjCBool = false
+        return fm.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
+    }
+    let project = try! HermesProfileProjects.create(
+        databasePath: database, name: "增量", folder: root.path, isDirectory: exists
+    )
+    let index = PhoneHermesSessionIndex(fileURL: root.appendingPathComponent("sessions.json"))
+    let runtime = ScriptedPhoneHermes()
+    runtime.installed = true
+    runtime.running = true
+    let created = await PhoneHermesApp.handle(
+        kind: "session_create", sessionID: "", title: "新会话 2", text: "", runtime: runtime,
+        projectID: project.id, sessionIndex: index, projectsDatabase: { _ in database }, isDirectory: exists
+    )
+    let createdID = (created.body["session"] as? [String: String])?["id"] ?? ""
+    var rows: [PhoneHermesRow] = []
+    var next = 1
+    func add(_ role: String, _ text: String) {
+        rows.append(PhoneHermesRow(id: next, role: role, text: text))
+        next += 1
+    }
+    let question = String(repeating: "问", count: 2000)
+    for index in 1...7 {
+        add("user", "\(question)\(index)")
+        add("assistant", "答\(index)")
+    }
+    for _ in 0..<150 { add("tool", "TOOL_SECRET") }
+    for index in 8...14 {
+        add("user", "\(question)\(index)")
+        add("assistant", "答\(index)")
+    }
+    runtime.messageRows = rows
+    func userIndex(_ text: String) -> Int? {
+        guard text.count > 100 else { return nil }
+        let digits = text.reversed().prefix { $0.isNumber }
+        return Int(String(digits.reversed()))
+    }
+    func texts(of reply: PhoneHermesAppReply) -> [String] {
+        ((reply.body["messages"] as? [[String: Any]]) ?? []).compactMap { $0["text"] as? String }
+    }
+    func minId(of reply: PhoneHermesAppReply) -> Int {
+        ((reply.body["messages"] as? [[String: Any]]) ?? []).compactMap { ($0["id"] as? NSNumber)?.intValue }.min() ?? 0
+    }
+    let first = await PhoneHermesApp.handle(
+        kind: "messages", sessionID: createdID, title: "", text: "", runtime: runtime,
+        projectID: project.id, cursor: "tail:0", sessionIndex: index, projectsDatabase: { _ in database }, isDirectory: exists
+    )
+    let firstUsers = texts(of: first).compactMap(userIndex)
+    expect(first.ok && (first.body["more"] as? Bool) == true, "第一截后面还有更早的记录")
+    expect(firstUsers.contains(14) && !firstUsers.contains(1), "第一截是最新的提问，不是最早的")
+    expect(texts(of: first).allSatisfy { !$0.contains("TOOL_SECRET") }, "工具结果不在第一截里")
+    var seen = Set(firstUsers)
+    var cursor = "older:\(minId(of: first))"
+    var steps = 0
+    var more = true
+    while more && steps < 20 {
+        let page = await PhoneHermesApp.handle(
+            kind: "messages", sessionID: createdID, title: "", text: "", runtime: runtime,
+            projectID: project.id, cursor: cursor, sessionIndex: index, projectsDatabase: { _ in database }, isDirectory: exists
+        )
+        expect(page.ok && texts(of: page).allSatisfy { !$0.contains("TOOL_SECRET") }, "补齐时也不带工具结果")
+        seen.formUnion(texts(of: page).compactMap(userIndex))
+        more = (page.body["more"] as? Bool) == true
+        let edge = minId(of: page)
+        if edge <= 0 { break }
+        cursor = "older:\(edge)"
+        steps += 1
+    }
+    expect(seen == Set(1...14), "更早的一截能补齐 14 次提问")
+    let rejected = await PhoneHermesApp.handle(
+        kind: "messages", sessionID: createdID, title: "", text: "", runtime: runtime,
+        projectID: project.id, cursor: "older:0", sessionIndex: index, projectsDatabase: { _ in database }, isDirectory: exists
+    )
+    expect(!rejected.ok, "older:0 不读取")
 }
 
 func testPhoneHermesProfiles() throws {
@@ -9271,6 +9371,7 @@ struct TestRunnerMain {
         testRemoteButtonsStayOnThisMac()
         await testRemoteControlWhitelist()
         await testPhoneHermesProfileModel()
+        await testPhoneHermesMessageSlices()
         do { try testPhoneHermesProfiles() } catch { expect(false, "档案项目测试没有跑完") }
         await testPhoneHermesChatGate()
         await testPhoneHermesSessionDraftRenameAndDelete()

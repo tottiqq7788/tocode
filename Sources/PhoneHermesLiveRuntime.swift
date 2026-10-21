@@ -152,23 +152,33 @@ final class PhoneHermesLiveRuntime: PhoneHermesRuntime {
     }
 
     func messages(sessionID: String, profile: String) async throws -> [PhoneHermesTurn] {
+        let page = try await messagePage(sessionID: sessionID, profile: profile, offset: 0, limit: 200)
+        return page.rows.compactMap { row in
+            guard row.role == "user" || row.role == "assistant" else { return nil }
+            return PhoneHermesTurn(role: row.role, text: row.text, interim: row.interim, id: row.id)
+        }
+    }
+
+    func messagePage(sessionID: String, profile: String, offset: Int, limit: Int) async throws -> PhoneHermesMessagePage {
         let json = try await request(
             method: "GET",
-            path: "/api/sessions/\(sessionID)/messages?inline_images=false&limit=200&order=latest",
+            path: "/api/sessions/\(sessionID)/messages?inline_images=false&limit=\(limit)&offset=\(offset)&order=latest",
             body: nil,
             timeout: 20,
             profile: profile
         )
         let rows = json["data"] as? [[String: Any]] ?? []
-        return rows.compactMap { row in
-            let role = row["role"] as? String ?? ""
-            guard role == "user" || role == "assistant" else { return nil }
-            return PhoneHermesTurn(
-                role: role,
+        let parsed: [PhoneHermesRow] = rows.compactMap { row in
+            let id = (row["id"] as? NSNumber)?.intValue ?? 0
+            guard id > 0 else { return nil }
+            return PhoneHermesRow(
+                id: id,
+                role: row["role"] as? String ?? "",
                 text: Self.plainText(row["content"]),
                 interim: (row["finish_reason"] as? String) == "tool_calls"
             )
         }
+        return PhoneHermesMessagePage(rows: parsed, reachedStart: rows.count < limit)
     }
 
     func chat(sessionID: String, text: String, directory: String) async throws -> String {
