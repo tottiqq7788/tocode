@@ -14,7 +14,15 @@ protocol RemoteControlTransporting: AnyObject {
 final class RemoteControlHTTPClient: RemoteControlTransporting {
     var onMessage: (([String: Any]) -> Void)?
     private var task: URLSessionWebSocketTask?
+    private var socketURL: URL?
+    private var retryDelay: TimeInterval = RemoteControlHTTPClient.retryStart
+    private var pingAnswered = true
+    private let lock = NSLock()
     private let session = URLSession(configuration: .default)
+
+    private static let retryStart: TimeInterval = 1
+    private static let retryMax: TimeInterval = 30
+    private static let pingInterval: TimeInterval = 25
 
     func register(relay: URL, name: String) async throws -> (id: String, token: String) {
         let body = try await request(relay.appendingPathComponent("v1/devices"), method: "POST", token: nil, json: ["name": name])
@@ -55,33 +63,109 @@ final class RemoteControlHTTPClient: RemoteControlTransporting {
         parts?.path = "/v1/ws"
         parts?.queryItems = [URLQueryItem(name: "token", value: token)]
         guard let url = parts?.url else { throw URLError(.badURL) }
-        let task = session.webSocketTask(with: url)
-        self.task = task
-        task.resume()
-        receiveLoop(task)
+        start(url)
+    }
+
+    private func start(_ url: URL) {
+        lock.lock()
+        socketURL = url
+        retryDelay = Self.retryStart
+        lock.unlock()
+        open(url)
     }
 
     func send(_ object: [String: Any]) async throws {
         let data = try JSONSerialization.data(withJSONObject: object)
         guard let text = String(data: data, encoding: .utf8) else { throw URLError(.cannotDecodeContentData) }
-        try await task?.send(.string(text))
+        try await current()?.send(.string(text))
     }
 
     func disconnect() {
-        task?.cancel(with: .goingAway, reason: nil)
+        lock.lock()
+        let old = task
         task = nil
+        socketURL = nil
+        lock.unlock()
+        old?.cancel(with: .goingAway, reason: nil)
+    }
+
+    private func current() -> URLSessionWebSocketTask? {
+        lock.lock()
+        defer { lock.unlock() }
+        return task
+    }
+
+    private func open(_ url: URL) {
+        let next = session.webSocketTask(with: url)
+        lock.lock()
+        let old = task
+        task = next
+        pingAnswered = true
+        lock.unlock()
+        old?.cancel(with: .goingAway, reason: nil)
+        next.resume()
+        receiveLoop(next)
+        keepAlive(next)
     }
 
     private func receiveLoop(_ task: URLSessionWebSocketTask) {
         task.receive { [weak self] result in
             guard let self else { return }
-            if case .success(.string(let text)) = result,
-               let data = text.data(using: .utf8),
-               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                self.onMessage?(object)
+            switch result {
+            case .success(let message):
+                self.lock.lock()
+                self.retryDelay = Self.retryStart
+                self.lock.unlock()
+                if case .string(let text) = message,
+                   let data = text.data(using: .utf8),
+                   let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    self.onMessage?(object)
+                }
+                self.receiveLoop(task)
+            case .failure:
+                self.reconnect(after: task)
             }
-            if case .failure = result { return }
-            self.receiveLoop(task)
+        }
+    }
+
+    private func reconnect(after failed: URLSessionWebSocketTask) {
+        lock.lock()
+        guard task === failed, let url = socketURL else {
+            lock.unlock()
+            return
+        }
+        let delay = retryDelay
+        retryDelay = min(retryDelay * 2, Self.retryMax)
+        lock.unlock()
+        DispatchQueue.global().asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            let stillFailed = self.task === failed && self.socketURL == url
+            self.lock.unlock()
+            if stillFailed { self.open(url) }
+        }
+    }
+
+    private func keepAlive(_ watched: URLSessionWebSocketTask) {
+        DispatchQueue.global().asyncAfter(deadline: .now() + Self.pingInterval) { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            let live = self.task === watched
+            let answered = self.pingAnswered
+            self.pingAnswered = false
+            self.lock.unlock()
+            guard live else { return }
+            guard answered else {
+                watched.cancel(with: .abnormalClosure, reason: nil)
+                return
+            }
+            watched.sendPing { [weak self] error in
+                guard let self, error == nil else { return }
+                self.lock.lock()
+                if self.task === watched { self.pingAnswered = true }
+                self.lock.unlock()
+            }
+            self.keepAlive(watched)
         }
     }
 

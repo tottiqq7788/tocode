@@ -75,7 +75,11 @@ swiftc Tests/TestRunner.swift \
   Sources/RemoteControlClient.swift \
   Sources/RemoteControlService.swift \
   Sources/RemoteControlPage.swift \
-  Sources/PhoneHermesPathStore.swift \
+  Sources/PhoneHermesHomeFolder.swift \
+  Sources/PhoneHermesProfileStore.swift \
+  Sources/PhoneHermesSessionIndex.swift \
+  Sources/HermesProfileCatalog.swift \
+  Sources/HermesProfileProjects.swift \
   Sources/PhoneHermesApp.swift \
   Sources/PhoneHermesLiveRuntime.swift \
   Sources/HermesGatewayEnv.swift \

@@ -8,7 +8,9 @@ final class RemoteControlService {
     private let pageWriter: RemoteControlPageWriting
     private let opener: RemoteControlPageOpening
     private let phoneHermes: PhoneHermesRuntime
-    private let phoneHermesPath: PhoneHermesPathStore
+    private let phoneHermesProfiles: PhoneHermesProfileStore
+    private let phoneHermesSessions: PhoneHermesSessionIndex
+    private let showHiddenFiles: () -> Bool
     private let pollInterval: TimeInterval
     private var record: RemoteControlRecord
     private var associationTask: Task<Void, Never>?
@@ -20,7 +22,9 @@ final class RemoteControlService {
         pageWriter: RemoteControlPageWriting = RemoteControlPageWriter(),
         opener: RemoteControlPageOpening = WorkspaceRemoteControlPageOpener(),
         phoneHermes: PhoneHermesRuntime = PhoneHermesLiveRuntime(),
-        phoneHermesPath: PhoneHermesPathStore = PhoneHermesPathStore(),
+        phoneHermesProfiles: PhoneHermesProfileStore = PhoneHermesProfileStore(),
+        phoneHermesSessions: PhoneHermesSessionIndex = PhoneHermesSessionIndex(),
+        showHiddenFiles: @escaping () -> Bool = { FinderVisibilityService().currentShowAllFiles() },
         pollInterval: TimeInterval = 2
     ) {
         self.store = store
@@ -29,7 +33,9 @@ final class RemoteControlService {
         self.pageWriter = pageWriter
         self.opener = opener
         self.phoneHermes = phoneHermes
-        self.phoneHermesPath = phoneHermesPath
+        self.phoneHermesProfiles = phoneHermesProfiles
+        self.phoneHermesSessions = phoneHermesSessions
+        self.showHiddenFiles = showHiddenFiles
         self.pollInterval = pollInterval
         record = store.load()
         transport.onMessage = { [weak self] message in
@@ -140,16 +146,39 @@ final class RemoteControlService {
             let sessionID = message["session_id"] as? String ?? ""
             let title = message["title"] as? String ?? ""
             let text = message["text"] as? String ?? ""
-            let directory = phoneHermesPath.configuredDirectory()
+            let profile = message["profile"] as? String ?? ""
+            let projectID = message["project_id"] as? String ?? ""
+            let path = message["path"] as? String ?? ""
+            let includeHidden = showHiddenFiles()
             let runtime = phoneHermes
+            let profiles = phoneHermesProfiles
+            let sessions = phoneHermesSessions
+            let names = HermesProfileCatalog.names()
             Task {
                 let reply = await PhoneHermesApp.handle(
                     kind: kind,
                     sessionID: sessionID,
                     title: title,
                     text: text,
-                    directory: directory,
-                    runtime: runtime
+                    runtime: runtime,
+                    profile: profile,
+                    projectID: projectID,
+                    path: path,
+                    includeHidden: includeHidden,
+                    profileStore: profiles,
+                    sessionIndex: sessions,
+                    catalog: names,
+                    projectsDatabase: { HermesProfileProjects.databasePath(home: NSHomeDirectory(), profile: $0) },
+                    isDirectory: { path in
+                        var isDir: ObjCBool = false
+                        return FileManager.default.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
+                    },
+                    ensureProfileEnv: { name in
+                        let home = HermesProfileCatalog.home(userHome: NSHomeDirectory(), profile: name)
+                        var isDir: ObjCBool = false
+                        guard FileManager.default.fileExists(atPath: home, isDirectory: &isDir), isDir.boolValue else { return }
+                        try HermesGatewayEnv.ensure(at: HermesProfileCatalog.envURL(userHome: NSHomeDirectory(), profile: name))
+                    }
                 )
                 var payload: [String: Any] = [
                     "op": "app_result",

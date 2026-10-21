@@ -7762,29 +7762,96 @@ final class ScriptedPhoneHermes: PhoneHermesRuntime {
     }
 }
 
+func testPhoneHermesProfiles() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("hermes-profiles-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: root.appendingPathComponent(".hermes/profiles/liubei"), withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: root.appendingPathComponent(".hermes/profiles/po-jie"), withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: root.appendingPathComponent(".hermes/profiles/empty-dir"), withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: root.appendingPathComponent(".hermes/profiles/gone"), withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: root.appendingPathComponent(".hermes/profiles/.deleted/gone"), withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: root.appendingPathComponent(".hermes/profiles/BadName"), withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    func touch(_ relative: String) {
+        FileManager.default.createFile(atPath: root.appendingPathComponent(relative).path, contents: Data())
+    }
+    touch(".hermes/config.yaml")
+    touch(".hermes/profiles/liubei/SOUL.md")
+    touch(".hermes/profiles/po-jie/.env")
+    touch(".hermes/profiles/gone/config.yaml")
+    touch(".hermes/profiles/BadName/config.yaml")
+    let names = HermesProfileCatalog.names(home: root.path)
+    expect(names == ["default", "liubei", "po-jie"], "只列出现存且未删除的合法档案")
+    expect(HermesProfileCatalog.prefix(for: "liubei") == "/p/liubei", "具名档案走 /p/ 前缀")
+    expect(HermesProfileCatalog.prefix(for: "default") == "", "default 保持无前缀")
+    expect(HermesProfileCatalog.prefix(for: "../liubei").isEmpty, "非法档案名不拼进路径")
+    expect(HermesProfileCatalog.accepted("../x", among: names) == "default", "非法选择回到 default")
+    expect(HermesProfileCatalog.accepted("missing", among: names) == "default", "已删除或不存在的档案回到 default")
+
+    let env = root.appendingPathComponent(".hermes/profiles/liubei/.env")
+    try "API_SERVER_ENABLED=true\n# API_SERVER_KEY=old\nOTHER=keep\n".write(to: env, atomically: true, encoding: .utf8)
+    try HermesGatewayEnv.ensure(at: env, makeKey: { "generated-key" })
+    let filled = try String(contentsOf: env, encoding: .utf8)
+    expect(filled.contains("API_SERVER_ENABLED=true"), "已有开关保持原样")
+    expect(filled.contains("API_SERVER_KEY=generated-key"), "只补缺失的密钥")
+    expect(filled.contains("OTHER=keep"), "其他配置不动")
+    expect(filled.contains("# API_SERVER_KEY=old"), "注释行不算已有密钥")
+    expect(filled.split(separator: "\n").contains { $0 == "API_SERVER_KEY=generated-key" }, "补上的密钥是单独一行")
+    let before = filled
+    try HermesGatewayEnv.ensure(at: env, makeKey: { "generated-key-2" })
+    expect(try String(contentsOf: env, encoding: .utf8) == before, "再次补齐不改已有密钥")
+
+    let folder = root.appendingPathComponent("project-folder", isDirectory: true)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    let database = root.appendingPathComponent("projects.db").path
+    let created = try HermesProfileProjects.create(
+        databasePath: database, name: "笔记", folder: folder.path, isDirectory: { path in
+            var isDir: ObjCBool = false
+            return FileManager.default.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
+        }, makeID: { "p_abc12345" }
+    )
+    let listed = HermesProfileProjects.list(databasePath: database)
+    expect(listed == [created], "项目写入后能读回")
+    do {
+        _ = try HermesProfileProjects.create(
+            databasePath: database, name: "另一个", folder: folder.path, isDirectory: { path in
+                var isDir: ObjCBool = false
+                return FileManager.default.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
+            }
+        )
+        expect(false, "同一文件夹不能再属于别的项目")
+    } catch HermesProfileProjects.Failure.duplicateFolder {
+        expect(true, "同一文件夹不能再属于别的项目")
+    }
+    let index = PhoneHermesSessionIndex(fileURL: root.appendingPathComponent("sessions.json"))
+    index.remember(profile: "liubei", projectID: created.id, sessionID: "api_one")
+    index.remember(profile: "default", projectID: created.id, sessionID: "api_other")
+    expect(index.sessionIDs(profile: "liubei", projectID: created.id) == ["api_one"], "会话记在所选档案的项目下")
+    expect(index.projectID(profile: "default", sessionID: "api_one") == nil, "不会把会话记到另一个档案")
+}
+
 func testPhoneHermesChatGate() async {
     let runtime = ScriptedPhoneHermes()
     let blocked = await PhoneHermesApp.handle(
-        kind: "chat", sessionID: "api_test", title: "", text: "你好", directory: "/work", runtime: runtime
+        kind: "chat", sessionID: "api_test", title: "", text: "你好", runtime: runtime
     )
     expect(!blocked.ok && blocked.text == "这台电脑没有 Hermes", "没装 Hermes 时不能聊天")
-    let tree = PhoneHermesDirectory.list(root: FileManager.default.temporaryDirectory.path)
+    let tree = PhoneHermesDirectory.list(root: FileManager.default.temporaryDirectory.path, includeHidden: false)
     expect(tree.ok, "没装 Hermes 时已有目录仍可列")
 
     runtime.installed = true
     let closed = await PhoneHermesApp.handle(
-        kind: "chat", sessionID: "api_test", title: "", text: "你好", directory: "/work", runtime: runtime
+        kind: "chat", sessionID: "api_test", title: "", text: "你好", runtime: runtime
     )
     expect(!closed.ok && closed.text == "这台电脑的 Hermes 没开", "Hermes 没开时不能聊天")
     runtime.running = true
-    let noPath = await PhoneHermesApp.handle(
-        kind: "chat", sessionID: "api_test", title: "", text: "你好", directory: nil, runtime: runtime
+    let noProject = await PhoneHermesApp.handle(
+        kind: "chat", sessionID: "api_test", title: "", text: "你好", runtime: runtime
     )
-    expect(!noPath.ok && noPath.text == "还没配置项目目录", "没配路径时可以识别但不能发消息")
+    expect(!noProject.ok && noProject.text == "先进入一个项目", "没进入项目时不能发消息")
     let sessions = await PhoneHermesApp.handle(
-        kind: "sessions", sessionID: "", title: "", text: "", directory: nil, runtime: runtime
+        kind: "sessions", sessionID: "", title: "", text: "", runtime: runtime
     )
-    expect(sessions.ok, "没配路径时仍可看会话")
+    expect(!sessions.ok && sessions.text == "先进入一个项目", "没进入项目时不列会话")
 
     let fm = FileManager.default
     let root = fm.temporaryDirectory.appendingPathComponent("phone-hermes-\(UUID().uuidString)", isDirectory: true)
@@ -7798,7 +7865,7 @@ func testPhoneHermesChatGate() async {
     defer { try? fm.removeItem(at: outside) }
     try! "OUTSIDE_SECRET".write(to: outside.appendingPathComponent("leak.txt"), atomically: true, encoding: .utf8)
     try! fm.createSymbolicLink(at: root.appendingPathComponent("escape"), withDestinationURL: outside)
-    let listed = PhoneHermesDirectory.list(root: root.path)
+    let listed = PhoneHermesDirectory.list(root: root.path, includeHidden: false)
     let entries = listed.body["entries"] as? [[String: String]] ?? []
     let names = entries.map { $0["name"] ?? "" }
     expect(names.contains("note.txt") && names.contains("src"), "目录只列出文件夹和文件名")
@@ -7806,16 +7873,102 @@ func testPhoneHermesChatGate() async {
     let dumped = entries.description
     expect(!dumped.contains(secret) && !dumped.contains("OUTSIDE_SECRET"), "目录结果不含文件内容")
 
-    let defaults = UserDefaults(suiteName: "tocode.phoneHermes.test.\(UUID().uuidString)")!
-    let store = PhoneHermesPathStore(defaults: defaults, isDirectory: { $0 == root.path })
-    store.save(root.path)
-    expect(store.configuredDirectory() == root.path, "路径配置记住这台 Mac 的文件夹")
+    let database = root.appendingPathComponent("projects.db").path
+    let directoryExists: (String) -> Bool = { path in
+        var isDir: ObjCBool = false
+        return FileManager.default.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
+    }
+    let project = try! HermesProfileProjects.create(
+        databasePath: database,
+        name: "手机项目",
+        folder: root.path,
+        isDirectory: directoryExists
+    )
+    let index = PhoneHermesSessionIndex(fileURL: root.appendingPathComponent("sessions.json"))
+    runtime.sessions = [PhoneHermesSession(id: "api_test", title: "新会话")]
+    index.remember(profile: "default", projectID: project.id, sessionID: "api_test")
+    let projectSessions = await PhoneHermesApp.handle(
+        kind: "sessions", sessionID: "", title: "", text: "", runtime: runtime,
+        projectID: project.id,
+        sessionIndex: index,
+        projectsDatabase: { _ in database },
+        isDirectory: directoryExists
+    )
+    let rows = projectSessions.body["sessions"] as? [[String: String]] ?? []
+    expect(projectSessions.ok && rows.count == 1 && rows.first?["id"] == "api_test", "只列出记在这个项目下的会话")
 
     let sent = await PhoneHermesApp.handle(
-        kind: "chat", sessionID: "api_test", title: "", text: "你好", directory: store.configuredDirectory(), runtime: runtime
+        kind: "chat", sessionID: "api_test", title: "", text: "你好", runtime: runtime,
+        projectID: project.id,
+        sessionIndex: index,
+        projectsDatabase: { _ in database },
+        isDirectory: directoryExists
     )
-    expect(sent.ok && sent.text == "已收到", "配好路径后把消息交给 Hermes")
-    expect(runtime.chats.first?.2 == root.path, "工作目录由 Mac 带上，不由手机指定")
+    expect(sent.ok && sent.text == "已收到", "进入项目后把消息交给 Hermes")
+    expect(runtime.chats.first?.2 == project.rootPath, "工作目录用项目主目录")
+
+    let projectTree = await PhoneHermesApp.handle(
+        kind: "tree", sessionID: "", title: "", text: "", runtime: runtime,
+        projectID: project.id,
+        projectsDatabase: { _ in database }
+    )
+    let treeNames = (projectTree.body["entries"] as? [[String: String]] ?? []).map { $0["name"] ?? "" }
+    expect(projectTree.ok && treeNames.contains("note.txt"), "目录显示当前项目的文件夹")
+    let noProjectTree = await PhoneHermesApp.handle(
+        kind: "tree", sessionID: "", title: "", text: "", runtime: runtime,
+        projectsDatabase: { _ in database }
+    )
+    expect(!noProjectTree.ok && noProjectTree.text == "先进入一个项目", "没进入项目时目录提示先选项目")
+
+    let home = fm.temporaryDirectory.appendingPathComponent("phone-home-\(UUID().uuidString)", isDirectory: true)
+    try! fm.createDirectory(at: home.appendingPathComponent("code/app"), withIntermediateDirectories: true)
+    try! fm.createDirectory(at: home.appendingPathComponent(".secret"), withIntermediateDirectories: true)
+    try! "x".write(to: home.appendingPathComponent("code/readme.txt"), atomically: true, encoding: .utf8)
+    try! fm.createSymbolicLink(at: home.appendingPathComponent("out"), withDestinationURL: outside)
+    defer { try? fm.removeItem(at: home) }
+    let homeReal = home.resolvingSymlinksInPath().path
+    expect(PhoneHermesHomeFolder.resolve("code/app", home: home.path) == homeReal + "/code/app", "主目录里的文件夹能选")
+    expect(PhoneHermesHomeFolder.resolve("", home: home.path) == homeReal, "空路径就是主目录本身")
+    for bad in ["/etc", "../", "code/../..", "code/./app", "code//app", "out", "code/readme.txt", "missing", "code/\u{0}app"] {
+        expect(PhoneHermesHomeFolder.resolve(bad, home: home.path) == nil, "拒绝越界、点段、跑出主目录的链接、文件和不存在的路径：\(bad.debugDescription)")
+    }
+    let top = PhoneHermesHomeFolder.folders(under: "", home: home.path, includeHidden: false)
+    expect(top.ok && (top.body["folders"] as? [String]) == ["code"], "只列主目录内的文件夹，不列文件、隐藏项和跑出去的链接")
+    let topHidden = PhoneHermesHomeFolder.folders(under: "", home: home.path, includeHidden: true)
+    expect((topHidden.body["folders"] as? [String])?.contains(".secret") == true, "访达显示隐藏文件时也列隐藏文件夹")
+    let escaped = PhoneHermesHomeFolder.folders(under: "..", home: home.path, includeHidden: false)
+    expect(!escaped.ok, "不能往上走出主目录")
+    let viaApp = await PhoneHermesApp.handle(
+        kind: "folders", sessionID: "", title: "", text: "", runtime: runtime,
+        path: "code", home: home.path
+    )
+    expect(viaApp.ok && (viaApp.body["folders"] as? [String]) == ["app"] && viaApp.body["path"] as? String == "code", "手机按层浏览子文件夹")
+
+    let homeDatabase = home.appendingPathComponent("projects.db").path
+    let made = await PhoneHermesApp.handle(
+        kind: "project_create", sessionID: "", title: "应用", text: "", runtime: runtime,
+        path: "code/app", home: home.path,
+        projectsDatabase: { _ in homeDatabase },
+        isDirectory: directoryExists
+    )
+    let madeID = (made.body["project"] as? [String: String])?["id"] ?? ""
+    expect(made.ok && HermesProfileProjects.project(databasePath: homeDatabase, id: madeID)?.rootPath == homeReal + "/code/app", "用手机选的文件夹新建项目")
+    let again = await PhoneHermesApp.handle(
+        kind: "project_create", sessionID: "", title: "重复", text: "", runtime: runtime,
+        path: "code/app", home: home.path,
+        projectsDatabase: { _ in homeDatabase },
+        isDirectory: directoryExists
+    )
+    expect(!again.ok && again.text == "这个文件夹已经属于别的项目", "同一文件夹不能属于两个项目")
+    for bad in ["code/readme.txt", "out", "../x"] {
+        let rejected = await PhoneHermesApp.handle(
+            kind: "project_create", sessionID: "", title: "坏", text: "", runtime: runtime,
+            path: bad, home: home.path,
+            projectsDatabase: { _ in homeDatabase },
+            isDirectory: directoryExists
+        )
+        expect(!rejected.ok && rejected.text == "请选择主目录里的一个现存文件夹", "新建项目拒绝文件和主目录外路径：\(bad)")
+    }
     expect(PhoneHermesEnvironment.apiKey(from: "API_SERVER_KEY=\"local-key\"\n") == "local-key", "能读本机 Hermes 密钥")
     expect(!sent.body.keys.contains("api_key"), "回复里不带密钥")
 }
@@ -7843,15 +7996,14 @@ func testPhoneHermesAppChannel() async {
             screenBlackout: ScreenBlackoutService(overlay: MockTocodeScreenBlackout()),
             notify: { _, _ in }
         ),
-        phoneHermes: runtime,
-        phoneHermesPath: PhoneHermesPathStore(defaults: UserDefaults(suiteName: UUID().uuidString)!, isDirectory: { _ in false })
+        phoneHermes: runtime
     )
     service.handle([
         "op": "app_inbound", "link_id": "link-1", "request_id": "c1", "kind": "chat", "text": "你好"
     ])
     try? await Task.sleep(nanoseconds: 80_000_000)
     expect(transport.sent.last?["op"] as? String == "app_result", "聊天走单独回执")
-    expect(transport.sent.last?["text"] as? String == "还没配置项目目录", "没配路径时拒绝发送")
+    expect(transport.sent.last?["text"] as? String == "会话不存在", "没有会话时拒绝发送")
     service.handle([
         "op": "command_inbound", "link_id": "link-1", "request_id": "r9", "action": "shell"
     ])
@@ -8373,6 +8525,7 @@ struct TestRunnerMain {
         testRemoteControlBrowserPage()
         await testRemoteControlAssociationPage()
         await testRemoteControlWhitelist()
+        do { try testPhoneHermesProfiles() } catch { expect(false, "档案项目测试没有跑完") }
         await testPhoneHermesChatGate()
         await testPhoneHermesAppChannel()
         testPhoneHermesSessionTitleSkipsTakenNames()

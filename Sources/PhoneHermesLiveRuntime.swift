@@ -51,7 +51,11 @@ final class PhoneHermesLiveRuntime: PhoneHermesRuntime {
     }
 
     func listSessions() async throws -> [PhoneHermesSession] {
-        let json = try await request(method: "GET", path: "/api/sessions?source=api_server&limit=50", body: nil, timeout: 15)
+        try await listSessions(profile: "default")
+    }
+
+    func listSessions(profile: String) async throws -> [PhoneHermesSession] {
+        let json = try await request(method: "GET", path: "/api/sessions?source=api_server&limit=50", body: nil, timeout: 15, profile: profile)
         let rows = json["data"] as? [[String: Any]] ?? []
         return rows.compactMap { row in
             guard let id = row["id"] as? String, !id.isEmpty else { return nil }
@@ -61,6 +65,10 @@ final class PhoneHermesLiveRuntime: PhoneHermesRuntime {
     }
 
     func createSession(title: String) async throws -> PhoneHermesSession {
+        try await createSession(title: title, profile: "default")
+    }
+
+    func createSession(title: String, profile: String) async throws -> PhoneHermesSession {
         var attempt = 1
         var json: [String: Any] = [:]
         while true {
@@ -70,7 +78,8 @@ final class PhoneHermesLiveRuntime: PhoneHermesRuntime {
                     method: "POST",
                     path: "/api/sessions",
                     body: ["title": candidate, "source": "api_server"],
-                    timeout: 15
+                    timeout: 15,
+                    profile: profile
                 )
                 break
             } catch let error as PhoneHermesHTTPError
@@ -85,11 +94,16 @@ final class PhoneHermesLiveRuntime: PhoneHermesRuntime {
     }
 
     func messages(sessionID: String) async throws -> [PhoneHermesTurn] {
+        try await messages(sessionID: sessionID, profile: "default")
+    }
+
+    func messages(sessionID: String, profile: String) async throws -> [PhoneHermesTurn] {
         let json = try await request(
             method: "GET",
             path: "/api/sessions/\(sessionID)/messages?inline_images=false&limit=80&order=oldest",
             body: nil,
-            timeout: 20
+            timeout: 20,
+            profile: profile
         )
         let rows = json["data"] as? [[String: Any]] ?? []
         return rows.compactMap { row in
@@ -100,6 +114,10 @@ final class PhoneHermesLiveRuntime: PhoneHermesRuntime {
     }
 
     func chat(sessionID: String, text: String, directory: String) async throws -> String {
+        try await chat(sessionID: sessionID, text: text, directory: directory, profile: "default")
+    }
+
+    func chat(sessionID: String, text: String, directory: String, profile: String) async throws -> String {
         let json = try await request(
             method: "POST",
             path: "/api/sessions/\(sessionID)/chat",
@@ -107,7 +125,8 @@ final class PhoneHermesLiveRuntime: PhoneHermesRuntime {
                 "input": text,
                 "instructions": PhoneHermesApp.instructions(for: directory)
             ],
-            timeout: 180
+            timeout: 180,
+            profile: profile
         )
         let message = json["message"] as? [String: Any]
         let content = Self.plainText(message?["content"]).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -126,12 +145,21 @@ final class PhoneHermesLiveRuntime: PhoneHermesRuntime {
         return json["status"] as? String == "ok"
     }
 
-    private func request(method: String, path: String, body: [String: Any]?, timeout: TimeInterval) async throws -> [String: Any] {
-        let env = readEnv()
-        let key = PhoneHermesEnvironment.apiKey(from: env)
+    private func request(method: String, path: String, body: [String: Any]?, timeout: TimeInterval, profile: String) async throws -> [String: Any] {
+        let name = profile.isEmpty ? "default" : profile
+        guard HermesProfileCatalog.isSafe(name) else { throw URLError(.badURL) }
+        let profileEnv = envFile(profile: name)
+        let profileHome = profileEnv.deletingLastPathComponent().path
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: profileHome, isDirectory: &isDir), isDir.boolValue else {
+            throw URLError(.badURL)
+        }
+        try HermesGatewayEnv.ensure(at: profileEnv)
+        let key = PhoneHermesEnvironment.apiKey(from: read(profileEnv))
         guard !key.isEmpty else { throw URLError(.userAuthenticationRequired) }
-        let port = PhoneHermesEnvironment.port(from: env)
-        guard let url = URL(string: "http://127.0.0.1:\(port)\(path)") else { throw URLError(.badURL) }
+        let port = PhoneHermesEnvironment.port(from: read(envURL))
+        let prefix = HermesProfileCatalog.prefix(for: name)
+        guard let url = URL(string: "http://127.0.0.1:\(port)\(prefix)\(path)") else { throw URLError(.badURL) }
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.timeoutInterval = timeout
@@ -149,7 +177,17 @@ final class PhoneHermesLiveRuntime: PhoneHermesRuntime {
     }
 
     private func readEnv() -> String {
-        (try? String(contentsOf: envURL, encoding: .utf8)) ?? ""
+        read(envURL)
+    }
+
+    private func read(_ url: URL) -> String {
+        (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+    }
+
+    private func envFile(profile: String) -> URL {
+        guard profile != "default" else { return envURL }
+        return envURL.deletingLastPathComponent()
+            .appendingPathComponent("profiles/\(profile)/.env")
     }
 
     private static func plainText(_ content: Any?) -> String {

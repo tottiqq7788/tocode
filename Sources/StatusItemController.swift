@@ -31,7 +31,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private let terminalFollow: TerminalFollowSettingsStore
     private let hermesFollow: HermesFollowSettingsStore
     private let hermesProjects: HermesProjectService
-    private let phoneHermesPath: PhoneHermesPathStore
     private let hermesGateway: HermesGatewayControlling
     private let codexModels: CodexModelSwitching
     private let codexRestarter: CodexApplicationRestarting
@@ -79,7 +78,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         terminalFollow: TerminalFollowSettingsStore = TerminalFollowSettingsStore(),
         hermesFollow: HermesFollowSettingsStore = HermesFollowSettingsStore(),
         hermesProjects: HermesProjectService = HermesProjectService(),
-        phoneHermesPath: PhoneHermesPathStore = PhoneHermesPathStore(),
         hermesGateway: HermesGatewayControlling,
         codexModels: CodexModelSwitching = CodexModelSwitchService(),
         codexRestarter: CodexApplicationRestarting = CodexApplicationRestarter(),
@@ -107,7 +105,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         self.terminalFollow = terminalFollow
         self.hermesFollow = hermesFollow
         self.hermesProjects = hermesProjects
-        self.phoneHermesPath = phoneHermesPath
         self.hermesGateway = hermesGateway
         self.codexModels = codexModels
         self.codexRestarter = codexRestarter
@@ -711,13 +708,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         )
         associate.target = self
         ShortcutMenuAppearance.apply(to: associate, enabled: remoteControl.isAssociated)
-        let phonePath = remoteMenu.addItem(
-            withTitle: "路径配置",
-            action: #selector(choosePhoneHermesPath),
-            keyEquivalent: ""
-        )
-        phonePath.target = self
-        ShortcutMenuAppearance.apply(to: phonePath, enabled: phoneHermesPath.configuredDirectory() != nil)
         let gateway = remoteMenu.addItem(
             withTitle: HermesGatewayMenu.title,
             action: #selector(toggleHermesGateway),
@@ -1486,18 +1476,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     @objc private func toggleHermesGateway() {
         hermesGateway.toggle()
-    }
-
-    @objc private func choosePhoneHermesPath() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
-        panel.canCreateDirectories = true
-        panel.message = "选择手机对话使用的项目目录"
-        if panel.runModal() == .OK, let url = panel.url {
-            phoneHermesPath.save(url.path)
-        }
     }
 
     @objc private func openRemoteAssociation() {
