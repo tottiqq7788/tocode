@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import CoreGraphics
+import ImageIO
 import SQLite3
 
 var failures = 0
@@ -8441,6 +8442,70 @@ func testPhoneHermesFilePreview() {
     expect(!binary.ok && binary.text == "这个文件不能预览", "二进制文件不预览")
     let folder = PhoneHermesDirectory.preview(root: root.path, relative: "src")
     expect(!folder.ok && folder.text == "这是文件夹", "文件夹不能当文件预览")
+    let png = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")!
+    try! png.write(to: root.appendingPathComponent("src/dot.png"))
+    let image = PhoneHermesDirectory.preview(root: root.path, relative: "src/dot.png")
+    expect(
+        image.ok
+            && image.body["format"] as? String == "image"
+            && image.body["media"] as? String == "image/png"
+            && image.body["content"] as? String == png.base64EncodedString()
+            && image.body["truncated"] as? Bool == false,
+        "小 png 原样返回，不分页"
+    )
+    try! Data("hello".utf8).write(to: root.appendingPathComponent("src/fake.png"))
+    let fake = PhoneHermesDirectory.preview(root: root.path, relative: "src/fake.png")
+    expect(!fake.ok && fake.text == "这个文件不能预览", "扩展名是图片但文件头不是时拒绝")
+    let gif = Data([
+        0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00,
+        0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x21, 0xF9, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00,
+        0x2C, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x02, 0x02, 0x44, 0x01, 0x00, 0x3B
+    ])
+    try! gif.write(to: root.appendingPathComponent("src/dot.gif"))
+    let still = PhoneHermesDirectory.preview(root: root.path, relative: "src/dot.gif")
+    let stillBytes = Data(base64Encoded: still.body["content"] as? String ?? "") ?? Data()
+    expect(
+        still.ok && still.body["format"] as? String == "image" && still.body["media"] as? String == "image/jpeg" && stillBytes.starts(with: [0xFF, 0xD8, 0xFF]),
+        "gif 收成一张 JPEG"
+    )
+    let wideSide = 900
+    let wideContext = CGContext(
+        data: nil,
+        width: wideSide,
+        height: wideSide,
+        bitsPerComponent: 8,
+        bytesPerRow: wideSide * 4,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    )
+    if let pixels = wideContext?.data {
+        let ptr = pixels.bindMemory(to: UInt8.self, capacity: wideSide * wideSide * 4)
+        var state: UInt32 = 0x12345678
+        for index in stride(from: 0, to: wideSide * wideSide * 4, by: 4) {
+            state = state &* 1664525 &+ 1013904223
+            ptr[index] = UInt8(truncatingIfNeeded: state)
+            ptr[index + 1] = UInt8(truncatingIfNeeded: state >> 8)
+            ptr[index + 2] = UInt8(truncatingIfNeeded: state >> 16)
+            ptr[index + 3] = 255
+        }
+    }
+    let wide = wideContext?.makeImage()
+    let wideURL = root.appendingPathComponent("src/wide.png")
+    if let wide, let dest = CGImageDestinationCreateWithURL(wideURL as CFURL, "public.png" as CFString, 1, nil) {
+        CGImageDestinationAddImage(dest, wide, nil)
+        CGImageDestinationFinalize(dest)
+    }
+    let shrunk = PhoneHermesDirectory.preview(root: root.path, relative: "src/wide.png")
+    let shrunkBytes = Data(base64Encoded: shrunk.body["content"] as? String ?? "") ?? Data()
+    let originalWide = (try? Data(contentsOf: wideURL))?.base64EncodedString() ?? ""
+    expect(
+        shrunk.ok
+            && shrunk.body["format"] as? String == "image"
+            && shrunk.body["media"] as? String == "image/jpeg"
+            && shrunkBytes.starts(with: [0xFF, 0xD8, 0xFF])
+            && (shrunk.body["content"] as? String) != originalWide,
+        "放不进预览结果的 png 收成 JPEG，原文 \(originalWide.count) 字，结果 \((shrunk.body["content"] as? String)?.count ?? 0) 字"
+    )
 }
 
 @MainActor

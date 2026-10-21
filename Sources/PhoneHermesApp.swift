@@ -1,4 +1,6 @@
+import CoreGraphics
 import Foundation
+import ImageIO
 
 struct PhoneHermesSnapshot: Equatable {
     var installed: Bool
@@ -181,7 +183,18 @@ enum PhoneHermesDirectory {
             return .failure("文件不存在")
         }
         guard !isDir.boolValue else { return .failure("这是文件夹") }
+        let ext = ((file as NSString).pathExtension as String).lowercased()
+        if imageExtensions.contains(ext) {
+            let bytes = (try? fileManager.attributesOfItem(atPath: file)[.size] as? NSNumber)?.int64Value ?? 0
+            if bytes > imageByteLimit { return .failure("这个文件不能预览") }
+        }
         guard var data = fileManager.contents(atPath: file) else { return .failure("这个文件不能预览") }
+        switch imagePreview(file: file, root: rootReal, data: data) {
+        case .reply(let reply):
+            return reply
+        case .notImage:
+            break
+        }
         guard looksLikeText(data.prefix(8_192)) else { return .failure("这个文件不能预览") }
         if data.count > previewReadLimit { data = data.prefix(previewReadLimit) }
         var slice = data
@@ -221,6 +234,112 @@ enum PhoneHermesDirectory {
             "next": next,
             "truncated": truncated
         ])
+    }
+
+    private static let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "webp", "heic", "heif"]
+    /// 预览结果整包上限是 20 万字符。base64 留出信封和路径的余量。
+    private static let imageBase64Budget = 150_000
+    private static let imageByteLimit: Int64 = 20 * 1024 * 1024
+
+    private enum ImagePreview {
+        case notImage
+        case reply(PhoneHermesAppReply)
+    }
+
+    /// 扩展名和文件头都像图片才预览。png、jpeg 放得进现有结果就原样返回，其余收成一张 JPEG。
+    private static func imagePreview(file: String, root: String, data: Data) -> ImagePreview {
+        let ext = ((file as NSString).pathExtension as String).lowercased()
+        guard imageExtensions.contains(ext) else { return .notImage }
+        guard let media = imageMedia(extension: ext, data: data), let image = firstImage(data) else {
+            return .reply(.failure("这个文件不能预览"))
+        }
+        let original = data.base64EncodedString()
+        if (media == "image/png" || media == "image/jpeg"), original.count <= imageBase64Budget {
+            return .reply(imageBody(file: file, root: root, media: media, content: original))
+        }
+        guard let jpeg = jpegFitting(image) else { return .reply(.failure("这个文件不能预览")) }
+        return .reply(imageBody(file: file, root: root, media: "image/jpeg", content: jpeg.base64EncodedString()))
+    }
+
+    private static func imageBody(file: String, root: String, media: String, content: String) -> PhoneHermesAppReply {
+        let name = (file as NSString).lastPathComponent
+        let shown = String(file.dropFirst(root.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        return .success("", body: [
+            "name": name,
+            "path": shown,
+            "format": "image",
+            "media": media,
+            "content": content,
+            "next": 0,
+            "truncated": false
+        ])
+    }
+
+    private static func imageMedia(extension ext: String, data: Data) -> String? {
+        switch ext {
+        case "png":
+            return data.starts(with: [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) ? "image/png" : nil
+        case "jpg", "jpeg":
+            return data.starts(with: [0xFF, 0xD8, 0xFF]) ? "image/jpeg" : nil
+        case "gif":
+            let gif87 = Data("GIF87a".utf8)
+            let gif89 = Data("GIF89a".utf8)
+            return data.starts(with: gif87) || data.starts(with: gif89) ? "image/gif" : nil
+        case "webp":
+            guard data.count >= 12 else { return nil }
+            return data.prefix(4) == Data("RIFF".utf8) && data.subdata(in: 8..<12) == Data("WEBP".utf8) ? "image/webp" : nil
+        case "heic", "heif":
+            guard data.count >= 12, data.subdata(in: 4..<8) == Data("ftyp".utf8) else { return nil }
+            let brand = String(data: data.subdata(in: 8..<12), encoding: .ascii) ?? ""
+            return ["heic", "heix", "heif", "mif1", "msf1"].contains(brand) ? "image/heic" : nil
+        default:
+            return nil
+        }
+    }
+
+    private static func firstImage(_ data: Data) -> CGImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil), CGImageSourceGetCount(source) > 0 else {
+            return nil
+        }
+        return CGImageSourceCreateImageAtIndex(source, 0, nil)
+    }
+
+    private static func jpegFitting(_ image: CGImage) -> Data? {
+        let edges = [1600, 1280, 960, 720, 480, 320]
+        let qualities: [CGFloat] = [0.72, 0.5, 0.32]
+        for edge in edges {
+            for quality in qualities {
+                guard let data = jpegData(image, maxEdge: edge, quality: quality) else { continue }
+                if data.base64EncodedString().count <= imageBase64Budget { return data }
+            }
+        }
+        return nil
+    }
+
+    private static func jpegData(_ image: CGImage, maxEdge: Int, quality: CGFloat) -> Data? {
+        let longest = max(image.width, image.height)
+        let scale = longest > maxEdge ? Double(maxEdge) / Double(longest) : 1
+        let targetW = max(1, Int((Double(image.width) * scale).rounded()))
+        let targetH = max(1, Int((Double(image.height) * scale).rounded()))
+        guard let context = CGContext(
+            data: nil,
+            width: targetW,
+            height: targetH,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+        ) else { return nil }
+        context.interpolationQuality = .medium
+        context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: targetW, height: targetH))
+        context.draw(image, in: CGRect(x: 0, y: 0, width: targetW, height: targetH))
+        guard let scaled = context.makeImage() else { return nil }
+        let out = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(out, "public.jpeg" as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(dest, scaled, [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary)
+        guard CGImageDestinationFinalize(dest) else { return nil }
+        return out as Data
     }
 
     private static func looksLikeText(_ data: Data) -> Bool {
