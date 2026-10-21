@@ -18,6 +18,17 @@ enum ScreenLock {
     }
 }
 
+private func inboundFlag(_ value: Any?) -> Bool? {
+    switch value {
+    case let flag as Bool:
+        return flag
+    case let number as NSNumber where CFGetTypeID(number) == CFBooleanGetTypeID():
+        return number.boolValue
+    default:
+        return nil
+    }
+}
+
 private struct InboundProjectFile {
     let linkID: String
     let requestID: String
@@ -26,8 +37,16 @@ private struct InboundProjectFile {
     let kind: String
     let profile: String
     let projectID: String
+    let hold: Bool
 
     init?(_ message: [String: Any], linkID: String, requestID: String) {
+        let holdFlag: Bool
+        if message["hold"] != nil {
+            guard let flag = inboundFlag(message["hold"]) else { return nil }
+            holdFlag = flag
+        } else {
+            holdFlag = false
+        }
         guard message["path"] == nil,
               let name = message["name"] as? String,
               let kind = message["kind"] as? String, kind == "image" || kind == "file",
@@ -45,6 +64,7 @@ private struct InboundProjectFile {
         self.kind = kind
         self.profile = profile
         self.projectID = projectID
+        self.hold = holdFlag
     }
 }
 
@@ -275,6 +295,29 @@ final class RemoteControlService {
             inboundFile = pending
             return
         }
+        if op == "project_file_place" {
+            let hold = message["hold_id"] as? String ?? ""
+            let profile = message["profile"] as? String ?? ""
+            let projectID = message["project_id"] as? String ?? ""
+            guard message["path"] == nil, message["name"] == nil else {
+                replyProjectFile(linkID: linkID, requestID: requestID, ok: false, path: "", text: "不能指定保存位置")
+                return
+            }
+            let reply = placeHeldFile(linkID: linkID, profile: profile, projectID: projectID, hold: hold)
+            let path = reply.body["path"] as? String ?? ""
+            replyProjectFile(
+                linkID: linkID, requestID: requestID, ok: reply.ok && !path.isEmpty, path: path, text: reply.ok ? "" : reply.text
+            )
+            return
+        }
+        if op == "project_file_drop" {
+            let hold = message["hold_id"] as? String ?? ""
+            let removed = dropHeldFile(linkID: linkID, hold: hold)
+            replyProjectFile(
+                linkID: linkID, requestID: requestID, ok: removed, path: "", text: removed ? "" : "这份附件已经不在了", dropped: removed
+            )
+            return
+        }
         guard op == "command_inbound" else { return }
         let action = message["action"] as? String ?? ""
         let target = message["target"] as? [String: Any]
@@ -377,6 +420,15 @@ final class RemoteControlService {
             replyProjectFile(linkID: pending.linkID, requestID: pending.requestID, ok: false, path: "", text: "文件长度不匹配")
             return
         }
+        if pending.hold {
+            let reply = holdIncomingFile(pending, bytes: data)
+            let hold = reply.body["hold_id"] as? String ?? ""
+            replyProjectFile(
+                linkID: pending.linkID, requestID: pending.requestID, ok: reply.ok && !hold.isEmpty,
+                path: "", text: reply.ok ? "" : reply.text, hold: hold
+            )
+            return
+        }
         let reply = PhoneHermesApp.saveAttachment(
             profile: pending.profile,
             projectID: pending.projectID,
@@ -401,7 +453,47 @@ final class RemoteControlService {
         )
     }
 
-    private func replyProjectFile(linkID: String, requestID: String, ok: Bool, path: String, text: String) {
+    private func holdIncomingFile(_ pending: InboundProjectFile, bytes: Data) -> PhoneHermesAppReply {
+        PhoneHermesApp.holdAttachment(
+            linkID: pending.linkID,
+            profile: pending.profile,
+            projectID: pending.projectID,
+            name: pending.name,
+            kind: pending.kind,
+            bytes: bytes,
+            catalog: HermesProfileCatalog.names(),
+            profileStore: phoneHermesProfiles,
+            projectsDatabase: { HermesProfileProjects.databasePath(home: NSHomeDirectory(), profile: $0) },
+            isDirectory: { path in
+                var isDir: ObjCBool = false
+                return FileManager.default.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
+            }
+        )
+    }
+
+    private func placeHeldFile(linkID: String, profile: String, projectID: String, hold: String) -> PhoneHermesAppReply {
+        PhoneHermesApp.placeHeldAttachment(
+            linkID: linkID,
+            profile: profile,
+            projectID: projectID,
+            hold: hold,
+            catalog: HermesProfileCatalog.names(),
+            profileStore: phoneHermesProfiles,
+            projectsDatabase: { HermesProfileProjects.databasePath(home: NSHomeDirectory(), profile: $0) },
+            isDirectory: { path in
+                var isDir: ObjCBool = false
+                return FileManager.default.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
+            }
+        )
+    }
+
+    private func dropHeldFile(linkID: String, hold: String) -> Bool {
+        PhoneHermesApp.dropHeldAttachment(linkID: linkID, hold: hold)
+    }
+
+    private func replyProjectFile(
+        linkID: String, requestID: String, ok: Bool, path: String, text: String, hold: String = "", dropped: Bool = false
+    ) {
         var payload: [String: Any] = [
             "op": "project_file_result",
             "link_id": linkID,
@@ -411,6 +503,12 @@ final class RemoteControlService {
         ]
         if ok, !path.isEmpty {
             payload["path"] = path
+        }
+        if ok, !hold.isEmpty {
+            payload["hold_id"] = hold
+        }
+        if ok, dropped {
+            payload["dropped"] = true
         }
         let transport = self.transport
         Task { try? await transport.send(payload) }

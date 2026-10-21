@@ -8407,6 +8407,109 @@ func testPhoneProjectAttachments() {
     expect(foreign == ["b.pdf", "c.txt"], "失败的一次没有多写文件")
 }
 
+func testPhoneAttachmentHolds() {
+    let fm = FileManager.default
+    let project = fm.temporaryDirectory.appendingPathComponent("phone-hold-project-\(UUID().uuidString)", isDirectory: true)
+    let holds = fm.temporaryDirectory.appendingPathComponent("phone-hold-root-\(UUID().uuidString)", isDirectory: true)
+    let outside = fm.temporaryDirectory.appendingPathComponent("phone-hold-out-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? fm.removeItem(at: project)
+        try? fm.removeItem(at: holds)
+        try? fm.removeItem(at: outside)
+    }
+    try! fm.createDirectory(at: project, withIntermediateDirectories: true)
+    try! fm.createDirectory(at: outside, withIntermediateDirectories: true)
+    let staged = PhoneAttachmentHolds.stage(
+        root: holds, linkID: "link-a", profile: "default", projectID: "p_demo",
+        name: "965.jpg", kind: "image", bytes: Data("jpeg".utf8), fileManager: fm
+    )
+    guard case .success(let hold) = staged else {
+        expect(false, "选中后能暂存")
+        return
+    }
+    let before = (try? fm.contentsOfDirectory(atPath: project.path)) ?? []
+    expect(before.isEmpty, "暂存不写进项目")
+    let body = try! String(contentsOf: holds.appendingPathComponent(hold).appendingPathComponent("body"), encoding: .utf8)
+    expect(body == "jpeg", "暂存的是原来的字节")
+    let otherLink = PhoneAttachmentHolds.place(
+        root: holds, linkID: "link-b", profile: "default", projectID: "p_demo",
+        projectRoot: project.path, hold: hold, fileManager: fm
+    )
+    var rejectedLink = false
+    if case .failure = otherLink { rejectedLink = true }
+    let otherProject = PhoneAttachmentHolds.place(
+        root: holds, linkID: "link-a", profile: "default", projectID: "p_other",
+        projectRoot: project.path, hold: hold, fileManager: fm
+    )
+    var rejectedProject = false
+    if case .failure = otherProject { rejectedProject = true }
+    expect(rejectedLink && rejectedProject, "关联或项目对不上时不落盘")
+    expect(((try? fm.contentsOfDirectory(atPath: project.path)) ?? []).isEmpty, "还没发送时项目里没有文件")
+    let placed = PhoneAttachmentHolds.place(
+        root: holds, linkID: "link-a", profile: "default", projectID: "p_demo",
+        projectRoot: project.path, hold: hold, fileManager: fm
+    )
+    guard case .success(let relative) = placed else {
+        expect(false, "发送时才落盘")
+        return
+    }
+    expect(relative == "对话附件-图片/965.jpg", "图片落在固定文件夹")
+    let saved = try! String(contentsOf: project.appendingPathComponent(relative), encoding: .utf8)
+    expect(saved == "jpeg" && !fm.fileExists(atPath: holds.appendingPathComponent(hold).path), "落盘后暂存删除")
+    let again = PhoneAttachmentHolds.stage(
+        root: holds, linkID: "link-a", profile: "default", projectID: "p_demo",
+        name: "../965.jpg", kind: "image", bytes: Data("no".utf8), fileManager: fm
+    )
+    var rejectedName = false
+    if case .failure = again { rejectedName = true }
+    expect(rejectedName, "暂存也不接受带路径的文件名")
+    let pending = PhoneAttachmentHolds.stage(
+        root: holds, linkID: "link-a", profile: "default", projectID: "p_demo",
+        name: "note.txt", kind: "file", bytes: Data("note".utf8), fileManager: fm
+    )
+    guard case .success(let pendingId) = pending else {
+        expect(false, "第二份也能暂存")
+        return
+    }
+    expect(PhoneAttachmentHolds.drop(root: holds, linkID: "link-b", hold: pendingId, fileManager: fm) == false, "别的关联不能删暂存")
+    expect(fm.fileExists(atPath: holds.appendingPathComponent(pendingId).path), "没删掉别人的暂存")
+    expect(PhoneAttachmentHolds.drop(root: holds, linkID: "link-a", hold: pendingId, fileManager: fm), "去掉附件就删暂存")
+    expect(!fm.fileExists(atPath: holds.appendingPathComponent(pendingId).path), "暂存目录消失")
+    let stale = PhoneAttachmentHolds.stage(
+        root: holds, linkID: "link-a", profile: "default", projectID: "p_demo",
+        name: "old.jpg", kind: "image", bytes: Data("old".utf8), fileManager: fm
+    )
+    guard case .success(let staleId) = stale else {
+        expect(false, "过期测试能暂存")
+        return
+    }
+    try! fm.setAttributes(
+        [.modificationDate: Date().addingTimeInterval(-7 * 60 * 60)],
+        ofItemAtPath: holds.appendingPathComponent(staleId).path
+    )
+    let fresh = PhoneAttachmentHolds.stage(
+        root: holds, linkID: "link-a", profile: "default", projectID: "p_demo",
+        name: "new.jpg", kind: "image", bytes: Data("new".utf8), fileManager: fm
+    )
+    guard case .success = fresh else {
+        expect(false, "新的暂存还能写入")
+        return
+    }
+    expect(!fm.fileExists(atPath: holds.appendingPathComponent(staleId).path), "过期暂存会被清掉")
+    let escapedId = UUID().uuidString
+    try! fm.createSymbolicLink(at: holds.appendingPathComponent(escapedId), withDestinationURL: outside)
+    let escaped = PhoneAttachmentHolds.place(
+        root: holds, linkID: "link-a", profile: "default", projectID: "p_demo",
+        projectRoot: project.path, hold: escapedId, fileManager: fm
+    )
+    var rejectedEscape = false
+    if case .failure = escaped { rejectedEscape = true }
+    let outsideNames = (try? fm.contentsOfDirectory(atPath: outside.path)) ?? []
+    expect(rejectedEscape && outsideNames.isEmpty, "符号链接不能把暂存带到外面")
+    expect(PhoneAttachmentHolds.drop(root: holds, linkID: "link-a", hold: escapedId, fileManager: fm) == false, "符号链接暂存不能删")
+    expect(fm.fileExists(atPath: outside.path), "外面的目录还在")
+}
+
 func testPhoneHermesFilePreview() {
     let fm = FileManager.default
     let root = fm.temporaryDirectory.appendingPathComponent("phone-preview-\(UUID().uuidString)", isDirectory: true)
@@ -9066,6 +9169,7 @@ struct TestRunnerMain {
         await testPhoneHermesSessionDraftRenameAndDelete()
         await testPhoneHermesRunStaysVisible()
         testPhoneProjectAttachments()
+        testPhoneAttachmentHolds()
         testPhoneHermesFilePreview()
         await testPhoneHermesAppChannel()
         testPhoneHermesSessionTitleSkipsTakenNames()

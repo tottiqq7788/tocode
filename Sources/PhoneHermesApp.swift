@@ -677,6 +677,96 @@ enum PhoneHermesApp {
         }
     }
 
+    /// 选中后先把字节放在项目外面。不返回路径，也不写入两个附件文件夹。
+    static func holdAttachment(
+        linkID: String,
+        profile: String,
+        projectID: String,
+        name: String,
+        kind: String,
+        bytes: Data,
+        catalog: [String] = ["default"],
+        profileStore: PhoneHermesProfileStore,
+        projectsDatabase: (String) -> String,
+        isDirectory: (String) -> Bool,
+        holdRoot: URL = PhoneAttachmentHolds.liveRoot(),
+        fileManager: FileManager = .default
+    ) -> PhoneHermesAppReply {
+        guard let project = resolvedAttachmentProject(
+            profile: profile, projectID: projectID, catalog: catalog, profileStore: profileStore,
+            projectsDatabase: projectsDatabase
+        ) else {
+            return .failure(projectID.isEmpty || !HermesProfileProjects.isProjectID(projectID) ? needProject : missingProject)
+        }
+        guard isDirectory(project.root) else { return .failure(missingProjectFolder) }
+        switch PhoneAttachmentHolds.stage(
+            root: holdRoot, linkID: linkID, profile: project.profile, projectID: project.id,
+            name: name, kind: kind, bytes: bytes, fileManager: fileManager
+        ) {
+        case .success(let hold):
+            return .success("", body: ["hold_id": hold])
+        case .failure(let error):
+            return .failure(error.text)
+        }
+    }
+
+    /// 发送时才按暂存里记下的种类，新建进对应的附件文件夹。
+    static func placeHeldAttachment(
+        linkID: String,
+        profile: String,
+        projectID: String,
+        hold: String,
+        catalog: [String] = ["default"],
+        profileStore: PhoneHermesProfileStore,
+        projectsDatabase: (String) -> String,
+        isDirectory: (String) -> Bool,
+        holdRoot: URL = PhoneAttachmentHolds.liveRoot(),
+        fileManager: FileManager = .default
+    ) -> PhoneHermesAppReply {
+        guard let project = resolvedAttachmentProject(
+            profile: profile, projectID: projectID, catalog: catalog, profileStore: profileStore,
+            projectsDatabase: projectsDatabase
+        ) else {
+            return .failure(projectID.isEmpty || !HermesProfileProjects.isProjectID(projectID) ? needProject : missingProject)
+        }
+        guard isDirectory(project.root) else { return .failure(missingProjectFolder) }
+        switch PhoneAttachmentHolds.place(
+            root: holdRoot, linkID: linkID, profile: project.profile, projectID: project.id,
+            projectRoot: project.root, hold: hold, fileManager: fileManager
+        ) {
+        case .success(let relative):
+            return .success("", body: ["path": relative])
+        case .failure(let error):
+            return .failure(error.text)
+        }
+    }
+
+    static func dropHeldAttachment(
+        linkID: String,
+        hold: String,
+        holdRoot: URL = PhoneAttachmentHolds.liveRoot(),
+        fileManager: FileManager = .default
+    ) -> Bool {
+        PhoneAttachmentHolds.drop(root: holdRoot, linkID: linkID, hold: hold, fileManager: fileManager)
+    }
+
+    private static func resolvedAttachmentProject(
+        profile: String,
+        projectID: String,
+        catalog: [String],
+        profileStore: PhoneHermesProfileStore,
+        projectsDatabase: (String) -> String
+    ) -> (profile: String, id: String, root: String)? {
+        let names = catalog.isEmpty ? ["default"] : catalog
+        let requested = profile.trimmingCharacters(in: .whitespacesAndNewlines)
+        let active = HermesProfileCatalog.accepted(
+            requested.isEmpty ? profileStore.resolved(among: names) : requested,
+            among: names
+        )
+        guard let project = ownedProject(projectID, profile: active, database: projectsDatabase) else { return nil }
+        return (active, project.id, project.rootPath)
+    }
+
     /// 只允许改、删记在当前项目下的会话。
     private static func ownedSession(
         _ sessionID: String,
@@ -748,7 +838,7 @@ enum PhoneProjectAttachments {
         }
         guard kind == "image" || kind == "file" else { return .failure(PhoneAttachmentError(text: "无法保存")) }
         guard !bytes.isEmpty, bytes.count <= byteLimit else { return .failure(PhoneAttachmentError(text: "只接受不超过 20MB 的单个文件")) }
-        guard let safe = sanitized(name) else { return .failure(PhoneAttachmentError(text: "文件名不能使用")) }
+        guard let safe = acceptedName(name) else { return .failure(PhoneAttachmentError(text: "文件名不能使用")) }
         let folderName = kind == "image" ? imageFolder : fileFolder
         let folderReal = canonical((rootReal as NSString).appendingPathComponent(folderName))
         guard folderReal.hasPrefix(rootReal + "/") else { return .failure(PhoneAttachmentError(text: "不能写到项目外面")) }
@@ -776,7 +866,7 @@ enum PhoneProjectAttachments {
         return .success("\(folderName)/\(chosen)")
     }
 
-    private static func sanitized(_ name: String) -> String? {
+    static func acceptedName(_ name: String) -> String? {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed.count <= 255 else { return nil }
         guard !trimmed.contains("/"), !trimmed.contains("\\"), !trimmed.contains("\0") else { return nil }
@@ -802,5 +892,185 @@ enum PhoneProjectAttachments {
 
     private static func canonical(_ path: String) -> String {
         URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+    }
+}
+
+enum PhoneAttachmentHolds {
+    static let capacity = 10
+    private static let lifetime: TimeInterval = 6 * 60 * 60
+    private static let holdPattern = try! NSRegularExpression(
+        pattern: "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+    )
+
+    static func liveRoot(fileManager: FileManager = .default) -> URL {
+        fileManager.temporaryDirectory.appendingPathComponent("tocode-phone-holds", isDirectory: true)
+    }
+
+    /// 把字节放在项目外面的暂存目录。返回编号，不返回路径。
+    static func stage(
+        root: URL,
+        linkID: String,
+        profile: String,
+        projectID: String,
+        name: String,
+        kind: String,
+        bytes: Data,
+        fileManager: FileManager = .default,
+        now: Date = Date()
+    ) -> Result<String, PhoneAttachmentError> {
+        guard !linkID.isEmpty else { return .failure(PhoneAttachmentError(text: "无法保存")) }
+        guard kind == "image" || kind == "file" else { return .failure(PhoneAttachmentError(text: "无法保存")) }
+        guard !bytes.isEmpty, bytes.count <= PhoneProjectAttachments.byteLimit else {
+            return .failure(PhoneAttachmentError(text: "只接受不超过 20MB 的单个文件"))
+        }
+        guard let safeName = PhoneProjectAttachments.acceptedName(name) else {
+            return .failure(PhoneAttachmentError(text: "文件名不能使用"))
+        }
+        guard let base = ensureRoot(root, fileManager: fileManager) else {
+            return .failure(PhoneAttachmentError(text: "无法保存文件"))
+        }
+        sweep(root: base, fileManager: fileManager, now: now)
+        let existing = (try? fileManager.contentsOfDirectory(at: base, includingPropertiesForKeys: nil)) ?? []
+        guard existing.count < capacity else { return .failure(PhoneAttachmentError(text: "一次最多带 10 个文件")) }
+        let hold = UUID().uuidString
+        let folder = base.appendingPathComponent(hold, isDirectory: true)
+        do {
+            try fileManager.createDirectory(at: folder, withIntermediateDirectories: false)
+            guard inside(folder, root: base) else {
+                try? fileManager.removeItem(at: folder)
+                return .failure(PhoneAttachmentError(text: "无法保存文件"))
+            }
+            let meta: [String: String] = [
+                "name": safeName,
+                "kind": kind,
+                "profile": profile,
+                "project_id": projectID,
+                "link_id": linkID,
+            ]
+            let encoded = try JSONSerialization.data(withJSONObject: meta)
+            try encoded.write(to: folder.appendingPathComponent("meta.json"), options: .atomic)
+            try bytes.write(to: folder.appendingPathComponent("body"), options: .atomic)
+            guard inside(folder.appendingPathComponent("body"), root: base) else {
+                try? fileManager.removeItem(at: folder)
+                return .failure(PhoneAttachmentError(text: "无法保存文件"))
+            }
+        } catch {
+            try? fileManager.removeItem(at: folder)
+            return .failure(PhoneAttachmentError(text: "无法保存文件"))
+        }
+        return .success(hold)
+    }
+
+    static func place(
+        root: URL,
+        linkID: String,
+        profile: String,
+        projectID: String,
+        projectRoot: String,
+        hold: String,
+        fileManager: FileManager = .default
+    ) -> Result<String, PhoneAttachmentError> {
+        guard let folder = containedFolder(root: root, hold: hold, fileManager: fileManager) else {
+            return .failure(PhoneAttachmentError(text: "这份附件已经不在了"))
+        }
+        guard let meta = readMeta(folder, fileManager: fileManager),
+              meta["link_id"] == linkID,
+              meta["profile"] == profile,
+              meta["project_id"] == projectID,
+              let name = meta["name"],
+              let kind = meta["kind"] else {
+            return .failure(PhoneAttachmentError(text: "无法保存"))
+        }
+        let body = folder.appendingPathComponent("body")
+        guard inside(body, root: root), let bytes = try? Data(contentsOf: body), !bytes.isEmpty else {
+            return .failure(PhoneAttachmentError(text: "这份附件已经不在了"))
+        }
+        let stored = PhoneProjectAttachments.store(
+            root: projectRoot, name: name, kind: kind, bytes: bytes, fileManager: fileManager
+        )
+        guard case .success(let relative) = stored else { return stored }
+        try? fileManager.removeItem(at: folder)
+        return .success(relative)
+    }
+
+    static func drop(root: URL, linkID: String, hold: String, fileManager: FileManager = .default) -> Bool {
+        guard valid(hold), let base = ensureRoot(root, fileManager: fileManager) else { return false }
+        let folder = base.appendingPathComponent(hold, isDirectory: true)
+        var isDir: ObjCBool = false
+        guard fileManager.fileExists(atPath: folder.path, isDirectory: &isDir) else { return true }
+        guard isDir.boolValue, inside(folder, root: base) else { return false }
+        guard readMeta(folder, fileManager: fileManager)?["link_id"] == linkID else { return false }
+        do {
+            try fileManager.removeItem(at: folder)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private static func sweep(root: URL, fileManager: FileManager, now: Date) {
+        guard let children = try? fileManager.contentsOfDirectory(
+            at: root, includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey]
+        ) else { return }
+        for child in children {
+            let values = try? child.resourceValues(forKeys: [.contentModificationDateKey, .isDirectoryKey])
+            guard values?.isDirectory == true, inside(child, root: root) else { continue }
+            let modified = values?.contentModificationDate ?? now
+            if now.timeIntervalSince(modified) > lifetime {
+                try? fileManager.removeItem(at: child)
+            }
+        }
+    }
+
+    private static func ensureRoot(_ root: URL, fileManager: FileManager) -> URL? {
+        var isDir: ObjCBool = false
+        if fileManager.fileExists(atPath: root.path, isDirectory: &isDir) {
+            guard isDir.boolValue else { return nil }
+        } else {
+            do {
+                try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+            } catch {
+                return nil
+            }
+        }
+        let resolved = root.resolvingSymlinksInPath()
+        guard resolved.path == root.resolvingSymlinksInPath().path else { return nil }
+        return resolved
+    }
+
+    private static func containedFolder(root: URL, hold: String, fileManager: FileManager) -> URL? {
+        guard valid(hold), let base = ensureRoot(root, fileManager: fileManager) else { return nil }
+        let folder = base.appendingPathComponent(hold, isDirectory: true)
+        var isDir: ObjCBool = false
+        guard fileManager.fileExists(atPath: folder.path, isDirectory: &isDir), isDir.boolValue, inside(folder, root: base) else {
+            return nil
+        }
+        return folder
+    }
+
+    private static func readMeta(_ folder: URL, fileManager: FileManager) -> [String: String]? {
+        let url = folder.appendingPathComponent("meta.json")
+        guard inside(url, root: folder.deletingLastPathComponent()),
+              let data = try? Data(contentsOf: url),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        var meta: [String: String] = [:]
+        for (key, value) in object {
+            guard let text = value as? String else { return nil }
+            meta[key] = text
+        }
+        return meta
+    }
+
+    private static func valid(_ hold: String) -> Bool {
+        let range = NSRange(hold.startIndex..., in: hold)
+        return holdPattern.firstMatch(in: hold, range: range) != nil
+    }
+
+    private static func inside(_ url: URL, root: URL) -> Bool {
+        let child = url.resolvingSymlinksInPath().path
+        let base = root.resolvingSymlinksInPath().path
+        return child == base || child.hasPrefix(base.hasSuffix("/") ? base : base + "/")
     }
 }

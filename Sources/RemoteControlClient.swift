@@ -99,6 +99,7 @@ final class RemoteControlHTTPClient: RemoteControlTransporting {
 
     private func open(_ url: URL) {
         let next = session.webSocketTask(with: url)
+        next.maximumMessageSize = PhoneProjectAttachments.byteLimit
         lock.lock()
         let old = task
         task = next
