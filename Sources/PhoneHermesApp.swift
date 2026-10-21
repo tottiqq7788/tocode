@@ -103,46 +103,60 @@ enum PhoneHermesEnvironment {
 }
 
 enum PhoneHermesDirectory {
-    static let maxEntries = 300
-    static let maxDepth = 4
+    static let pageSize = 80
 
-    static func list(root: String, includeHidden: Bool, fileManager: FileManager = .default) -> PhoneHermesAppReply {
+    /// 只列当前这一层。`offset` 是这一层已经给出的项数，每次再给一页。
+    static func list(
+        root: String,
+        includeHidden: Bool,
+        relative: String = "",
+        offset: Int = 0,
+        pageSize: Int = PhoneHermesDirectory.pageSize,
+        fileManager: FileManager = .default
+    ) -> PhoneHermesAppReply {
         var isDir: ObjCBool = false
         guard fileManager.fileExists(atPath: root, isDirectory: &isDir), isDir.boolValue else {
             return .failure(PhoneHermesApp.missingProjectFolder)
         }
         let fileSystem = FileSystemService(fm: fileManager)
         let rootReal = canonical(root)
-        var entries: [[String: String]] = []
-        var truncated = false
-        func visit(_ path: String, depth: Int) {
-            guard depth <= maxDepth, !truncated else {
-                truncated = true
-                return
+        let folder: String
+        if relative.isEmpty {
+            folder = rootReal
+        } else {
+            guard let resolved = fileInside(root: rootReal, relative: relative) else {
+                return .failure("这个文件夹不在项目里")
             }
-            let names = (try? fileManager.contentsOfDirectory(atPath: path)) ?? []
-            for name in names.sorted(by: { $0.localizedStandardCompare($1) == .orderedAscending }) {
-                if entries.count >= maxEntries {
-                    truncated = true
-                    return
-                }
-                let child = (path as NSString).appendingPathComponent(name)
-                if !includeHidden && fileSystem.isHiddenEntry(name: name, path: child) { continue }
-                let real = canonical(child)
-                guard real == rootReal || real.hasPrefix(rootReal + "/") else { continue }
-                var childIsDir: ObjCBool = false
-                guard fileManager.fileExists(atPath: real, isDirectory: &childIsDir) else { continue }
-                let relative = String(real.dropFirst(rootReal.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-                guard !relative.isEmpty else { continue }
-                let kind = childIsDir.boolValue ? "directory" : "file"
-                entries.append(["path": relative, "name": name, "kind": kind])
-                if childIsDir.boolValue {
-                    visit(real, depth: depth + 1)
-                }
+            var folderIsDir: ObjCBool = false
+            guard fileManager.fileExists(atPath: resolved, isDirectory: &folderIsDir), folderIsDir.boolValue else {
+                return .failure("这个文件夹不在项目里")
             }
+            folder = resolved
         }
-        visit(rootReal, depth: 1)
-        return .success(truncated ? "只显示了前 \(maxEntries) 项" : "", body: ["entries": entries])
+        let names = (try? fileManager.contentsOfDirectory(atPath: folder)) ?? []
+        var rows: [(name: String, path: String, kind: String, directory: Bool)] = []
+        for name in names {
+            let child = (folder as NSString).appendingPathComponent(name)
+            if !includeHidden && fileSystem.isHiddenEntry(name: name, path: child) { continue }
+            let real = canonical(child)
+            guard real == rootReal || real.hasPrefix(rootReal + "/") else { continue }
+            var childIsDir: ObjCBool = false
+            guard fileManager.fileExists(atPath: real, isDirectory: &childIsDir) else { continue }
+            let shown = relative.isEmpty ? name : relative + "/" + name
+            rows.append((name, shown, childIsDir.boolValue ? "directory" : "file", childIsDir.boolValue))
+        }
+        rows.sort { lhs, rhs in
+            if lhs.directory != rhs.directory { return lhs.directory && !rhs.directory }
+            return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+        }
+        let start = min(max(offset, 0), rows.count)
+        let end = min(rows.count, start + max(pageSize, 1))
+        let entries = rows[start..<end].map { ["path": $0.path, "name": $0.name, "kind": $0.kind] }
+        return .success("", body: [
+            "entries": entries,
+            "next": end,
+            "truncated": end < rows.count
+        ])
     }
 
     static let previewPageCharacters = 12_000
@@ -320,7 +334,12 @@ enum PhoneHermesApp {
             guard let project = ownedProject(projectID, profile: active, database: projectsDatabase) else {
                 return .failure(needProject)
             }
-            return PhoneHermesDirectory.list(root: project.rootPath, includeHidden: includeHidden)
+            return PhoneHermesDirectory.list(
+                root: project.rootPath,
+                includeHidden: includeHidden,
+                relative: path,
+                offset: offset
+            )
         case "preview":
             guard snapshot.installed else { return .failure(missingHermes) }
             guard let project = ownedProject(projectID, profile: active, database: projectsDatabase) else {

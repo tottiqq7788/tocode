@@ -8077,6 +8077,31 @@ func testPhoneHermesChatGate() async {
     expect(!names.contains("leak.txt") && !names.contains("escape"), "目录不跟着跑出项目文件夹")
     let dumped = entries.description
     expect(!dumped.contains(secret) && !dumped.contains("OUTSIDE_SECRET"), "目录结果不含文件内容")
+    expect((listed.body["entries"] as? [[String: String]] ?? []).allSatisfy { ($0["path"] ?? "").contains("/") == false }, "根目录这一页只含当前这一层")
+
+    let wide = fm.temporaryDirectory.appendingPathComponent("phone-wide-\(UUID().uuidString)", isDirectory: true)
+    try! fm.createDirectory(at: wide.appendingPathComponent("dir"), withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: wide) }
+    for index in 0..<5 {
+        try! "x".write(to: wide.appendingPathComponent(String(format: "f%02d.txt", index)), atomically: true, encoding: .utf8)
+    }
+    try! "y".write(to: wide.appendingPathComponent("dir/nested.txt"), atomically: true, encoding: .utf8)
+    let firstPage = PhoneHermesDirectory.list(root: wide.path, includeHidden: false, pageSize: 2)
+    let firstNames = (firstPage.body["entries"] as? [[String: String]] ?? []).map { $0["name"] ?? "" }
+    expect(
+        firstPage.ok && firstPage.text.isEmpty && firstPage.body["truncated"] as? Bool == true && firstPage.body["next"] as? Int == 2 && firstNames == ["dir", "f00.txt"],
+        "目录先给一页，不提示只显示前几项"
+    )
+    let secondPage = PhoneHermesDirectory.list(root: wide.path, includeHidden: false, offset: 2, pageSize: 2)
+    let secondNames = (secondPage.body["entries"] as? [[String: String]] ?? []).map { $0["name"] ?? "" }
+    expect(secondPage.ok && secondPage.body["truncated"] as? Bool == true && secondNames == ["f01.txt", "f02.txt"], "下一页从上次的位置继续")
+    let lastPage = PhoneHermesDirectory.list(root: wide.path, includeHidden: false, offset: 4, pageSize: 2)
+    expect(lastPage.ok && lastPage.body["truncated"] as? Bool == false && lastPage.body["next"] as? Int == 6, "这一层列完后不再截断")
+    let nested = PhoneHermesDirectory.list(root: wide.path, includeHidden: false, relative: "dir")
+    let nestedNames = (nested.body["entries"] as? [[String: String]] ?? []).map { $0["name"] ?? "" }
+    expect(nested.ok && nestedNames == ["nested.txt"], "点进文件夹只列那一层")
+    expect(!PhoneHermesDirectory.list(root: wide.path, includeHidden: false, relative: "../").ok, "目录拒绝点段")
+    expect(!PhoneHermesDirectory.list(root: wide.path, includeHidden: false, relative: "f00.txt").ok, "文件不能当作文件夹列")
 
     let database = root.appendingPathComponent("projects.db").path
     let directoryExists: (String) -> Bool = { path in
