@@ -507,6 +507,37 @@ enum PhoneHermesApp {
         }
     }
 
+    /// 把手机交来的一个文件新建在当前项目的固定附件文件夹里。手机不指定路径。
+    static func saveAttachment(
+        profile: String,
+        projectID: String,
+        name: String,
+        kind: String,
+        bytes: Data,
+        catalog: [String] = ["default"],
+        profileStore: PhoneHermesProfileStore,
+        projectsDatabase: (String) -> String,
+        isDirectory: (String) -> Bool,
+        fileManager: FileManager = .default
+    ) -> PhoneHermesAppReply {
+        let names = catalog.isEmpty ? ["default"] : catalog
+        let requested = profile.trimmingCharacters(in: .whitespacesAndNewlines)
+        let active = HermesProfileCatalog.accepted(
+            requested.isEmpty ? profileStore.resolved(among: names) : requested,
+            among: names
+        )
+        guard let project = ownedProject(projectID, profile: active, database: projectsDatabase) else {
+            return .failure(projectID.isEmpty || !HermesProfileProjects.isProjectID(projectID) ? needProject : missingProject)
+        }
+        guard isDirectory(project.rootPath) else { return .failure(missingProjectFolder) }
+        switch PhoneProjectAttachments.store(root: project.rootPath, name: name, kind: kind, bytes: bytes, fileManager: fileManager) {
+        case .success(let relative):
+            return .success("", body: ["path": relative])
+        case .failure(let error):
+            return .failure(error.text)
+        }
+    }
+
     /// 只允许改、删记在当前项目下的会话。
     private static func ownedSession(
         _ sessionID: String,
@@ -551,5 +582,86 @@ enum PhoneHermesApp {
 
     private static func validSession(_ sessionID: String) -> Bool {
         !sessionID.isEmpty && sessionID.count <= 256 && sessionID.range(of: #"^[A-Za-z0-9_-]+$"#, options: .regularExpression) != nil
+    }
+}
+
+struct PhoneAttachmentError: Error {
+    let text: String
+}
+
+enum PhoneProjectAttachments {
+    static let imageFolder = "对话附件-图片"
+    static let fileFolder = "对话附件-文件"
+    static let byteLimit = 20 * 1024 * 1024
+
+    /// 只在项目根目录下的两个固定文件夹里新建文件。同名不覆盖，解析后必须仍在项目内。
+    static func store(
+        root: String,
+        name: String,
+        kind: String,
+        bytes: Data,
+        fileManager: FileManager = .default
+    ) -> Result<String, PhoneAttachmentError> {
+        let rootReal = canonical(root)
+        var rootIsDir: ObjCBool = false
+        guard fileManager.fileExists(atPath: rootReal, isDirectory: &rootIsDir), rootIsDir.boolValue else {
+            return .failure(PhoneAttachmentError(text: "项目目录不存在"))
+        }
+        guard kind == "image" || kind == "file" else { return .failure(PhoneAttachmentError(text: "无法保存")) }
+        guard !bytes.isEmpty, bytes.count <= byteLimit else { return .failure(PhoneAttachmentError(text: "只接受不超过 20MB 的单个文件")) }
+        guard let safe = sanitized(name) else { return .failure(PhoneAttachmentError(text: "文件名不能使用")) }
+        let folderName = kind == "image" ? imageFolder : fileFolder
+        let folderReal = canonical((rootReal as NSString).appendingPathComponent(folderName))
+        guard folderReal.hasPrefix(rootReal + "/") else { return .failure(PhoneAttachmentError(text: "不能写到项目外面")) }
+        var folderIsDir: ObjCBool = false
+        if fileManager.fileExists(atPath: folderReal, isDirectory: &folderIsDir) {
+            guard folderIsDir.boolValue else { return .failure(PhoneAttachmentError(text: "附件文件夹被同名文件占住了")) }
+        } else {
+            do {
+                try fileManager.createDirectory(atPath: folderReal, withIntermediateDirectories: true)
+            } catch {
+                return .failure(PhoneAttachmentError(text: "无法新建附件文件夹"))
+            }
+        }
+        guard let chosen = uniqueName(folder: folderReal, name: safe, fileManager: fileManager) else {
+            return .failure(PhoneAttachmentError(text: "同名文件太多了"))
+        }
+        let destination = (folderReal as NSString).appendingPathComponent(chosen)
+        guard canonical(destination).hasPrefix(rootReal + "/") else { return .failure(PhoneAttachmentError(text: "不能写到项目外面")) }
+        do {
+            try bytes.write(to: URL(fileURLWithPath: destination), options: .atomic)
+        } catch {
+            return .failure(PhoneAttachmentError(text: "无法保存文件"))
+        }
+        guard canonical(destination).hasPrefix(rootReal + "/") else { return .failure(PhoneAttachmentError(text: "不能写到项目外面")) }
+        return .success("\(folderName)/\(chosen)")
+    }
+
+    private static func sanitized(_ name: String) -> String? {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.count <= 255 else { return nil }
+        guard !trimmed.contains("/"), !trimmed.contains("\\"), !trimmed.contains("\0") else { return nil }
+        guard trimmed != ".", trimmed != ".." else { return nil }
+        guard trimmed.unicodeScalars.allSatisfy({ $0.value >= 32 }) else { return nil }
+        return trimmed
+    }
+
+    private static func uniqueName(folder: String, name: String, fileManager: FileManager) -> String? {
+        let ext = (name as NSString).pathExtension
+        let stem = (name as NSString).deletingPathExtension
+        func candidate(_ index: Int) -> String {
+            let base = index <= 1 ? stem : "\(stem)-\(index)"
+            return ext.isEmpty ? base : "\(base).\(ext)"
+        }
+        var index = 1
+        while index < 1000 && fileManager.fileExists(atPath: (folder as NSString).appendingPathComponent(candidate(index))) {
+            index += 1
+        }
+        guard index < 1000 else { return nil }
+        return candidate(index)
+    }
+
+    private static func canonical(_ path: String) -> String {
+        URL(fileURLWithPath: path).resolvingSymlinksInPath().path
     }
 }

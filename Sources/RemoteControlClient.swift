@@ -9,10 +9,12 @@ protocol RemoteControlTransporting: AnyObject {
     func send(_ object: [String: Any]) async throws
     func disconnect()
     var onMessage: (([String: Any]) -> Void)? { get set }
+    var onBinary: ((Data) -> Void)? { get set }
 }
 
 final class RemoteControlHTTPClient: RemoteControlTransporting {
     var onMessage: (([String: Any]) -> Void)?
+    var onBinary: ((Data) -> Void)?
     private var task: URLSessionWebSocketTask?
     private var socketURL: URL?
     private var retryDelay: TimeInterval = RemoteControlHTTPClient.retryStart
@@ -116,10 +118,16 @@ final class RemoteControlHTTPClient: RemoteControlTransporting {
                 self.lock.lock()
                 self.retryDelay = Self.retryStart
                 self.lock.unlock()
-                if case .string(let text) = message,
-                   let data = text.data(using: .utf8),
-                   let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                    self.onMessage?(object)
+                switch message {
+                case .string(let text):
+                    if let data = text.data(using: .utf8),
+                       let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                        self.onMessage?(object)
+                    }
+                case .data(let data):
+                    self.onBinary?(data)
+                @unknown default:
+                    break
                 }
                 self.receiveLoop(task)
             case .failure:

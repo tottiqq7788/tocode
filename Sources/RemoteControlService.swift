@@ -18,6 +18,36 @@ enum ScreenLock {
     }
 }
 
+private struct InboundProjectFile {
+    let linkID: String
+    let requestID: String
+    let name: String
+    let size: Int
+    let kind: String
+    let profile: String
+    let projectID: String
+
+    init?(_ message: [String: Any], linkID: String, requestID: String) {
+        guard message["path"] == nil,
+              let name = message["name"] as? String,
+              let kind = message["kind"] as? String, kind == "image" || kind == "file",
+              let profile = message["profile"] as? String,
+              let projectID = message["project_id"] as? String,
+              !(message["size"] is Bool),
+              let size = (message["size"] as? NSNumber)?.intValue,
+              size > 0, size <= PhoneProjectAttachments.byteLimit else {
+            return nil
+        }
+        self.linkID = linkID
+        self.requestID = requestID
+        self.name = name
+        self.size = size
+        self.kind = kind
+        self.profile = profile
+        self.projectID = projectID
+    }
+}
+
 @MainActor
 final class RemoteControlService {
     private let store: RemoteControlStore
@@ -39,6 +69,7 @@ final class RemoteControlService {
     private let pollInterval: TimeInterval
     private var record: RemoteControlRecord
     private var associationTask: Task<Void, Never>?
+    private var inboundFile: InboundProjectFile?
 
     init(
         store: RemoteControlStore,
@@ -74,6 +105,11 @@ final class RemoteControlService {
         transport.onMessage = { [weak self] message in
             Task { @MainActor in
                 self?.handle(message)
+            }
+        }
+        transport.onBinary = { [weak self] data in
+            Task { @MainActor in
+                self?.acceptProjectFile(data)
             }
         }
     }
@@ -231,6 +267,14 @@ final class RemoteControlService {
             }
             return
         }
+        if op == "project_file_inbound" {
+            guard let pending = InboundProjectFile(message, linkID: linkID, requestID: requestID) else {
+                replyProjectFile(linkID: linkID, requestID: requestID, ok: false, path: "", text: "文件头无效")
+                return
+            }
+            inboundFile = pending
+            return
+        }
         guard op == "command_inbound" else { return }
         let action = message["action"] as? String ?? ""
         let target = message["target"] as? [String: Any]
@@ -324,6 +368,52 @@ final class RemoteControlService {
     private func connectIfPossible() async {
         guard !record.deviceToken.isEmpty, let relay = URL(string: record.relayURL) else { return }
         try? await transport.connect(relay: relay, token: record.deviceToken)
+    }
+
+    private func acceptProjectFile(_ data: Data) {
+        guard let pending = inboundFile else { return }
+        inboundFile = nil
+        guard data.count == pending.size, data.count <= PhoneProjectAttachments.byteLimit else {
+            replyProjectFile(linkID: pending.linkID, requestID: pending.requestID, ok: false, path: "", text: "文件长度不匹配")
+            return
+        }
+        let reply = PhoneHermesApp.saveAttachment(
+            profile: pending.profile,
+            projectID: pending.projectID,
+            name: pending.name,
+            kind: pending.kind,
+            bytes: data,
+            catalog: HermesProfileCatalog.names(),
+            profileStore: phoneHermesProfiles,
+            projectsDatabase: { HermesProfileProjects.databasePath(home: NSHomeDirectory(), profile: $0) },
+            isDirectory: { path in
+                var isDir: ObjCBool = false
+                return FileManager.default.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
+            }
+        )
+        let path = reply.body["path"] as? String ?? ""
+        replyProjectFile(
+            linkID: pending.linkID,
+            requestID: pending.requestID,
+            ok: reply.ok && !path.isEmpty,
+            path: path,
+            text: reply.ok ? "" : reply.text
+        )
+    }
+
+    private func replyProjectFile(linkID: String, requestID: String, ok: Bool, path: String, text: String) {
+        var payload: [String: Any] = [
+            "op": "project_file_result",
+            "link_id": linkID,
+            "request_id": requestID,
+            "ok": ok,
+            "text": text,
+        ]
+        if ok, !path.isEmpty {
+            payload["path"] = path
+        }
+        let transport = self.transport
+        Task { try? await transport.send(payload) }
     }
 
     private func isLocalHTTP(_ url: URL) -> Bool {

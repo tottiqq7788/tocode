@@ -7600,6 +7600,7 @@ extension Result where Failure == TocodeCommandError {
 final class ScriptedRemoteTransport: RemoteControlTransporting {
     var sent: [[String: Any]] = []
     var onMessage: (([String: Any]) -> Void)?
+    var onBinary: ((Data) -> Void)?
     func register(relay: URL, name: String) async throws -> (id: String, token: String) { ("device", "token") }
     func createPairing(relay: URL, token: String) async throws -> (code: String, expiresAt: Int) { ("ABCD2345", 0) }
     func pairingStatus(relay: URL, token: String, code: String) async throws -> (status: String, link: RemoteControlLink?) {
@@ -7635,6 +7636,7 @@ final class MockRemoteOpener: RemoteControlPageOpening {
 
 final class RedeemingRemoteTransport: RemoteControlTransporting {
     var onMessage: (([String: Any]) -> Void)?
+    var onBinary: ((Data) -> Void)?
     func register(relay: URL, name: String) async throws -> (id: String, token: String) { ("device", "token") }
     func createPairing(relay: URL, token: String) async throws -> (code: String, expiresAt: Int) { ("ABCD2345", 0) }
     func pairingStatus(relay: URL, token: String, code: String) async throws -> (status: String, link: RemoteControlLink?) {
@@ -8287,6 +8289,96 @@ func testPhoneHermesRunStaysVisible() async {
     expect(!still, "这一轮结束后列表不再标成进行中")
 }
 
+func testPhoneProjectAttachments() {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("phone-attach-\(UUID().uuidString)", isDirectory: true)
+    try! fm.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: root) }
+    let image = PhoneProjectAttachments.store(root: root.path, name: "a.jpg", kind: "image", bytes: Data("img".utf8), fileManager: fm)
+    guard case .success(let first) = image else {
+        expect(false, "图片能写入")
+        return
+    }
+    expect(first == "对话附件-图片/a.jpg", "图片落在固定文件夹")
+    let again = PhoneProjectAttachments.store(root: root.path, name: "a.jpg", kind: "image", bytes: Data("img2".utf8), fileManager: fm)
+    guard case .success(let second) = again else {
+        expect(false, "同名不覆盖")
+        return
+    }
+    expect(second == "对话附件-图片/a-2.jpg", "同名另起序号")
+    let kept = try! String(contentsOf: root.appendingPathComponent(first), encoding: .utf8)
+    expect(kept == "img", "先写上的文件还在")
+    let file = PhoneProjectAttachments.store(root: root.path, name: "b.pdf", kind: "file", bytes: Data("pdf".utf8), fileManager: fm)
+    guard case .success(let filePath) = file else {
+        expect(false, "附件能写入")
+        return
+    }
+    expect(filePath == "对话附件-文件/b.pdf", "其它文件落在另一个文件夹")
+    let slash = PhoneProjectAttachments.store(root: root.path, name: "../b.pdf", kind: "file", bytes: Data("x".utf8), fileManager: fm)
+    var rejectedName = false
+    if case .failure = slash { rejectedName = true }
+    expect(rejectedName, "不接受带路径的文件名")
+
+    let outside = fm.temporaryDirectory.appendingPathComponent("phone-attach-out-\(UUID().uuidString)", isDirectory: true)
+    try! fm.createDirectory(at: outside, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: outside) }
+    let linked = fm.temporaryDirectory.appendingPathComponent("phone-attach-link-\(UUID().uuidString)", isDirectory: true)
+    try! fm.createDirectory(at: linked, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: linked) }
+    try! fm.createSymbolicLink(at: linked.appendingPathComponent("对话附件-图片"), withDestinationURL: outside)
+    let escaped = PhoneProjectAttachments.store(root: linked.path, name: "a.jpg", kind: "image", bytes: Data("nope".utf8), fileManager: fm)
+    var rejectedEscape = false
+    if case .failure = escaped { rejectedEscape = true }
+    let outsideNames = (try? fm.contentsOfDirectory(atPath: outside.path)) ?? []
+    expect(rejectedEscape && outsideNames.isEmpty, "符号链接不能把文件带出项目")
+
+    let blocked = fm.temporaryDirectory.appendingPathComponent("phone-attach-file-\(UUID().uuidString)", isDirectory: true)
+    try! fm.createDirectory(at: blocked, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: blocked) }
+    try! Data("x".utf8).write(to: blocked.appendingPathComponent("对话附件-图片"))
+    let occupied = PhoneProjectAttachments.store(root: blocked.path, name: "a.jpg", kind: "image", bytes: Data("nope".utf8), fileManager: fm)
+    var rejectedFile = false
+    if case .failure = occupied { rejectedFile = true }
+    expect(rejectedFile, "同名文件占住文件夹时不覆盖")
+
+    let database = root.appendingPathComponent("projects.db").path
+    let directoryExists: (String) -> Bool = { path in
+        var isDir: ObjCBool = false
+        return FileManager.default.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
+    }
+    let project = try! HermesProfileProjects.create(
+        databasePath: database,
+        name: "附件项目",
+        folder: root.path,
+        isDirectory: directoryExists
+    )
+    let store = PhoneHermesProfileStore(defaults: UserDefaults(suiteName: "tocode.attach.\(UUID().uuidString)")!)
+    let saved = PhoneHermesApp.saveAttachment(
+        profile: "default",
+        projectID: project.id,
+        name: "c.txt",
+        kind: "file",
+        bytes: Data("hi".utf8),
+        profileStore: store,
+        projectsDatabase: { _ in database },
+        isDirectory: directoryExists
+    )
+    expect(saved.ok && (saved.body["path"] as? String) == "对话附件-文件/c.txt", "当前项目里的附件能落盘")
+    let missing = PhoneHermesApp.saveAttachment(
+        profile: "default",
+        projectID: "p_missing",
+        name: "c.txt",
+        kind: "file",
+        bytes: Data("no".utf8),
+        profileStore: store,
+        projectsDatabase: { _ in database },
+        isDirectory: directoryExists
+    )
+    expect(!missing.ok, "不是这个档案的项目时不写文件")
+    let foreign = ((try? fm.contentsOfDirectory(atPath: root.appendingPathComponent("对话附件-文件").path)) ?? []).sorted()
+    expect(foreign == ["b.pdf", "c.txt"], "失败的一次没有多写文件")
+}
+
 func testPhoneHermesFilePreview() {
     let fm = FileManager.default
     let root = fm.temporaryDirectory.appendingPathComponent("phone-preview-\(UUID().uuidString)", isDirectory: true)
@@ -8881,6 +8973,7 @@ struct TestRunnerMain {
         await testPhoneHermesChatGate()
         await testPhoneHermesSessionDraftRenameAndDelete()
         await testPhoneHermesRunStaysVisible()
+        testPhoneProjectAttachments()
         testPhoneHermesFilePreview()
         await testPhoneHermesAppChannel()
         testPhoneHermesSessionTitleSkipsTakenNames()
