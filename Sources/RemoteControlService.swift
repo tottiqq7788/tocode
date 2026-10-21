@@ -1,4 +1,22 @@
 import Foundation
+import Darwin
+
+enum ScreenLock {
+    static func lock() -> Bool {
+        let paths = [
+            "/System/Library/PrivateFrameworks/login.framework/Versions/Current/login",
+            "/System/Library/PrivateFrameworks/login.framework/login",
+        ]
+        for path in paths {
+            guard let handle = dlopen(path, RTLD_LAZY) else { continue }
+            defer { dlclose(handle) }
+            guard let symbol = dlsym(handle, "SACLockScreenImmediate") else { continue }
+            unsafeBitCast(symbol, to: (@convention(c) () -> Void).self)()
+            return true
+        }
+        return false
+    }
+}
 
 @MainActor
 final class RemoteControlService {
@@ -12,6 +30,10 @@ final class RemoteControlService {
     private let phoneHermesSessions: PhoneHermesSessionIndex
     private let phoneHermesActivity = PhoneHermesActivity()
     private let showHiddenFiles: () -> Bool
+    private let loadDesktops: () -> [DesktopMenuEntry]?
+    private let switchSpace: (DesktopSpaceTarget) -> Bool
+    private let raiseWindow: (Int32, UInt32) -> Bool
+    private let lockScreen: () -> Bool
     private let pollInterval: TimeInterval
     private var record: RemoteControlRecord
     private var associationTask: Task<Void, Never>?
@@ -26,6 +48,10 @@ final class RemoteControlService {
         phoneHermesProfiles: PhoneHermesProfileStore = PhoneHermesProfileStore(),
         phoneHermesSessions: PhoneHermesSessionIndex = PhoneHermesSessionIndex(),
         showHiddenFiles: @escaping () -> Bool = { FinderVisibilityService().currentShowAllFiles() },
+        loadDesktops: @escaping () -> [DesktopMenuEntry]? = { SystemDesktopWindowCatalog().loadMenu() },
+        switchSpace: @escaping (DesktopSpaceTarget) -> Bool = { SystemDesktopSpaceSwitcher().switchToSpace($0) },
+        raiseWindow: @escaping (Int32, UInt32) -> Bool = { SystemDesktopSpaceSwitcher().raiseWindow(pid: $0, windowID: $1) },
+        lockScreen: @escaping () -> Bool = { ScreenLock.lock() },
         pollInterval: TimeInterval = 2
     ) {
         self.store = store
@@ -37,6 +63,10 @@ final class RemoteControlService {
         self.phoneHermesProfiles = phoneHermesProfiles
         self.phoneHermesSessions = phoneHermesSessions
         self.showHiddenFiles = showHiddenFiles
+        self.loadDesktops = loadDesktops
+        self.switchSpace = switchSpace
+        self.raiseWindow = raiseWindow
+        self.lockScreen = lockScreen
         self.pollInterval = pollInterval
         record = store.load()
         transport.onMessage = { [weak self] message in
@@ -150,6 +180,7 @@ final class RemoteControlService {
             let profile = message["profile"] as? String ?? ""
             let projectID = message["project_id"] as? String ?? ""
             let path = message["path"] as? String ?? ""
+            let offset = (message["offset"] as? NSNumber)?.intValue ?? 0
             let includeHidden = showHiddenFiles()
             let runtime = phoneHermes
             let profiles = phoneHermesProfiles
@@ -165,6 +196,7 @@ final class RemoteControlService {
                     profile: profile,
                     projectID: projectID,
                     path: path,
+                    offset: offset,
                     includeHidden: includeHidden,
                     profileStore: profiles,
                     sessionIndex: sessions,
@@ -199,25 +231,63 @@ final class RemoteControlService {
         }
         guard op == "command_inbound" else { return }
         let action = message["action"] as? String ?? ""
-        let outcome: (Bool, String)
-        if let mapped = RemoteControlAction(rawValue: action) {
-            switch executor.execute(mapped.commandBody) {
-            case .success(let output):
-                outcome = (true, output.text)
-            case .failure(let error):
-                outcome = (false, error.localizedDescription)
-            }
-        } else {
-            outcome = (false, "动作不在白名单")
-        }
+        let target = message["target"] as? [String: Any]
         Task {
-            try? await transport.send([
+            let outcome = await self.perform(action: action, target: target)
+            var payload: [String: Any] = [
                 "op": "result",
                 "link_id": linkID,
                 "request_id": requestID,
-                "ok": outcome.0,
-                "text": outcome.1
-            ])
+                "ok": outcome.ok,
+                "text": outcome.text,
+            ]
+            if let body = outcome.body {
+                payload["body"] = body
+            }
+            try? await transport.send(payload)
+        }
+    }
+
+    private func perform(action: String, target: [String: Any]?) async -> (ok: Bool, text: String, body: [String: Any]?) {
+        guard let mapped = RemoteControlAction(rawValue: action) else {
+            return (false, "动作不在白名单", nil)
+        }
+        switch mapped {
+        case .status, .blackout:
+            switch executor.execute(mapped.commandBody) {
+            case .success(let output):
+                return (true, output.text, nil)
+            case .failure(let error):
+                return (false, error.localizedDescription, nil)
+            }
+        case .blackoutDismiss:
+            guard executor.remoteBlackoutPresented else { return (false, "现在没有黑屏", nil) }
+            executor.dismissRemoteBlackout()
+            return (true, "已取消黑屏", nil)
+        case .lock:
+            return lockScreen() ? (true, "已锁定屏幕", nil) : (false, "无法锁定屏幕", nil)
+        case .desktops:
+            guard let entries = loadDesktops() else { return (false, "无法读取桌面", nil) }
+            return (true, "", PhoneDesktopList.body(entries))
+        case .desktopSwitch:
+            let entries = loadDesktops() ?? []
+            guard let target, let command = PhoneDesktopList.command(entries: entries, target: target) else {
+                return (false, "这个桌面或窗口已经不在了", nil)
+            }
+            guard switchSpace(command.spaceTarget) else {
+                return (false, "系统没有切到所选桌面。", nil)
+            }
+            guard DesktopWindowActivation.shouldRaise(switched: true, command: command) else {
+                return (true, "已切换", nil)
+            }
+            try? await Task.sleep(nanoseconds: 120_000_000)
+            guard case .window(_, let windowID, let pid) = command else {
+                return (true, "已切换", nil)
+            }
+            if raiseWindow(pid, windowID) {
+                return (true, "已切换到该窗口", nil)
+            }
+            return (true, "桌面已经切换，但无法把窗口带到前台。请在系统设置的辅助功能里允许 Tocode。", nil)
         }
     }
 

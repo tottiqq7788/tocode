@@ -3,29 +3,16 @@ import Foundation
 enum RemoteControlAction: String, CaseIterable, Codable {
     case status
     case blackout
-    case hidden
-    case finderFollow = "finder-follow"
-    case codexFollow = "codex-follow"
-    case wheelVertical = "wheel-vertical"
-    case wheelHorizontal = "wheel-horizontal"
-    case finderMove = "finder-move"
-    case finderCmdQ = "finder-cmdq"
-    case doubleCmdQ = "double-cmdq"
-    case login
+    case blackoutDismiss = "blackout-dismiss"
+    case lock
+    case desktops
+    case desktopSwitch = "desktop-switch"
 
     var commandBody: String {
         switch self {
         case .status: return "status"
         case .blackout: return "blackout"
-        case .hidden: return "hidden toggle"
-        case .finderFollow: return "root finder-follow toggle"
-        case .codexFollow: return "codex sync toggle"
-        case .wheelVertical: return "wheel vertical toggle"
-        case .wheelHorizontal: return "wheel horizontal toggle"
-        case .finderMove: return "shortcut finder-move toggle"
-        case .finderCmdQ: return "shortcut finder-cmdq toggle"
-        case .doubleCmdQ: return "shortcut double-cmdq toggle"
-        case .login: return "login toggle"
+        case .blackoutDismiss, .lock, .desktops, .desktopSwitch: return ""
         }
     }
 
@@ -33,15 +20,10 @@ enum RemoteControlAction: String, CaseIterable, Codable {
         switch self {
         case .status: return "设备状态"
         case .blackout: return "临时黑屏"
-        case .hidden: return "隐藏文件"
-        case .finderFollow: return "访达跟随"
-        case .codexFollow: return "Codex 跟随"
-        case .wheelVertical: return "垂直滚轮"
-        case .wheelHorizontal: return "横向滚轮"
-        case .finderMove: return "访达 X/V 移动"
-        case .finderCmdQ: return "访达强退快捷键"
-        case .doubleCmdQ: return "双击 Cmd-Q"
-        case .login: return "开机自启"
+        case .blackoutDismiss: return "取消黑屏"
+        case .lock: return "锁定屏幕"
+        case .desktops: return "桌面与窗口"
+        case .desktopSwitch: return "切换桌面"
         }
     }
 }

@@ -145,10 +145,18 @@ enum PhoneHermesDirectory {
         return .success(truncated ? "只显示了前 \(maxEntries) 项" : "", body: ["entries": entries])
     }
 
-    static let maxPreviewCharacters = 60_000
+    static let previewPageCharacters = 12_000
+    static let previewReadLimit = 8_000_000
 
     /// 只读打开项目目录里的一个文本文件。路径相对项目根目录，解析后必须仍在里面。
-    static func preview(root: String, relative: String, fileManager: FileManager = .default) -> PhoneHermesAppReply {
+    /// `offset` 是已经读过的字符数，每次只再给一页，方便手机接着往下读。
+    static func preview(
+        root: String,
+        relative: String,
+        offset: Int = 0,
+        pageCharacters: Int = previewPageCharacters,
+        fileManager: FileManager = .default
+    ) -> PhoneHermesAppReply {
         let rootReal = canonical(root)
         guard let file = fileInside(root: rootReal, relative: relative) else {
             return .failure("这个文件不在项目里")
@@ -158,27 +166,44 @@ enum PhoneHermesDirectory {
             return .failure("文件不存在")
         }
         guard !isDir.boolValue else { return .failure("这是文件夹") }
-        guard let handle = FileHandle(forReadingAtPath: file) else { return .failure("这个文件不能预览") }
-        defer { try? handle.close() }
-        let data = handle.readData(ofLength: maxPreviewCharacters + 1)
-        guard looksLikeText(data) else { return .failure("这个文件不能预览") }
-        let truncated = data.count > maxPreviewCharacters
-        var slice = truncated ? data.prefix(maxPreviewCharacters) : data.prefix(data.count)
+        guard var data = fileManager.contents(atPath: file) else { return .failure("这个文件不能预览") }
+        guard looksLikeText(data.prefix(8_192)) else { return .failure("这个文件不能预览") }
+        if data.count > previewReadLimit { data = data.prefix(previewReadLimit) }
+        var slice = data
         var text = String(data: slice, encoding: .utf8)
         while text == nil && !slice.isEmpty {
             slice = slice.dropLast()
             text = String(data: slice, encoding: .utf8)
         }
         guard let text else { return .failure("这个文件不能预览") }
+        let start = min(max(offset, 0), text.count)
+        if start >= text.count {
+            return previewBody(file: file, root: rootReal, content: "", next: start, truncated: false)
+        }
+        let page = max(pageCharacters, 1)
+        var end = min(text.count, start + page)
+        if end < text.count {
+            let cursor = text.index(text.startIndex, offsetBy: end)
+            let endedOnNewline = end > start && text[text.index(before: cursor)] == "\n"
+            if !endedOnNewline, let newline = text[cursor...].prefix(200).firstIndex(of: "\n") {
+                end = text.distance(from: text.startIndex, to: text.index(after: newline))
+            }
+        }
+        let piece = String(text[text.index(text.startIndex, offsetBy: start)..<text.index(text.startIndex, offsetBy: end)])
+        return previewBody(file: file, root: rootReal, content: piece, next: end, truncated: end < text.count)
+    }
+
+    private static func previewBody(file: String, root: String, content: String, next: Int, truncated: Bool) -> PhoneHermesAppReply {
         let name = (file as NSString).lastPathComponent
         let ext = (name as NSString).pathExtension.lowercased()
         let format = ["md", "markdown", "mdown"].contains(ext) ? "markdown" : "text"
-        let shown = String(file.dropFirst(rootReal.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        return .success(truncated ? "只显示了前面一段" : "", body: [
+        let shown = String(file.dropFirst(root.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        return .success("", body: [
             "name": name,
             "path": shown,
             "format": format,
-            "content": text,
+            "content": content,
+            "next": next,
             "truncated": truncated
         ])
     }
@@ -258,6 +283,7 @@ enum PhoneHermesApp {
         profile: String = "",
         projectID: String = "",
         path: String = "",
+        offset: Int = 0,
         home: String = NSHomeDirectory(),
         includeHidden: Bool = false,
         profileStore: PhoneHermesProfileStore = PhoneHermesProfileStore(
@@ -300,7 +326,7 @@ enum PhoneHermesApp {
             guard let project = ownedProject(projectID, profile: active, database: projectsDatabase) else {
                 return .failure(needProject)
             }
-            return PhoneHermesDirectory.preview(root: project.rootPath, relative: path)
+            return PhoneHermesDirectory.preview(root: project.rootPath, relative: path, offset: offset)
         case "folders":
             guard snapshot.installed else { return .failure(missingHermes) }
             return PhoneHermesHomeFolder.folders(under: path, home: home, includeHidden: includeHidden)

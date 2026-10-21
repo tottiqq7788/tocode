@@ -7709,6 +7709,7 @@ func testRemoteControlWhitelist() async {
     let mode = (try? FileManager.default.attributesOfItem(atPath: store.fileURL.path)[.posixPermissions] as? NSNumber)?.uint16Value
     expect(mode == 0o600, "遥控关联文件权限 0600")
     let transport = ScriptedRemoteTransport()
+    let overlay = MockTocodeScreenBlackout()
     let service = RemoteControlService(
         store: store,
         transport: transport,
@@ -7718,9 +7719,10 @@ func testRemoteControlWhitelist() async {
             shortcuts: MockTocodeShortcuts(),
             codexModels: MockTocodeCodexModels(),
             weChat: MockTocodeWeChat(),
-            screenBlackout: ScreenBlackoutService(overlay: MockTocodeScreenBlackout()),
+            screenBlackout: ScreenBlackoutService(overlay: overlay),
             notify: { _, _ in }
-        )
+        ),
+        lockScreen: { false }
     )
     service.handle([
         "op": "command_inbound", "link_id": "link-1", "request_id": "r1", "action": "status"
@@ -7733,7 +7735,98 @@ func testRemoteControlWhitelist() async {
     try? await Task.sleep(nanoseconds: 50_000_000)
     expect(transport.sent.last?["text"] as? String == "动作不在白名单", "未知动作不执行")
     expect(RemoteControlPayload.qr(relay: "https://totti.xin", code: "ABCD2345").contains("code=ABCD2345"), "二维码只含中转和配对码")
-    expect(RemoteControlAction.allCases.count == 11, "固定按钮数量")
+    expect(RemoteControlAction.allCases.count == 6, "遥控只留状态、黑屏、取消黑屏、锁屏和桌面")
+    expect(RemoteControlAction(rawValue: "wheel-vertical") == nil, "滚轮不再是遥控动作")
+    service.handle([
+        "op": "command_inbound", "link_id": "link-1", "request_id": "r3", "action": "blackout-dismiss"
+    ])
+    try? await Task.sleep(nanoseconds: 50_000_000)
+    expect(transport.sent.last?["text"] as? String == "现在没有黑屏", "没有黑屏时取消会说明")
+    overlay.presented = true
+    service.handle([
+        "op": "command_inbound", "link_id": "link-1", "request_id": "r4", "action": "blackout-dismiss"
+    ])
+    try? await Task.sleep(nanoseconds: 50_000_000)
+    expect(transport.sent.last?["text"] as? String == "已取消黑屏" && overlay.presented == false, "取消黑屏揭掉覆盖")
+    testPhoneDesktopList()
+    let deskTransport = ScriptedRemoteTransport()
+    let windowTarget = DesktopSpaceTarget(displayID: "d1", spaceID: 7, kind: .desktop)
+    let entries: [DesktopMenuEntry] = [
+        .space(DesktopMenuSpace(
+            title: "桌面 1",
+            isCurrent: true,
+            target: windowTarget,
+            windows: [
+                DesktopMenuWindow(title: "文稿", windowID: 11, pid: 4, target: windowTarget),
+                DesktopMenuWindow(title: "备忘录", windowID: 12, pid: 5, target: windowTarget),
+            ]
+        )),
+    ]
+    var switched: [UInt64] = []
+    let desks = RemoteControlService(
+        store: store,
+        transport: deskTransport,
+        executor: TocodeCommandExecutor(
+            launchAtLogin: MockTocodeLaunchAtLogin(),
+            mouseWheel: MockTocodeWheel(),
+            shortcuts: MockTocodeShortcuts(),
+            codexModels: MockTocodeCodexModels(),
+            weChat: MockTocodeWeChat(),
+            screenBlackout: ScreenBlackoutService(overlay: MockTocodeScreenBlackout()),
+            notify: { _, _ in }
+        ),
+        loadDesktops: { entries },
+        switchSpace: { target in
+            switched.append(target.spaceID)
+            return true
+        },
+        raiseWindow: { _, _ in true },
+        lockScreen: { true }
+    )
+    desks.handle([
+        "op": "command_inbound", "link_id": "link-1", "request_id": "d1", "action": "desktops"
+    ])
+    try? await Task.sleep(nanoseconds: 50_000_000)
+    let displays = (deskTransport.sent.last?["body"] as? [String: Any])?["displays"] as? [[String: Any]] ?? []
+    let spaces = displays.first?["spaces"] as? [[String: Any]] ?? []
+    let windows = spaces.first?["windows"] as? [[String: Any]] ?? []
+    expect(windows.first?["front"] as? Bool == true && windows.last?["front"] as? Bool == false, "当前空间最前的窗口标成当前")
+    desks.handle([
+        "op": "command_inbound", "link_id": "link-1", "request_id": "d2", "action": "desktop-switch",
+        "target": ["display_id": "d1", "space_id": 7, "window_id": 99, "pid": 4],
+    ])
+    try? await Task.sleep(nanoseconds: 50_000_000)
+    expect(switched.isEmpty && deskTransport.sent.last?["text"] as? String == "这个桌面或窗口已经不在了", "不在目录里的窗口不切换")
+    desks.handle([
+        "op": "command_inbound", "link_id": "link-1", "request_id": "d3", "action": "desktop-switch",
+        "target": ["display_id": "d1", "space_id": 7],
+    ])
+    try? await Task.sleep(nanoseconds: 50_000_000)
+    expect(switched == [7] && deskTransport.sent.last?["text"] as? String == "已切换", "点桌面只切空间")
+}
+
+func testPhoneDesktopList() {
+    let target = DesktopSpaceTarget(displayID: "d1", spaceID: 7, kind: .desktop)
+    let entries: [DesktopMenuEntry] = [
+        .space(DesktopMenuSpace(
+            title: "桌面 1",
+            isCurrent: true,
+            target: target,
+            windows: [DesktopMenuWindow(title: "文稿", windowID: 11, pid: 4, target: target)]
+        )),
+    ]
+    let found = PhoneDesktopList.command(
+        entries: entries,
+        target: ["display_id": "d1", "space_id": 7, "window_id": 11, "pid": 4]
+    )
+    expect(found == .window(target, windowID: 11, pid: 4), "目录里的窗口可以切换")
+    let missing = PhoneDesktopList.command(
+        entries: entries,
+        target: ["display_id": "d1", "space_id": 7, "window_id": 99, "pid": 4]
+    )
+    expect(missing == nil, "不在目录里的窗口不能切换")
+    let space = PhoneDesktopList.command(entries: entries, target: ["display_id": "d1", "space_id": 7])
+    expect(space == .space(target), "只带空间时切桌面")
 }
 
 final class ScriptedPhoneHermes: PhoneHermesRuntime {
@@ -8121,9 +8214,17 @@ func testPhoneHermesFilePreview() {
         try? fm.removeItem(at: outside)
     }
     let markdown = PhoneHermesDirectory.preview(root: root.path, relative: "note.md")
-    expect(markdown.ok && markdown.body["format"] as? String == "markdown" && (markdown.body["content"] as? String)?.contains("标题") == true, "Markdown 按原文读出并标成 markdown")
+    expect(markdown.ok && markdown.body["format"] as? String == "markdown" && (markdown.body["content"] as? String)?.contains("标题") == true && markdown.body["truncated"] as? Bool == false, "Markdown 按原文读出并标成 markdown")
     let text = PhoneHermesDirectory.preview(root: root.path, relative: "src/main.txt")
     expect(text.ok && text.body["format"] as? String == "text" && text.body["content"] as? String == "hello", "文本文件按原文读出")
+    let long = String(repeating: "甲\n", count: 8)
+    try! long.write(to: root.appendingPathComponent("src/long.txt"), atomically: true, encoding: .utf8)
+    let first = PhoneHermesDirectory.preview(root: root.path, relative: "src/long.txt", pageCharacters: 4)
+    let firstText = first.body["content"] as? String ?? ""
+    let next = first.body["next"] as? Int ?? 0
+    expect(first.ok && first.body["truncated"] as? Bool == true && firstText.count == 4 && next == 4, "预览先给一页，并记下继续读的位置")
+    let rest = PhoneHermesDirectory.preview(root: root.path, relative: "src/long.txt", offset: next, pageCharacters: 4)
+    expect(rest.ok && (rest.body["content"] as? String)?.isEmpty == false && rest.body["next"] as? Int != next, "下一段从上次停下的位置继续")
     for bad in ["../leak.txt", "escape", "src/../note.md", "/etc/passwd", "missing.txt"] {
         let rejected = PhoneHermesDirectory.preview(root: root.path, relative: bad)
         expect(!rejected.ok, "预览拒绝越界、链接和点段：\(bad)")

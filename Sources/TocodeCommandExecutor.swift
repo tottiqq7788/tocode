@@ -118,6 +118,12 @@ final class TocodeCommandExecutor {
         weChat = controller
     }
 
+    var remoteBlackoutPresented: Bool { screenBlackout.isPresented }
+
+    func dismissRemoteBlackout() {
+        screenBlackout.dismiss()
+    }
+
     func execute(_ command: TocodeCommand) -> TocodeCommandResult {
         switch command {
         case .help:

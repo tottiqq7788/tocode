@@ -435,3 +435,81 @@ enum DesktopWindowMenuBuilder {
         }.map(\.element)
     }
 }
+
+/// 手机遥控看到的桌面目录。内容和菜单栏那份相同，只多一个「当前窗口」标记。
+enum PhoneDesktopList {
+    static func body(_ entries: [DesktopMenuEntry]) -> [String: Any] {
+        [
+            "displays": groups(entries).map { group in
+                [
+                    "title": group.title,
+                    "spaces": group.spaces.map(spaceBody),
+                ]
+            },
+        ]
+    }
+
+    static func command(entries: [DesktopMenuEntry], target: [String: Any]) -> DesktopWindowCommand? {
+        guard let displayID = target["display_id"] as? String, !displayID.isEmpty else { return nil }
+        guard let spaceID = unsigned(target["space_id"]) else { return nil }
+        let windowID = UInt32(truncatingIfNeeded: unsigned(target["window_id"]) ?? 0)
+        let pid = Int32(truncatingIfNeeded: unsigned(target["pid"]) ?? 0)
+        if (windowID == 0) != (pid == 0) { return nil }
+        for group in groups(entries) {
+            for space in group.spaces where space.target.displayID == displayID && space.target.spaceID == spaceID {
+                if windowID == 0 { return .space(space.target) }
+                guard let window = space.windows.first(where: { $0.windowID == windowID && $0.pid == pid }) else {
+                    return nil
+                }
+                return .window(window.target, windowID: window.windowID, pid: window.pid)
+            }
+        }
+        return nil
+    }
+
+    private static func groups(_ entries: [DesktopMenuEntry]) -> [(title: String, spaces: [DesktopMenuSpace])] {
+        var displays: [(title: String, spaces: [DesktopMenuSpace])] = []
+        var loose: [DesktopMenuSpace] = []
+        for entry in entries {
+            switch entry {
+            case .display(let title, let spaces):
+                displays.append((title, spaces))
+            case .space(let space):
+                loose.append(space)
+            }
+        }
+        if !displays.isEmpty { return displays }
+        return loose.isEmpty ? [] : [("", loose)]
+    }
+
+    private static func spaceBody(_ space: DesktopMenuSpace) -> [String: Any] {
+        [
+            "title": space.title,
+            "current": space.isCurrent,
+            "kind": space.target.kind == .fullscreen ? "fullscreen" : "desktop",
+            "display_id": space.target.displayID,
+            "space_id": NSNumber(value: space.target.spaceID),
+            "windows": space.windows.enumerated().map { index, window in
+                [
+                    "title": window.title,
+                    "window_id": NSNumber(value: window.windowID),
+                    "pid": NSNumber(value: window.pid),
+                    "front": space.isCurrent && index == 0,
+                ]
+            },
+        ]
+    }
+
+    private static func unsigned(_ value: Any?) -> UInt64? {
+        guard let value, !(value is Bool) else { return nil }
+        if let number = value as? NSNumber {
+            if CFGetTypeID(number) == CFBooleanGetTypeID() { return nil }
+            if number.doubleValue < 0 { return nil }
+            return number.uint64Value
+        }
+        if let int = value as? Int, int >= 0 { return UInt64(int) }
+        if let int = value as? UInt64 { return int }
+        if let int = value as? UInt32 { return UInt64(int) }
+        return nil
+    }
+}
