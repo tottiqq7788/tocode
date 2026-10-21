@@ -188,8 +188,38 @@ enum PhoneHermesDirectory {
             let bytes = (try? fileManager.attributesOfItem(atPath: file)[.size] as? NSNumber)?.int64Value ?? 0
             if bytes > imageByteLimit { return .failure("这个文件不能预览") }
         }
-        guard var data = fileManager.contents(atPath: file) else { return .failure("这个文件不能预览") }
-        switch imagePreview(file: file, root: rootReal, data: data) {
+        guard let data = fileManager.contents(atPath: file) else { return .failure("这个文件不能预览") }
+        return previewLoaded(file: file, root: rootReal, data: data, offset: offset, pageCharacters: pageCharacters)
+    }
+
+    /// 用已经读出的字节做同一种预览。文件可以还没落进项目，调用方不得借此写入。
+    static func previewStaged(
+        root: String,
+        relative: String,
+        data: Data,
+        offset: Int = 0,
+        pageCharacters: Int = previewPageCharacters
+    ) -> PhoneHermesAppReply {
+        let rootReal = canonical(root)
+        guard let file = fileInside(root: rootReal, relative: relative) else {
+            return .failure("这个文件不在项目里")
+        }
+        return previewLoaded(file: file, root: rootReal, data: data, offset: offset, pageCharacters: pageCharacters)
+    }
+
+    private static func previewLoaded(
+        file: String,
+        root: String,
+        data: Data,
+        offset: Int,
+        pageCharacters: Int
+    ) -> PhoneHermesAppReply {
+        let ext = ((file as NSString).pathExtension as String).lowercased()
+        if imageExtensions.contains(ext), data.count > imageByteLimit {
+            return .failure("这个文件不能预览")
+        }
+        var data = data
+        switch imagePreview(file: file, root: root, data: data) {
         case .reply(let reply):
             return reply
         case .notImage:
@@ -206,7 +236,7 @@ enum PhoneHermesDirectory {
         guard let text else { return .failure("这个文件不能预览") }
         let start = min(max(offset, 0), text.count)
         if start >= text.count {
-            return previewBody(file: file, root: rootReal, content: "", next: start, truncated: false)
+            return previewBody(file: file, root: root, content: "", next: start, truncated: false)
         }
         let page = max(pageCharacters, 1)
         var end = min(text.count, start + page)
@@ -218,7 +248,7 @@ enum PhoneHermesDirectory {
             }
         }
         let piece = String(text[text.index(text.startIndex, offsetBy: start)..<text.index(text.startIndex, offsetBy: end)])
-        return previewBody(file: file, root: rootReal, content: piece, next: end, truncated: end < text.count)
+        return previewBody(file: file, root: root, content: piece, next: end, truncated: end < text.count)
     }
 
     private static func previewBody(file: String, root: String, content: String, next: Int, truncated: Bool) -> PhoneHermesAppReply {
@@ -465,7 +495,15 @@ enum PhoneHermesApp {
             guard let project = ownedProject(projectID, profile: active, database: projectsDatabase) else {
                 return .failure(needProject)
             }
-            return PhoneHermesDirectory.preview(root: project.rootPath, relative: path, offset: offset)
+            let reply = PhoneHermesDirectory.preview(root: project.rootPath, relative: path, offset: offset)
+            if reply.ok || reply.text != "文件不存在" { return reply }
+            guard let bytes = PhoneAttachmentHolds.stagedBytes(
+                root: PhoneAttachmentHolds.liveRoot(),
+                profile: active,
+                projectID: project.id,
+                relative: path
+            ) else { return reply }
+            return PhoneHermesDirectory.previewStaged(root: project.rootPath, relative: path, data: bytes, offset: offset)
         case "folders":
             guard snapshot.installed else { return .failure(missingHermes) }
             return PhoneHermesHomeFolder.folders(under: path, home: home, includeHidden: includeHidden)
@@ -677,7 +715,7 @@ enum PhoneHermesApp {
         }
     }
 
-    /// 选中后先把字节放在项目外面。不返回路径，也不写入两个附件文件夹。
+    /// 选中后先把字节放在项目外面，并预定相对路径。不写入两个附件文件夹。
     static func holdAttachment(
         linkID: String,
         profile: String,
@@ -701,10 +739,10 @@ enum PhoneHermesApp {
         guard isDirectory(project.root) else { return .failure(missingProjectFolder) }
         switch PhoneAttachmentHolds.stage(
             root: holdRoot, linkID: linkID, profile: project.profile, projectID: project.id,
-            name: name, kind: kind, bytes: bytes, fileManager: fileManager
+            projectRoot: project.root, name: name, kind: kind, bytes: bytes, fileManager: fileManager
         ) {
-        case .success(let hold):
-            return .success("", body: ["hold_id": hold])
+        case .success(let staged):
+            return .success("", body: ["hold_id": staged.id, "path": staged.path])
         case .failure(let error):
             return .failure(error.text)
         }
@@ -866,6 +904,91 @@ enum PhoneProjectAttachments {
         return .success("\(folderName)/\(chosen)")
     }
 
+    /// 只算出不覆盖的相对路径，不建立文件夹，也不写文件。
+    static func reserveRelative(
+        projectRoot: String,
+        kind: String,
+        name: String,
+        reserved: Set<String>,
+        fileManager: FileManager = .default
+    ) -> Result<String, PhoneAttachmentError> {
+        let rootReal = canonical(projectRoot)
+        var rootIsDir: ObjCBool = false
+        guard fileManager.fileExists(atPath: rootReal, isDirectory: &rootIsDir), rootIsDir.boolValue else {
+            return .failure(PhoneAttachmentError(text: "项目目录不存在"))
+        }
+        guard kind == "image" || kind == "file" else { return .failure(PhoneAttachmentError(text: "无法保存")) }
+        guard let safe = acceptedName(name) else { return .failure(PhoneAttachmentError(text: "文件名不能使用")) }
+        let folderName = kind == "image" ? imageFolder : fileFolder
+        let folderReal = canonical((rootReal as NSString).appendingPathComponent(folderName))
+        guard folderReal.hasPrefix(rootReal + "/") else { return .failure(PhoneAttachmentError(text: "不能写到项目外面")) }
+        var folderIsDir: ObjCBool = false
+        let folderExists = fileManager.fileExists(atPath: folderReal, isDirectory: &folderIsDir)
+        if folderExists && !folderIsDir.boolValue {
+            return .failure(PhoneAttachmentError(text: "附件文件夹被同名文件占住了"))
+        }
+        let ext = (safe as NSString).pathExtension
+        let stem = (safe as NSString).deletingPathExtension
+        func candidate(_ index: Int) -> String {
+            let base = index <= 1 ? stem : "\(stem)-\(index)"
+            return ext.isEmpty ? base : "\(base).\(ext)"
+        }
+        var index = 1
+        while index < 1000 {
+            let chosen = candidate(index)
+            let onDisk = folderExists && fileManager.fileExists(atPath: (folderReal as NSString).appendingPathComponent(chosen))
+            if !onDisk && !reserved.contains(chosen) { return .success("\(folderName)/\(chosen)") }
+            index += 1
+        }
+        return .failure(PhoneAttachmentError(text: "同名文件太多了"))
+    }
+
+    /// 把字节写到预定的相对路径。这个名字已经有文件时失败，不改成别的名字。
+    static func writeReserved(
+        root: String,
+        relative: String,
+        bytes: Data,
+        fileManager: FileManager = .default
+    ) -> Result<String, PhoneAttachmentError> {
+        let rootReal = canonical(root)
+        var rootIsDir: ObjCBool = false
+        guard fileManager.fileExists(atPath: rootReal, isDirectory: &rootIsDir), rootIsDir.boolValue else {
+            return .failure(PhoneAttachmentError(text: "项目目录不存在"))
+        }
+        guard !bytes.isEmpty, bytes.count <= byteLimit else {
+            return .failure(PhoneAttachmentError(text: "只接受不超过 20MB 的单个文件"))
+        }
+        let parts = relative.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count == 2, parts[0] == imageFolder || parts[0] == fileFolder, acceptedName(parts[1]) != nil else {
+            return .failure(PhoneAttachmentError(text: "无法保存"))
+        }
+        let folderName = parts[0]
+        let fileName = parts[1]
+        let folderReal = canonical((rootReal as NSString).appendingPathComponent(folderName))
+        guard folderReal.hasPrefix(rootReal + "/") else { return .failure(PhoneAttachmentError(text: "不能写到项目外面")) }
+        var folderIsDir: ObjCBool = false
+        if fileManager.fileExists(atPath: folderReal, isDirectory: &folderIsDir) {
+            guard folderIsDir.boolValue else { return .failure(PhoneAttachmentError(text: "附件文件夹被同名文件占住了")) }
+        } else {
+            do {
+                try fileManager.createDirectory(atPath: folderReal, withIntermediateDirectories: true)
+            } catch {
+                return .failure(PhoneAttachmentError(text: "无法新建附件文件夹"))
+            }
+        }
+        let destination = (folderReal as NSString).appendingPathComponent(fileName)
+        guard canonical(destination).hasPrefix(rootReal + "/") else { return .failure(PhoneAttachmentError(text: "不能写到项目外面")) }
+        if fileManager.fileExists(atPath: destination) {
+            return .failure(PhoneAttachmentError(text: "预定的文件名已经被占用了"))
+        }
+        do {
+            try bytes.write(to: URL(fileURLWithPath: destination), options: .atomic)
+        } catch {
+            return .failure(PhoneAttachmentError(text: "无法保存文件"))
+        }
+        return .success(relative)
+    }
+
     static func acceptedName(_ name: String) -> String? {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed.count <= 255 else { return nil }
@@ -895,6 +1018,11 @@ enum PhoneProjectAttachments {
     }
 }
 
+struct StagedHold {
+    let id: String
+    let path: String
+}
+
 enum PhoneAttachmentHolds {
     static let capacity = 10
     private static let lifetime: TimeInterval = 6 * 60 * 60
@@ -906,24 +1034,25 @@ enum PhoneAttachmentHolds {
         fileManager.temporaryDirectory.appendingPathComponent("tocode-phone-holds", isDirectory: true)
     }
 
-    /// 把字节放在项目外面的暂存目录。返回编号，不返回路径。
+    /// 把字节放在项目外面，并预定相对路径。不建立附件文件夹。
     static func stage(
         root: URL,
         linkID: String,
         profile: String,
         projectID: String,
+        projectRoot: String,
         name: String,
         kind: String,
         bytes: Data,
         fileManager: FileManager = .default,
         now: Date = Date()
-    ) -> Result<String, PhoneAttachmentError> {
+    ) -> Result<StagedHold, PhoneAttachmentError> {
         guard !linkID.isEmpty else { return .failure(PhoneAttachmentError(text: "无法保存")) }
         guard kind == "image" || kind == "file" else { return .failure(PhoneAttachmentError(text: "无法保存")) }
         guard !bytes.isEmpty, bytes.count <= PhoneProjectAttachments.byteLimit else {
             return .failure(PhoneAttachmentError(text: "只接受不超过 20MB 的单个文件"))
         }
-        guard let safeName = PhoneProjectAttachments.acceptedName(name) else {
+        guard PhoneProjectAttachments.acceptedName(name) != nil else {
             return .failure(PhoneAttachmentError(text: "文件名不能使用"))
         }
         guard let base = ensureRoot(root, fileManager: fileManager) else {
@@ -932,6 +1061,18 @@ enum PhoneAttachmentHolds {
         sweep(root: base, fileManager: fileManager, now: now)
         let existing = (try? fileManager.contentsOfDirectory(at: base, includingPropertiesForKeys: nil)) ?? []
         guard existing.count < capacity else { return .failure(PhoneAttachmentError(text: "一次最多带 10 个文件")) }
+        let folderName = kind == "image" ? PhoneProjectAttachments.imageFolder : PhoneProjectAttachments.fileFolder
+        let taken = reservedNames(root: base, profile: profile, projectID: projectID, folderName: folderName, fileManager: fileManager)
+        let relative: String
+        switch PhoneProjectAttachments.reserveRelative(
+            projectRoot: projectRoot, kind: kind, name: name, reserved: taken, fileManager: fileManager
+        ) {
+        case .success(let path):
+            relative = path
+        case .failure(let error):
+            return .failure(error)
+        }
+        let safeName = (relative as NSString).lastPathComponent
         let hold = UUID().uuidString
         let folder = base.appendingPathComponent(hold, isDirectory: true)
         do {
@@ -946,6 +1087,7 @@ enum PhoneAttachmentHolds {
                 "profile": profile,
                 "project_id": projectID,
                 "link_id": linkID,
+                "path": relative,
             ]
             let encoded = try JSONSerialization.data(withJSONObject: meta)
             try encoded.write(to: folder.appendingPathComponent("meta.json"), options: .atomic)
@@ -958,7 +1100,7 @@ enum PhoneAttachmentHolds {
             try? fileManager.removeItem(at: folder)
             return .failure(PhoneAttachmentError(text: "无法保存文件"))
         }
-        return .success(hold)
+        return .success(StagedHold(id: hold, path: relative))
     }
 
     static func place(
@@ -977,20 +1119,19 @@ enum PhoneAttachmentHolds {
               meta["link_id"] == linkID,
               meta["profile"] == profile,
               meta["project_id"] == projectID,
-              let name = meta["name"],
-              let kind = meta["kind"] else {
+              let reserved = meta["path"], !reserved.isEmpty else {
             return .failure(PhoneAttachmentError(text: "无法保存"))
         }
         let body = folder.appendingPathComponent("body")
         guard inside(body, root: root), let bytes = try? Data(contentsOf: body), !bytes.isEmpty else {
             return .failure(PhoneAttachmentError(text: "这份附件已经不在了"))
         }
-        let stored = PhoneProjectAttachments.store(
-            root: projectRoot, name: name, kind: kind, bytes: bytes, fileManager: fileManager
+        let stored = PhoneProjectAttachments.writeReserved(
+            root: projectRoot, relative: reserved, bytes: bytes, fileManager: fileManager
         )
-        guard case .success(let relative) = stored else { return stored }
+        guard case .success = stored else { return stored }
         try? fileManager.removeItem(at: folder)
-        return .success(relative)
+        return .success(reserved)
     }
 
     static func drop(root: URL, linkID: String, hold: String, fileManager: FileManager = .default) -> Bool {
@@ -1006,6 +1147,50 @@ enum PhoneAttachmentHolds {
         } catch {
             return false
         }
+    }
+
+    /// 按预定路径找到还没落盘的字节。不写入项目。
+    static func stagedBytes(
+        root: URL,
+        profile: String,
+        projectID: String,
+        relative: String,
+        fileManager: FileManager = .default
+    ) -> Data? {
+        guard !relative.isEmpty, let base = ensureRoot(root, fileManager: fileManager) else { return nil }
+        guard let children = try? fileManager.contentsOfDirectory(at: base, includingPropertiesForKeys: nil) else { return nil }
+        for child in children {
+            guard inside(child, root: base),
+                  let meta = readMeta(child, fileManager: fileManager),
+                  meta["profile"] == profile,
+                  meta["project_id"] == projectID,
+                  meta["path"] == relative else { continue }
+            let body = child.appendingPathComponent("body")
+            guard inside(body, root: base) else { return nil }
+            return try? Data(contentsOf: body)
+        }
+        return nil
+    }
+
+    private static func reservedNames(
+        root: URL,
+        profile: String,
+        projectID: String,
+        folderName: String,
+        fileManager: FileManager
+    ) -> Set<String> {
+        var names = Set<String>()
+        guard let children = try? fileManager.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return names }
+        let prefix = folderName + "/"
+        for child in children {
+            guard inside(child, root: root),
+                  let meta = readMeta(child, fileManager: fileManager),
+                  meta["profile"] == profile,
+                  meta["project_id"] == projectID,
+                  let path = meta["path"], path.hasPrefix(prefix) else { continue }
+            names.insert((path as NSString).lastPathComponent)
+        }
+        return names
     }
 
     private static func sweep(root: URL, fileManager: FileManager, now: Date) {

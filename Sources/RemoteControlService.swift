@@ -423,9 +423,10 @@ final class RemoteControlService {
         if pending.hold {
             let reply = holdIncomingFile(pending, bytes: data)
             let hold = reply.body["hold_id"] as? String ?? ""
+            let path = reply.body["path"] as? String ?? ""
             replyProjectFile(
-                linkID: pending.linkID, requestID: pending.requestID, ok: reply.ok && !hold.isEmpty,
-                path: "", text: reply.ok ? "" : reply.text, hold: hold
+                linkID: pending.linkID, requestID: pending.requestID, ok: reply.ok && !hold.isEmpty && !path.isEmpty,
+                path: path, text: reply.ok ? "" : reply.text, hold: hold
             )
             return
         }
