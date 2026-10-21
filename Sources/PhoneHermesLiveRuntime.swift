@@ -21,6 +21,13 @@ enum PhoneHermesSessionTitle {
         return detail["code"] as? String == "invalid_title"
             && (detail["message"] as? String)?.contains("already in use") == true
     }
+
+    static func isBusy(_ error: PhoneHermesHTTPError) -> Bool {
+        guard error.status == 409,
+              let json = try? JSONSerialization.jsonObject(with: error.body) as? [String: Any],
+              let detail = json["error"] as? [String: Any] else { return false }
+        return detail["code"] as? String == "session_active_turn"
+    }
 }
 
 /// 只连本机 Hermes 接口。密钥留在这台 Mac，不交给手机或中转。
@@ -69,10 +76,21 @@ final class PhoneHermesLiveRuntime: PhoneHermesRuntime {
     }
 
     func createSession(title: String, profile: String) async throws -> PhoneHermesSession {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            let json = try await request(
+                method: "POST",
+                path: "/api/sessions",
+                body: ["source": "api_server"],
+                timeout: 15,
+                profile: profile
+            )
+            return try storedSession(from: json, fallbackTitle: "")
+        }
         var attempt = 1
         var json: [String: Any] = [:]
         while true {
-            let candidate = PhoneHermesSessionTitle.candidate(title, attempt: attempt)
+            let candidate = PhoneHermesSessionTitle.candidate(trimmed, attempt: attempt)
             do {
                 json = try await request(
                     method: "POST",
@@ -87,10 +105,46 @@ final class PhoneHermesLiveRuntime: PhoneHermesRuntime {
                 attempt += 1
             }
         }
+        return try storedSession(from: json, fallbackTitle: trimmed)
+    }
+
+    func session(sessionID: String, profile: String) async throws -> PhoneHermesSession {
+        let json = try await request(
+            method: "GET",
+            path: "/api/sessions/\(sessionID)",
+            body: nil,
+            timeout: 15,
+            profile: profile
+        )
+        return try storedSession(from: json, fallbackTitle: "")
+    }
+
+    func deleteSession(sessionID: String, profile: String) async throws {
+        _ = try await request(
+            method: "DELETE",
+            path: "/api/sessions/\(sessionID)",
+            body: nil,
+            timeout: 20,
+            profile: profile
+        )
+    }
+
+    func renameSession(sessionID: String, title: String, profile: String) async throws -> String {
+        let json = try await request(
+            method: "PATCH",
+            path: "/api/sessions/\(sessionID)",
+            body: ["title": title],
+            timeout: 15,
+            profile: profile
+        )
+        return try storedSession(from: json, fallbackTitle: title).title
+    }
+
+    private func storedSession(from json: [String: Any], fallbackTitle: String) throws -> PhoneHermesSession {
         let row = json["session"] as? [String: Any] ?? [:]
         guard let id = row["id"] as? String, !id.isEmpty else { throw URLError(.badServerResponse) }
-        let saved = (row["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return PhoneHermesSession(id: id, title: saved?.isEmpty == false ? saved! : title)
+        let saved = (row["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return PhoneHermesSession(id: id, title: saved.isEmpty ? fallbackTitle : saved)
     }
 
     func messages(sessionID: String) async throws -> [PhoneHermesTurn] {
@@ -125,7 +179,7 @@ final class PhoneHermesLiveRuntime: PhoneHermesRuntime {
                 "input": text,
                 "instructions": PhoneHermesApp.instructions(for: directory)
             ],
-            timeout: 180,
+            timeout: 600,
             profile: profile
         )
         let message = json["message"] as? [String: Any]
@@ -192,6 +246,11 @@ final class PhoneHermesLiveRuntime: PhoneHermesRuntime {
 
     private static func plainText(_ content: Any?) -> String {
         if let text = content as? String { return text }
-        return ""
+        let parts = content as? [Any] ?? []
+        return parts.compactMap { item -> String? in
+            if let text = item as? String { return text }
+            guard let part = item as? [String: Any] else { return nil }
+            return part["text"] as? String
+        }.joined(separator: "\n")
     }
 }

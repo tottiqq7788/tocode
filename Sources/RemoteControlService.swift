@@ -10,6 +10,7 @@ final class RemoteControlService {
     private let phoneHermes: PhoneHermesRuntime
     private let phoneHermesProfiles: PhoneHermesProfileStore
     private let phoneHermesSessions: PhoneHermesSessionIndex
+    private let phoneHermesActivity = PhoneHermesActivity()
     private let showHiddenFiles: () -> Bool
     private let pollInterval: TimeInterval
     private var record: RemoteControlRecord
@@ -168,6 +169,7 @@ final class RemoteControlService {
                     profileStore: profiles,
                     sessionIndex: sessions,
                     catalog: names,
+                    activity: phoneHermesActivity,
                     projectsDatabase: { HermesProfileProjects.databasePath(home: NSHomeDirectory(), profile: $0) },
                     isDirectory: { path in
                         var isDir: ObjCBool = false

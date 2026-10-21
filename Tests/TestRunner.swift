@@ -7741,6 +7741,12 @@ final class ScriptedPhoneHermes: PhoneHermesRuntime {
     var running = false
     var sessions: [PhoneHermesSession] = []
     var chats: [(String, String, String)] = []
+    var createdTitles: [String] = []
+    var deleted: [String] = []
+    var renamed: [(String, String)] = []
+    var titles: [String: String] = [:]
+    var messageTurns: [PhoneHermesTurn] = []
+    var chatHook: (() async -> Void)?
 
     func snapshot() async -> PhoneHermesSnapshot {
         PhoneHermesSnapshot(installed: installed, running: running)
@@ -7749,15 +7755,30 @@ final class ScriptedPhoneHermes: PhoneHermesRuntime {
     func listSessions() async throws -> [PhoneHermesSession] { sessions }
 
     func createSession(title: String) async throws -> PhoneHermesSession {
-        let session = PhoneHermesSession(id: "api_test", title: title)
+        createdTitles.append(title)
+        let session = PhoneHermesSession(id: "api_\(createdTitles.count)", title: title)
         sessions.insert(session, at: 0)
         return session
     }
 
-    func messages(sessionID: String) async throws -> [PhoneHermesTurn] { [] }
+    func session(sessionID: String, profile: String) async throws -> PhoneHermesSession {
+        PhoneHermesSession(id: sessionID, title: titles[sessionID] ?? "")
+    }
+
+    func deleteSession(sessionID: String, profile: String) async throws {
+        deleted.append(sessionID)
+    }
+
+    func renameSession(sessionID: String, title: String, profile: String) async throws -> String {
+        renamed.append((sessionID, title))
+        return title
+    }
+
+    func messages(sessionID: String) async throws -> [PhoneHermesTurn] { messageTurns }
 
     func chat(sessionID: String, text: String, directory: String) async throws -> String {
         chats.append((sessionID, text, directory))
+        await chatHook?()
         return "已收到"
     }
 }
@@ -7894,8 +7915,9 @@ func testPhoneHermesChatGate() async {
         projectsDatabase: { _ in database },
         isDirectory: directoryExists
     )
-    let rows = projectSessions.body["sessions"] as? [[String: String]] ?? []
-    expect(projectSessions.ok && rows.count == 1 && rows.first?["id"] == "api_test", "只列出记在这个项目下的会话")
+    let rows = projectSessions.body["sessions"] as? [[String: Any]] ?? []
+    let firstId = rows.first?["id"] as? String
+    expect(projectSessions.ok && rows.count == 1 && firstId == "api_test", "只列出记在这个项目下的会话")
 
     let sent = await PhoneHermesApp.handle(
         kind: "chat", sessionID: "api_test", title: "", text: "你好", runtime: runtime,
@@ -7971,6 +7993,143 @@ func testPhoneHermesChatGate() async {
     }
     expect(PhoneHermesEnvironment.apiKey(from: "API_SERVER_KEY=\"local-key\"\n") == "local-key", "能读本机 Hermes 密钥")
     expect(!sent.body.keys.contains("api_key"), "回复里不带密钥")
+}
+
+func testPhoneHermesSessionDraftRenameAndDelete() async {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("phone-session-\(UUID().uuidString)", isDirectory: true)
+    try! fm.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: root) }
+    let database = root.appendingPathComponent("projects.db").path
+    let exists: (String) -> Bool = { path in
+        var isDir: ObjCBool = false
+        return fm.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
+    }
+    let project = try! HermesProfileProjects.create(
+        databasePath: database, name: "草稿", folder: root.path, isDirectory: exists
+    )
+    let index = PhoneHermesSessionIndex(fileURL: root.appendingPathComponent("sessions.json"))
+    let runtime = ScriptedPhoneHermes()
+    runtime.installed = true
+    runtime.running = true
+    let created = await PhoneHermesApp.handle(
+        kind: "session_create", sessionID: "", title: "", text: "", runtime: runtime,
+        projectID: project.id, sessionIndex: index, projectsDatabase: { _ in database }, isDirectory: exists
+    )
+    let createdID = (created.body["session"] as? [String: String])?["id"] ?? ""
+    expect(created.ok && runtime.createdTitles == [""] && (created.body["session"] as? [String: String])?["title"] == "", "第一条消息前建立会话时不提交标题")
+    runtime.titles[createdID] = "生成的标题"
+    let sent = await PhoneHermesApp.handle(
+        kind: "chat", sessionID: createdID, title: "", text: "你好", runtime: runtime,
+        projectID: project.id, sessionIndex: index, projectsDatabase: { _ in database }, isDirectory: exists
+    )
+    expect(sent.ok && sent.body["title"] as? String == "生成的标题", "对话后把 Hermes 生成的标题交回手机")
+    let renamed = await PhoneHermesApp.handle(
+        kind: "session_rename", sessionID: createdID, title: "我的标题", text: "", runtime: runtime,
+        projectID: project.id, sessionIndex: index, projectsDatabase: { _ in database }, isDirectory: exists
+    )
+    expect(renamed.ok && runtime.renamed.count == 1 && runtime.renamed[0].0 == createdID && runtime.renamed[0].1 == "我的标题", "只改记在这个项目下的会话标题")
+    let outsider = await PhoneHermesApp.handle(
+        kind: "session_delete", sessionID: "api_other", title: "", text: "", runtime: runtime,
+        projectID: project.id, sessionIndex: index, projectsDatabase: { _ in database }, isDirectory: exists
+    )
+    expect(!outsider.ok && runtime.deleted.isEmpty, "没记在这个项目下的会话不能删")
+    let removed = await PhoneHermesApp.handle(
+        kind: "session_delete", sessionID: createdID, title: "", text: "", runtime: runtime,
+        projectID: project.id, sessionIndex: index, projectsDatabase: { _ in database }, isDirectory: exists
+    )
+    expect(removed.ok && runtime.deleted == [createdID] && index.projectID(profile: "default", sessionID: createdID) == nil, "删除后不再记在这个项目下")
+}
+
+func testPhoneHermesRunStaysVisible() async {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("phone-running-\(UUID().uuidString)", isDirectory: true)
+    try! fm.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: root) }
+    let database = root.appendingPathComponent("projects.db").path
+    let exists: (String) -> Bool = { path in
+        var isDir: ObjCBool = false
+        return fm.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
+    }
+    let project = try! HermesProfileProjects.create(
+        databasePath: database, name: "进行中", folder: root.path, isDirectory: exists
+    )
+    let index = PhoneHermesSessionIndex(fileURL: root.appendingPathComponent("sessions.json"))
+    let activity = PhoneHermesActivity()
+    let runtime = ScriptedPhoneHermes()
+    runtime.installed = true
+    runtime.running = true
+    let created = await PhoneHermesApp.handle(
+        kind: "session_create", sessionID: "", title: "", text: "", runtime: runtime,
+        projectID: project.id, sessionIndex: index, activity: activity, projectsDatabase: { _ in database }, isDirectory: exists
+    )
+    let createdID = (created.body["session"] as? [String: String])?["id"] ?? ""
+    runtime.messageTurns = [
+        PhoneHermesTurn(role: "assistant", text: "   "),
+        PhoneHermesTurn(role: "user", text: "你好"),
+        PhoneHermesTurn(role: "assistant", text: "有字")
+    ]
+    let hidden = await PhoneHermesApp.handle(
+        kind: "messages", sessionID: createdID, title: "", text: "", runtime: runtime,
+        projectID: project.id, sessionIndex: index, activity: activity, projectsDatabase: { _ in database }, isDirectory: exists
+    )
+    let hiddenRows = hidden.body["messages"] as? [[String: String]] ?? []
+    expect(hidden.ok && hiddenRows.count == 2 && hiddenRows.last?["text"] == "有字", "没有文字的工具回合不交给手机")
+    runtime.chatHook = {
+        let listed = await PhoneHermesApp.handle(
+            kind: "sessions", sessionID: "", title: "", text: "", runtime: runtime,
+            projectID: project.id, sessionIndex: index, activity: activity, projectsDatabase: { _ in database }, isDirectory: exists
+        )
+        let rows = listed.body["sessions"] as? [[String: Any]] ?? []
+        let marked = rows.contains { ($0["id"] as? String) == createdID && ($0["running"] as? Bool) == true }
+        expect(marked, "进行中的会话在列表里标出来")
+        let reading = await PhoneHermesApp.handle(
+            kind: "messages", sessionID: createdID, title: "", text: "", runtime: runtime,
+            projectID: project.id, sessionIndex: index, activity: activity, projectsDatabase: { _ in database }, isDirectory: exists
+        )
+        expect(reading.body["running"] as? Bool == true, "再次打开会话时这一轮仍在进行")
+    }
+    let sent = await PhoneHermesApp.handle(
+        kind: "chat", sessionID: createdID, title: "", text: "你好", runtime: runtime,
+        projectID: project.id, sessionIndex: index, activity: activity, projectsDatabase: { _ in database }, isDirectory: exists
+    )
+    expect(sent.ok, "进行中的标记不改变回复本身")
+    let done = await PhoneHermesApp.handle(
+        kind: "sessions", sessionID: "", title: "", text: "", runtime: runtime,
+        projectID: project.id, sessionIndex: index, activity: activity, projectsDatabase: { _ in database }, isDirectory: exists
+    )
+    let doneRows = done.body["sessions"] as? [[String: Any]] ?? []
+    let still = doneRows.contains { ($0["id"] as? String) == createdID && ($0["running"] as? Bool) == true }
+    expect(!still, "这一轮结束后列表不再标成进行中")
+}
+
+func testPhoneHermesFilePreview() {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("phone-preview-\(UUID().uuidString)", isDirectory: true)
+    try! fm.createDirectory(at: root.appendingPathComponent("src"), withIntermediateDirectories: true)
+    try! "# 标题\n\n正文".write(to: root.appendingPathComponent("note.md"), atomically: true, encoding: .utf8)
+    try! "hello".write(to: root.appendingPathComponent("src/main.txt"), atomically: true, encoding: .utf8)
+    try! Data([0x00, 0x01, 0x02]).write(to: root.appendingPathComponent("src/blob.bin"))
+    let outside = fm.temporaryDirectory.appendingPathComponent("phone-preview-out-\(UUID().uuidString)", isDirectory: true)
+    try! fm.createDirectory(at: outside, withIntermediateDirectories: true)
+    try! "secret".write(to: outside.appendingPathComponent("leak.txt"), atomically: true, encoding: .utf8)
+    try! fm.createSymbolicLink(at: root.appendingPathComponent("escape"), withDestinationURL: outside.appendingPathComponent("leak.txt"))
+    defer {
+        try? fm.removeItem(at: root)
+        try? fm.removeItem(at: outside)
+    }
+    let markdown = PhoneHermesDirectory.preview(root: root.path, relative: "note.md")
+    expect(markdown.ok && markdown.body["format"] as? String == "markdown" && (markdown.body["content"] as? String)?.contains("标题") == true, "Markdown 按原文读出并标成 markdown")
+    let text = PhoneHermesDirectory.preview(root: root.path, relative: "src/main.txt")
+    expect(text.ok && text.body["format"] as? String == "text" && text.body["content"] as? String == "hello", "文本文件按原文读出")
+    for bad in ["../leak.txt", "escape", "src/../note.md", "/etc/passwd", "missing.txt"] {
+        let rejected = PhoneHermesDirectory.preview(root: root.path, relative: bad)
+        expect(!rejected.ok, "预览拒绝越界、链接和点段：\(bad)")
+    }
+    let binary = PhoneHermesDirectory.preview(root: root.path, relative: "src/blob.bin")
+    expect(!binary.ok && binary.text == "这个文件不能预览", "二进制文件不预览")
+    let folder = PhoneHermesDirectory.preview(root: root.path, relative: "src")
+    expect(!folder.ok && folder.text == "这是文件夹", "文件夹不能当文件预览")
 }
 
 @MainActor
@@ -8527,6 +8686,9 @@ struct TestRunnerMain {
         await testRemoteControlWhitelist()
         do { try testPhoneHermesProfiles() } catch { expect(false, "档案项目测试没有跑完") }
         await testPhoneHermesChatGate()
+        await testPhoneHermesSessionDraftRenameAndDelete()
+        await testPhoneHermesRunStaysVisible()
+        testPhoneHermesFilePreview()
         await testPhoneHermesAppChannel()
         testPhoneHermesSessionTitleSkipsTakenNames()
         testHermesGatewayEnvOnlyFillsMissing()

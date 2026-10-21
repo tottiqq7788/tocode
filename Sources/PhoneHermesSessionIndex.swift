@@ -37,6 +37,15 @@ final class PhoneHermesSessionIndex {
         write()
     }
 
+    func forget(profile: String, sessionID: String) {
+        var projects = tree[profile] ?? [:]
+        for (project, ids) in projects {
+            projects[project] = ids.filter { $0 != sessionID }
+        }
+        tree[profile] = projects
+        write()
+    }
+
     private func write() {
         let directory = fileURL.deletingLastPathComponent()
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
