@@ -155,7 +155,8 @@ enum PhoneHermesDirectory {
         return .success("", body: [
             "entries": entries,
             "next": end,
-            "truncated": end < rows.count
+            "truncated": end < rows.count,
+            "root": rootReal
         ])
     }
 

@@ -8092,6 +8092,8 @@ func testPhoneHermesChatGate() async {
         firstPage.ok && firstPage.text.isEmpty && firstPage.body["truncated"] as? Bool == true && firstPage.body["next"] as? Int == 2 && firstNames == ["dir", "f00.txt"],
         "目录先给一页，不提示只显示前几项"
     )
+    expect(firstPage.body["root"] as? String == wide.resolvingSymlinksInPath().path, "目录带回项目根目录，供手机拼绝对路径")
+    expect((firstPage.body["entries"] as? [[String: String]] ?? []).allSatisfy { ($0["path"] ?? "").hasPrefix("/") == false }, "条目本身仍是相对路径")
     let secondPage = PhoneHermesDirectory.list(root: wide.path, includeHidden: false, offset: 2, pageSize: 2)
     let secondNames = (secondPage.body["entries"] as? [[String: String]] ?? []).map { $0["name"] ?? "" }
     expect(secondPage.ok && secondPage.body["truncated"] as? Bool == true && secondNames == ["f01.txt", "f02.txt"], "下一页从上次的位置继续")
