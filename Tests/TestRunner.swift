@@ -8065,16 +8065,18 @@ func testPhoneHermesRunStaysVisible() async {
     )
     let createdID = (created.body["session"] as? [String: String])?["id"] ?? ""
     runtime.messageTurns = [
-        PhoneHermesTurn(role: "assistant", text: "   "),
+        PhoneHermesTurn(role: "assistant", text: "   ", interim: true),
         PhoneHermesTurn(role: "user", text: "你好"),
+        PhoneHermesTurn(role: "assistant", text: "先看一下", interim: true),
         PhoneHermesTurn(role: "assistant", text: "有字")
     ]
     let hidden = await PhoneHermesApp.handle(
         kind: "messages", sessionID: createdID, title: "", text: "", runtime: runtime,
         projectID: project.id, sessionIndex: index, activity: activity, projectsDatabase: { _ in database }, isDirectory: exists
     )
-    let hiddenRows = hidden.body["messages"] as? [[String: String]] ?? []
-    expect(hidden.ok && hiddenRows.count == 2 && hiddenRows.last?["text"] == "有字", "没有文字的工具回合不交给手机")
+    let hiddenRows = hidden.body["messages"] as? [[String: Any]] ?? []
+    expect(hidden.ok && hiddenRows.count == 3 && (hiddenRows.last?["text"] as? String) == "有字", "没有文字的工具回合不交给手机")
+    expect((hiddenRows[1]["interim"] as? Bool) == true && (hiddenRows.last?["interim"] as? Bool) == false, "过程回复单独标出来，结束回复不标")
     runtime.chatHook = {
         let listed = await PhoneHermesApp.handle(
             kind: "sessions", sessionID: "", title: "", text: "", runtime: runtime,

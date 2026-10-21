@@ -154,7 +154,7 @@ final class PhoneHermesLiveRuntime: PhoneHermesRuntime {
     func messages(sessionID: String, profile: String) async throws -> [PhoneHermesTurn] {
         let json = try await request(
             method: "GET",
-            path: "/api/sessions/\(sessionID)/messages?inline_images=false&limit=80&order=oldest",
+            path: "/api/sessions/\(sessionID)/messages?inline_images=false&limit=200&order=latest",
             body: nil,
             timeout: 20,
             profile: profile
@@ -163,7 +163,11 @@ final class PhoneHermesLiveRuntime: PhoneHermesRuntime {
         return rows.compactMap { row in
             let role = row["role"] as? String ?? ""
             guard role == "user" || role == "assistant" else { return nil }
-            return PhoneHermesTurn(role: role, text: Self.plainText(row["content"]))
+            return PhoneHermesTurn(
+                role: role,
+                text: Self.plainText(row["content"]),
+                interim: (row["finish_reason"] as? String) == "tool_calls"
+            )
         }
     }
 

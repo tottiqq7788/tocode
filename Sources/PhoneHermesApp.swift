@@ -13,6 +13,8 @@ struct PhoneHermesSession: Equatable {
 struct PhoneHermesTurn: Equatable {
     var role: String
     var text: String
+    /// 这一步还要调用工具。结束回复为 false。
+    var interim: Bool = false
 }
 
 protocol PhoneHermesRuntime: AnyObject {
@@ -433,7 +435,9 @@ enum PhoneHermesApp {
                     $0.role == "user" || !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 }
                 return .success("", body: [
-                    "messages": visible.map { ["role": $0.role, "text": $0.text] },
+                    "messages": visible.map {
+                        ["role": $0.role, "text": $0.text, "interim": $0.interim] as [String: Any]
+                    },
                     "running": activity.contains(profile: profile, sessionID: sessionID)
                 ])
             case "chat":
