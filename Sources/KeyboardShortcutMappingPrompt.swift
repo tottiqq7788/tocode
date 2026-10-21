@@ -132,6 +132,9 @@ final class KeyboardMappingTargetEditor: NSObject {
     private var openURLSelected = false
     private var openURLItem: NSMenuItem?
     private var actionItems: [KeyboardMappingAction: NSMenuItem] = [:]
+    private let extraActions: [RemoteMappingExtra]
+    private var extraItems: [String: NSMenuItem] = [:]
+    private var selectedExtra: String?
     private let actionTriggerPhrase: String
     private let automations: [ModelAutomation]
     private var selectedAutomationID: UUID?
@@ -140,10 +143,14 @@ final class KeyboardMappingTargetEditor: NSObject {
     init(
         target: KeyboardShortcutMappingTarget?,
         actionTriggerPhrase: String = "命中源快捷键后",
-        automations: [ModelAutomation] = []
+        automations: [ModelAutomation] = [],
+        extraActions: [RemoteMappingExtra] = [],
+        selectedExtra: String? = nil
     ) {
         self.actionTriggerPhrase = actionTriggerPhrase
         self.automations = automations
+        self.extraActions = extraActions
+        self.selectedExtra = selectedExtra
         if case .automation(let id)? = target {
             recorder = ShortcutRecorderView(shortcut: nil)
             selectedAction = .blackout
@@ -167,6 +174,9 @@ final class KeyboardMappingTargetEditor: NSObject {
             recorder = ShortcutRecorderView(shortcut: existing)
             selectedAction = KeyboardMappingAction.allCases[0]
             segment.selectedSegment = 0
+        }
+        if selectedExtra != nil {
+            segment.selectedSegment = Self.actionSegment
         }
 
         let stack = NSStackView()
@@ -251,6 +261,11 @@ final class KeyboardMappingTargetEditor: NSObject {
         updatePages()
     }
 
+    var selectedExtraID: String? {
+        guard segment.selectedSegment == Self.actionSegment else { return nil }
+        return selectedExtra
+    }
+
     /// 当前分段下的目标；快捷键页未录入时返回 nil，用于禁用保存。
     var target: KeyboardShortcutMappingTarget? {
         if segment.selectedSegment == Self.automationSegment {
@@ -264,6 +279,7 @@ final class KeyboardMappingTargetEditor: NSObject {
             return .automation(id)
         }
         if segment.selectedSegment == Self.actionSegment {
+            if selectedExtra != nil { return nil }
             if openURLSelected {
                 guard let url = MappedURL.normalized(urlField.stringValue) else { return nil }
                 return .openURL(url)
@@ -296,6 +312,14 @@ final class KeyboardMappingTargetEditor: NSObject {
 
     @objc private func actionPopupChanged(_ sender: NSPopUpButton) {
         guard let rawValue = sender.selectedItem?.representedObject as? String else { return }
+        if rawValue.hasPrefix("remote-extra:") {
+            openURLSelected = false
+            selectedExtra = String(rawValue.dropFirst("remote-extra:".count))
+            updateURLField()
+            onChange?()
+            return
+        }
+        selectedExtra = nil
         if rawValue == Self.openURLRepresented {
             openURLSelected = true
             updateURLField()
@@ -347,8 +371,24 @@ final class KeyboardMappingTargetEditor: NSObject {
                 openURLItem = item
             }
         }
+        if !extraActions.isEmpty {
+            let header = NSMenuItem(title: "遥控", action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            menu.addItem(header)
+            for extra in extraActions {
+                let item = NSMenuItem(title: extra.title, action: nil, keyEquivalent: "")
+                item.representedObject = "remote-extra:\(extra.id)"
+                item.indentationLevel = 1
+                item.image = NSImage(systemSymbolName: extra.symbol, accessibilityDescription: extra.title)
+                item.toolTip = "点一下执行「\(extra.title)」"
+                menu.addItem(item)
+                extraItems[extra.id] = item
+            }
+        }
         actionPopup.menu = menu
-        if openURLSelected, let openURLItem {
+        if let selectedExtra, let item = extraItems[selectedExtra] {
+            actionPopup.select(item)
+        } else if openURLSelected, let openURLItem {
             actionPopup.select(openURLItem)
         } else if let item = actionItems[selectedAction] {
             actionPopup.select(item)

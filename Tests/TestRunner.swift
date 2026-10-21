@@ -7698,6 +7698,66 @@ func testRemoteControlAssociationPage() async {
     expect(service.isAssociated, "关联成功后菜单显示勾选")
 }
 
+func testRemoteButtonsStayOnThisMac() {
+    let suite = "tocode.remoteButtons." + UUID().uuidString
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let store = RemoteButtonStore(defaults: defaults)
+    let secret = "https://secret.example/path"
+    let saved = store.save(
+        RemoteButtonDraft(
+            name: " 打开 ",
+            detail: " 说明 ",
+            icon: "link",
+            target: .mapped(.openURL(secret))
+        )
+    )
+    guard case .success(let button) = saved else {
+        expect(false, "能保存遥控按钮")
+        return
+    }
+    expect(button.name == "打开" && button.detail == "说明", "名称和描述去掉空白")
+    let again = store.save(RemoteButtonDraft(name: "打开", icon: "moon", target: .status))
+    guard case .failure(.duplicateName) = again else {
+        expect(false, "重名不能保存")
+        return
+    }
+    let totti = store.save(
+        RemoteButtonDraft(
+            name: "不行",
+            icon: "key",
+            target: .mapped(.shortcut(RecordedShortcut(keyCode: 0, modifiers: [.totti], keyLabel: "A")))
+        )
+    )
+    guard case .failure(.tottiNotEmittable) = totti else {
+        expect(false, "含 totti 的目标不能保存")
+        return
+    }
+    let blank = store.save(RemoteButtonDraft(name: "  ", icon: "moon", target: .lock))
+    guard case .failure(.emptyName) = blank else {
+        expect(false, "空白名称不能保存")
+        return
+    }
+    guard
+        let data = try? JSONSerialization.data(withJSONObject: RemoteButtonCatalog.body(store.all())),
+        let text = String(data: data, encoding: .utf8)
+    else {
+        expect(false, "按钮名单能序列化")
+        return
+    }
+    expect(!text.contains("secret.example"), "名单不含网址")
+    expect(!text.contains("openURL"), "名单不含目标种类")
+    expect(
+        RemoteButtonCatalog.resolve(store.all(), target: ["button_id": button.id.uuidString])?.id == button.id,
+        "编号能找到按钮"
+    )
+    expect(
+        RemoteButtonCatalog.resolve(store.all(), target: ["button_id": button.id.uuidString, "url": secret]) == nil,
+        "夹带目标时拒绝"
+    )
+    expect(RemoteButtonIcons.all.count >= 40, "图标目录够用")
+}
+
 @MainActor
 func testRemoteControlWhitelist() async {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -7724,27 +7784,56 @@ func testRemoteControlWhitelist() async {
         ),
         lockScreen: { false }
     )
+    let statusID = UUID()
+    let dismissID = UUID()
+    service.savedButtons = {
+        [
+            RemoteButton(id: statusID, name: "状态", detail: "", icon: "info", target: .status),
+            RemoteButton(id: dismissID, name: "取消", detail: "", icon: "sun", target: .dismissBlackout),
+        ]
+    }
     service.handle([
         "op": "command_inbound", "link_id": "link-1", "request_id": "r1", "action": "status"
     ])
     try? await Task.sleep(nanoseconds: 50_000_000)
-    expect(transport.sent.first?["ok"] as? Bool == true, "白名单动作回传结果")
+    expect(transport.sent.last?["text"] as? String == "动作不在白名单", "设备状态不能直接发送")
+    service.handle([
+        "op": "command_inbound", "link_id": "link-1", "request_id": "r1b", "action": "remote-press",
+        "target": ["button_id": statusID.uuidString],
+    ])
+    try? await Task.sleep(nanoseconds: 50_000_000)
+    expect(transport.sent.last?["ok"] as? Bool == true, "已保存的状态按钮仍能执行")
     service.handle([
         "op": "command_inbound", "link_id": "link-1", "request_id": "r2", "action": "shell"
     ])
     try? await Task.sleep(nanoseconds: 50_000_000)
     expect(transport.sent.last?["text"] as? String == "动作不在白名单", "未知动作不执行")
     expect(RemoteControlPayload.qr(relay: "https://totti.xin", code: "ABCD2345").contains("code=ABCD2345"), "二维码只含中转和配对码")
-    expect(RemoteControlAction.allCases.count == 6, "遥控只留状态、黑屏、取消黑屏、锁屏和桌面")
+    expect(RemoteControlAction.allCases.count == 4, "遥控通道只留桌面、切换、按钮列表和按下")
+    expect(!RemoteControlAction.allCases.map(\.rawValue).contains("status"), "设备状态不再是可直接发送的动作")
+    expect(!RemoteControlAction.allCases.map(\.rawValue).contains("lock"), "锁定屏幕不再是可直接发送的动作")
     expect(RemoteControlAction(rawValue: "wheel-vertical") == nil, "滚轮不再是遥控动作")
     service.handle([
         "op": "command_inbound", "link_id": "link-1", "request_id": "r3", "action": "blackout-dismiss"
     ])
     try? await Task.sleep(nanoseconds: 50_000_000)
+    expect(transport.sent.last?["text"] as? String == "动作不在白名单", "取消黑屏不能直接发送")
+    service.handle([
+        "op": "command_inbound", "link_id": "link-1", "request_id": "r3b", "action": "remote-press",
+        "target": ["button_id": dismissID.uuidString, "url": "https://secret.example"],
+    ])
+    try? await Task.sleep(nanoseconds: 50_000_000)
+    expect(transport.sent.last?["text"] as? String == "这个按钮已经不在了", "按下时夹带目标就拒绝")
+    service.handle([
+        "op": "command_inbound", "link_id": "link-1", "request_id": "r3c", "action": "remote-press",
+        "target": ["button_id": dismissID.uuidString],
+    ])
+    try? await Task.sleep(nanoseconds: 50_000_000)
     expect(transport.sent.last?["text"] as? String == "现在没有黑屏", "没有黑屏时取消会说明")
     overlay.presented = true
     service.handle([
-        "op": "command_inbound", "link_id": "link-1", "request_id": "r4", "action": "blackout-dismiss"
+        "op": "command_inbound", "link_id": "link-1", "request_id": "r4", "action": "remote-press",
+        "target": ["button_id": dismissID.uuidString],
     ])
     try? await Task.sleep(nanoseconds: 50_000_000)
     expect(transport.sent.last?["text"] as? String == "已取消黑屏" && overlay.presented == false, "取消黑屏揭掉覆盖")
@@ -8786,6 +8875,7 @@ struct TestRunnerMain {
         await testWeChatBindingToArchiveIntegration()
         testRemoteControlBrowserPage()
         await testRemoteControlAssociationPage()
+        testRemoteButtonsStayOnThisMac()
         await testRemoteControlWhitelist()
         do { try testPhoneHermesProfiles() } catch { expect(false, "档案项目测试没有跑完") }
         await testPhoneHermesChatGate()

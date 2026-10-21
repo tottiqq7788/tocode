@@ -49,6 +49,7 @@ swiftc Tests/TestRunner.swift \
   Sources/DesktopWindowMenu.swift \
   Sources/DesktopWindowCatalog.swift \
   Sources/KeyboardShortcutMappingPrompt.swift \
+  Sources/RemoteButton.swift \
   Sources/MacTimer.swift \
   Sources/MacTimerService.swift \
   Sources/MacTimerPrompt.swift \

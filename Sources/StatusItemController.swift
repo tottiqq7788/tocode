@@ -576,6 +576,36 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
         keyboardItem.submenu = keyboardMenu
 
+        let remoteButtonItem = inputMenu.addItem(withTitle: "遥控", action: nil, keyEquivalent: "")
+        remoteButtonItem.image = NSImage(systemSymbolName: "iphone", accessibilityDescription: nil)
+        let remoteButtonMenu = NSMenu()
+        remoteButtonMenu.autoenablesItems = false
+        let addRemoteButton = remoteButtonMenu.addItem(
+            withTitle: "新增",
+            action: #selector(createRemoteButton),
+            keyEquivalent: ""
+        )
+        addRemoteButton.target = self
+        addRemoteButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "新增")
+        let savedRemoteButtons = RemoteButtonStore().all()
+        if !savedRemoteButtons.isEmpty {
+            remoteButtonMenu.addItem(.separator())
+            for button in savedRemoteButtons {
+                let item = remoteButtonMenu.addItem(
+                    withTitle: button.name,
+                    action: #selector(editRemoteButton(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = button.id.uuidString
+                item.image = NSImage(
+                    systemSymbolName: RemoteButtonIcons.symbol(for: button.icon),
+                    accessibilityDescription: button.name
+                )
+            }
+        }
+        remoteButtonItem.submenu = remoteButtonMenu
+
         let remapKeyItem = inputMenu.addItem(withTitle: "改键", action: nil, keyEquivalent: "")
         remapKeyItem.image = NSImage(systemSymbolName: "arrow.left.arrow.right", accessibilityDescription: nil)
         let remapKeyMenu = NSMenu()
@@ -1591,6 +1621,86 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             case .cancel:
                 return
             }
+        }
+    }
+
+    @objc private func createRemoteButton() {
+        presentRemoteButtonEditor(draft: RemoteButtonDraft(), isEditing: false)
+    }
+
+    @objc private func editRemoteButton(_ sender: NSMenuItem) {
+        guard
+            let rawID = sender.representedObject as? String,
+            let id = UUID(uuidString: rawID),
+            let button = RemoteButtonStore().all().first(where: { $0.id == id })
+        else {
+            return
+        }
+        presentRemoteButtonEditor(draft: RemoteButtonDraft(button: button), isEditing: true)
+    }
+
+    private func presentRemoteButtonEditor(draft initialDraft: RemoteButtonDraft, isEditing: Bool) {
+        shortcuts.setInputCaptureSuspended(true)
+        keyboardRemaps.setInputCaptureSuspended(true)
+        defer {
+            keyboardRemaps.setInputCaptureSuspended(false)
+            shortcuts.setInputCaptureSuspended(false)
+        }
+        let store = RemoteButtonStore()
+        var draft = initialDraft
+        while true {
+            switch RemoteButtonPrompt.prompt(
+                draft: draft,
+                isEditing: isEditing,
+                automations: ModelAutomationStore().all()
+            ) {
+            case .save(let candidate):
+                switch store.save(candidate) {
+                case .success:
+                    return
+                case .failure(let error):
+                    let alert = NSAlert()
+                    alert.alertStyle = .warning
+                    alert.messageText = "无法保存遥控按钮"
+                    alert.informativeText = error.localizedDescription
+                    alert.addButton(withTitle: "好")
+                    alert.runModal()
+                    draft = candidate
+                }
+            case .delete:
+                if let id = draft.id {
+                    store.delete(id: id)
+                }
+                return
+            case .cancel:
+                return
+            }
+        }
+    }
+
+    func performRemoteButton(_ button: RemoteButton) -> (Bool, String) {
+        guard case .mapped(let target) = button.target else {
+            return (false, "无法执行")
+        }
+        switch target.remapStep() {
+        case .emit(let shortcut):
+            if shortcutPoster.post(shortcut) {
+                return (true, "已执行")
+            }
+            return (false, "目标快捷键未能发送。")
+        case .invoke(let action):
+            performMappedAction(action)
+            return (true, "已执行")
+        case .openURL(let raw):
+            if MappedURLLaunch.openStored(raw) {
+                return (true, "已执行")
+            }
+            return (false, "系统没有打开该网址。")
+        case .runAutomation(let id):
+            runModelAutomation(id)
+            return (true, "已执行")
+        case .emitDown, .emitRepeat, .emitUp, .pass, .suppress:
+            return (false, "无法执行")
         }
     }
 

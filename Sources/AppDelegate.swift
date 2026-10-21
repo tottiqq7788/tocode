@@ -115,6 +115,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             commandExecutor: executor
         )
         self.controller = controller
+        remote.runSavedButton = { [weak controller] button in
+            controller?.performRemoteButton(button) ?? (false, "无法执行")
+        }
         keyboardRemaps.actionHandler = { [weak controller] action in
             controller?.performMappedAction(action)
         }

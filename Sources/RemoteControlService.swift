@@ -34,6 +34,8 @@ final class RemoteControlService {
     private let switchSpace: (DesktopSpaceTarget) -> Bool
     private let raiseWindow: (Int32, UInt32) -> Bool
     private let lockScreen: () -> Bool
+    var savedButtons: () -> [RemoteButton] = { RemoteButtonStore().all() }
+    var runSavedButton: ((RemoteButton) -> (Bool, String))?
     private let pollInterval: TimeInterval
     private var record: RemoteControlRecord
     private var associationTask: Task<Void, Never>?
@@ -253,19 +255,6 @@ final class RemoteControlService {
             return (false, "动作不在白名单", nil)
         }
         switch mapped {
-        case .status, .blackout:
-            switch executor.execute(mapped.commandBody) {
-            case .success(let output):
-                return (true, output.text, nil)
-            case .failure(let error):
-                return (false, error.localizedDescription, nil)
-            }
-        case .blackoutDismiss:
-            guard executor.remoteBlackoutPresented else { return (false, "现在没有黑屏", nil) }
-            executor.dismissRemoteBlackout()
-            return (true, "已取消黑屏", nil)
-        case .lock:
-            return lockScreen() ? (true, "已锁定屏幕", nil) : (false, "无法锁定屏幕", nil)
         case .desktops:
             guard let entries = loadDesktops() else { return (false, "无法读取桌面", nil) }
             return (true, "", PhoneDesktopList.body(entries))
@@ -288,6 +277,34 @@ final class RemoteControlService {
                 return (true, "已切换到该窗口", nil)
             }
             return (true, "桌面已经切换，但无法把窗口带到前台。请在系统设置的辅助功能里允许 Tocode。", nil)
+        case .remoteButtons:
+            return (true, "", RemoteButtonCatalog.body(savedButtons()))
+        case .remotePress:
+            guard let button = RemoteButtonCatalog.resolve(savedButtons(), target: target) else {
+                return (false, "这个按钮已经不在了", nil)
+            }
+            let outcome = savedButtonOutcome(button)
+            return (outcome.0, outcome.1, nil)
+        }
+    }
+
+    private func savedButtonOutcome(_ button: RemoteButton) -> (Bool, String) {
+        switch button.target {
+        case .status:
+            switch executor.execute("status") {
+            case .success(let output):
+                return (true, output.text)
+            case .failure(let error):
+                return (false, error.localizedDescription)
+            }
+        case .dismissBlackout:
+            guard executor.remoteBlackoutPresented else { return (false, "现在没有黑屏") }
+            executor.dismissRemoteBlackout()
+            return (true, "已取消黑屏")
+        case .lock:
+            return lockScreen() ? (true, "已锁定屏幕") : (false, "无法锁定屏幕")
+        case .mapped:
+            return runSavedButton?(button) ?? (false, "无法执行")
         }
     }
 
