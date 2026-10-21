@@ -72,4 +72,43 @@ enum HermesProfileCatalog {
     static func envURL(userHome: String, profile: String) -> URL {
         URL(fileURLWithPath: (home(userHome: userHome, profile: profile) as NSString).appendingPathComponent(".env"))
     }
+
+    /// 只读这个档案 config.yaml 里 model.default。读不到、写了不止一处、或内容不像模型名时返回空。不返回密钥。
+    static func configuredModel(userHome: String, profile: String, read: (String) -> String = { path in
+        (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+    }) -> String {
+        let path = (home(userHome: userHome, profile: profile) as NSString).appendingPathComponent("config.yaml")
+        return modelName(in: read(path))
+    }
+
+    static func modelName(in yaml: String) -> String {
+        let lines = yaml.components(separatedBy: "\n")
+        let starts = lines.indices.filter { lines[$0].range(of: #"^model\s*:"#, options: .regularExpression) != nil }
+        guard starts.count == 1, let start = starts.first,
+              lines[start].range(of: #"^model:\s*(?:#.*)?$"#, options: .regularExpression) != nil else { return "" }
+        let end = ((start + 1)..<lines.count).first { line in
+            let text = lines[line]
+            return !text.isEmpty && !text.hasPrefix(" ") && !text.hasPrefix("\t") && !text.hasPrefix("#")
+        } ?? lines.count
+        var found: Int?
+        for index in (start + 1)..<end {
+            let line = lines[index]
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
+            guard line.range(of: #"^  default:"#, options: .regularExpression) != nil else { continue }
+            if found != nil { return "" }
+            found = index
+        }
+        guard let found, let colon = lines[found].firstIndex(of: ":") else { return "" }
+        var value = lines[found][lines[found].index(after: colon)...].trimmingCharacters(in: .whitespaces)
+        if value.hasPrefix("\"") || value.hasPrefix("'") {
+            let mark = value.first!
+            guard value.count >= 2, value.hasSuffix(String(mark)) else { return "" }
+            value = String(value.dropFirst().dropLast())
+        } else if let comment = value.range(of: " #") {
+            value = String(value[..<comment.lowerBound]).trimmingCharacters(in: .whitespaces)
+        }
+        guard value.range(of: #"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,199}$"#, options: .regularExpression) != nil else { return "" }
+        return value
+    }
 }

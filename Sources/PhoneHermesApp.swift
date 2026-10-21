@@ -477,7 +477,8 @@ enum PhoneHermesApp {
             return .success("", body: statusBody(
                 snapshot: snapshot,
                 profile: snapshot.installed ? active : "default",
-                names: snapshot.installed ? names : []
+                names: snapshot.installed ? names : [],
+                home: home
             ))
         case "tree":
             guard snapshot.installed else { return .failure(missingHermes) }
@@ -517,7 +518,7 @@ enum PhoneHermesApp {
             let known = requested.isEmpty || names.contains(requested)
             guard known, chosen == (requested.isEmpty ? "default" : requested) else {
                 profileStore.save("default")
-                return .success("没有这个档案，已回到 default", body: profileBody(active: "default", names: names, database: projectsDatabase))
+                return .success("没有这个档案，已回到 default", body: profileBody(active: "default", names: names, database: projectsDatabase, home: home))
             }
             do {
                 try ensureProfileEnv(chosen)
@@ -525,7 +526,7 @@ enum PhoneHermesApp {
                 return .failure("这台电脑还不能使用这个档案")
             }
             profileStore.save(chosen)
-            return .success("", body: profileBody(active: chosen, names: names, database: projectsDatabase))
+            return .success("", body: profileBody(active: chosen, names: names, database: projectsDatabase, home: home))
         case "projects":
             guard snapshot.installed else { return .failure(missingHermes) }
             return .success("", body: ["projects": projectRows(database: projectsDatabase(active))])
@@ -567,7 +568,8 @@ enum PhoneHermesApp {
                 sessionIndex: sessionIndex,
                 projectsDatabase: projectsDatabase,
                 isDirectory: isDirectory,
-                activity: activity
+                activity: activity,
+                home: home
             )
         default:
             return .failure("无法处理")
@@ -585,7 +587,8 @@ enum PhoneHermesApp {
         sessionIndex: PhoneHermesSessionIndex,
         projectsDatabase: (String) -> String,
         isDirectory: (String) -> Bool,
-        activity: PhoneHermesActivity
+        activity: PhoneHermesActivity,
+        home: String
     ) async -> PhoneHermesAppReply {
         do {
             switch kind {
@@ -596,9 +599,12 @@ enum PhoneHermesApp {
                 let known = sessionIndex.sessionIDs(profile: profile, projectID: project.id)
                 let remote = try await runtime.listSessions(profile: profile)
                 let sessions = known.compactMap { id in remote.first { $0.id == id } }
-                return .success("", body: ["sessions": sessions.map {
-                    ["id": $0.id, "title": $0.title, "running": activity.contains(profile: profile, sessionID: $0.id)]
-                }])
+                return .success("", body: [
+                    "sessions": sessions.map {
+                        ["id": $0.id, "title": $0.title, "running": activity.contains(profile: profile, sessionID: $0.id)]
+                    },
+                    "model": HermesProfileCatalog.configuredModel(userHome: home, profile: profile)
+                ])
             case "session_create":
                 guard let project = ownedProject(projectID, profile: profile, database: projectsDatabase) else {
                     return .failure(needProject)
@@ -830,20 +836,22 @@ enum PhoneHermesApp {
         HermesProfileProjects.list(databasePath: path).map { ["id": $0.id, "name": $0.name] }
     }
 
-    private static func profileBody(active: String, names: [String], database: (String) -> String) -> [String: Any] {
+    private static func profileBody(active: String, names: [String], database: (String) -> String, home: String) -> [String: Any] {
         [
             "profile": active,
             "profiles": names,
-            "projects": projectRows(database: database(active))
+            "projects": projectRows(database: database(active)),
+            "model": HermesProfileCatalog.configuredModel(userHome: home, profile: active)
         ]
     }
 
-    private static func statusBody(snapshot: PhoneHermesSnapshot, profile: String, names: [String]) -> [String: Any] {
+    private static func statusBody(snapshot: PhoneHermesSnapshot, profile: String, names: [String], home: String) -> [String: Any] {
         [
             "hermes_installed": snapshot.installed,
             "hermes_running": snapshot.running,
             "profile": profile,
-            "profiles": names
+            "profiles": names,
+            "model": snapshot.installed ? HermesProfileCatalog.configuredModel(userHome: home, profile: profile) : ""
         ]
     }
 

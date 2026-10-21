@@ -7968,6 +7968,54 @@ final class ScriptedPhoneHermes: PhoneHermesRuntime {
     }
 }
 
+func testPhoneHermesProfileModel() async {
+    let yaml = """
+    model:
+      provider: deepseek
+      default: deepseek-flash
+      api_key: \"${ANKER_API_KEY}\"
+      base_url: https://api.deepseek.com
+
+    agent:
+      max_turns: 90
+    """
+    expect(HermesProfileCatalog.modelName(in: yaml) == "deepseek-flash", "只取出档案配置的模型名")
+    expect(!HermesProfileCatalog.modelName(in: yaml).contains("ANKER"), "模型名不带出密钥")
+    expect(HermesProfileCatalog.modelName(in: "model:\n  default: \"mimo-v2.5\"\n") == "mimo-v2.5", "引号里的模型名也能读")
+    expect(HermesProfileCatalog.modelName(in: "model:\n  default: apps/v_model/deepseek-v4-pro # 当前\n") == "apps/v_model/deepseek-v4-pro", "行尾注释不进模型名")
+    expect(HermesProfileCatalog.modelName(in: "model:\n  provider: deepseek\n") == "", "没有模型名时不显示")
+    expect(HermesProfileCatalog.modelName(in: "model:\n  default: deepseek-flash\nmodel:\n  default: other\n") == "", "重复的模型配置不拿来显示")
+    expect(HermesProfileCatalog.modelName(in: "model:\n  default: ${SECRET}\n") == "", "不像模型名的内容不显示")
+
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("phone-model-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fm.removeItem(at: root) }
+    let named = root.appendingPathComponent(".hermes/profiles/liubei", isDirectory: true)
+    try! fm.createDirectory(at: named, withIntermediateDirectories: true)
+    try! "model:\n  default: deepseek-flash\n  api_key: \"hidden\"\n".write(
+        to: named.appendingPathComponent("config.yaml"), atomically: true, encoding: .utf8
+    )
+    try! "model:\n  default: mimo-v2.5\n".write(
+        to: root.appendingPathComponent(".hermes/config.yaml"), atomically: true, encoding: .utf8
+    )
+    expect(
+        HermesProfileCatalog.configuredModel(userHome: root.path, profile: "liubei") == "deepseek-flash",
+        "具名档案读自己的模型"
+    )
+    expect(
+        HermesProfileCatalog.configuredModel(userHome: root.path, profile: "default") == "mimo-v2.5",
+        "default 读自己的模型"
+    )
+    let runtime = ScriptedPhoneHermes()
+    runtime.installed = true
+    runtime.running = true
+    let status = await PhoneHermesApp.handle(
+        kind: "status", sessionID: "", title: "", text: "", runtime: runtime, home: root.path, catalog: ["default", "liubei"]
+    )
+    expect(status.ok && (status.body["model"] as? String) == "mimo-v2.5", "状态里带上当前档案的模型")
+    expect(!(status.body.description.contains("hidden")), "状态正文不带密钥")
+}
+
 func testPhoneHermesProfiles() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("hermes-profiles-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: root.appendingPathComponent(".hermes/profiles/liubei"), withIntermediateDirectories: true)
@@ -9222,6 +9270,7 @@ struct TestRunnerMain {
         await testRemoteControlAssociationPage()
         testRemoteButtonsStayOnThisMac()
         await testRemoteControlWhitelist()
+        await testPhoneHermesProfileModel()
         do { try testPhoneHermesProfiles() } catch { expect(false, "档案项目测试没有跑完") }
         await testPhoneHermesChatGate()
         await testPhoneHermesSessionDraftRenameAndDelete()
