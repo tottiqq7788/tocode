@@ -99,16 +99,18 @@ struct ModelRelayLocalKeyRecord: Codable, Equatable, Identifiable {
     let id: UUID
     var name: String
     let digest: Data
-    let salt: Data
-    let sealedSecret: Data
+    /// Present only for legacy viewing-password ciphertext pending migration.
+    var salt: Data?
+    /// Present only for legacy viewing-password ciphertext pending migration.
+    var sealedSecret: Data?
     let createdAt: Date
 
     init(
         id: UUID = UUID(),
         name: String,
         digest: Data,
-        salt: Data,
-        sealedSecret: Data,
+        salt: Data? = nil,
+        sealedSecret: Data? = nil,
         createdAt: Date = Date()
     ) {
         self.id = id
@@ -117,6 +119,11 @@ struct ModelRelayLocalKeyRecord: Codable, Equatable, Identifiable {
         self.salt = salt
         self.sealedSecret = sealedSecret
         self.createdAt = createdAt
+    }
+
+    var usesLegacyPasswordCipher: Bool {
+        guard let salt, let sealedSecret else { return false }
+        return !salt.isEmpty && !sealedSecret.isEmpty
     }
 }
 

@@ -10,7 +10,25 @@ final class ModelRelayLocalKeyVault {
         self.iterations = iterations
     }
 
-    func create(name: String, viewingPassword: String) throws -> (
+    func create(name: String) throws -> (
+        record: ModelRelayLocalKeyRecord,
+        secret: String
+    ) {
+        let normalizedName = try ModelRelayValidation.normalizedName(name)
+        let secret = "tc_" + Self.base64URL(try Self.randomBytes(count: 32))
+        return (
+            ModelRelayLocalKeyRecord(
+                name: normalizedName,
+                digest: Self.digest(secret),
+                salt: nil,
+                sealedSecret: nil
+            ),
+            secret
+        )
+    }
+
+    /// Builds a viewing-password sealed record for migration / legacy tests.
+    func createLegacy(name: String, viewingPassword: String) throws -> (
         record: ModelRelayLocalKeyRecord,
         secret: String
     ) {
@@ -41,13 +59,18 @@ final class ModelRelayLocalKeyVault {
         )
     }
 
+    /// Legacy path: decrypt a viewing-password sealed secret for one-time migration.
     func reveal(_ record: ModelRelayLocalKeyRecord, viewingPassword: String) throws -> String {
+        guard let salt = record.salt, let sealedSecret = record.sealedSecret,
+              !salt.isEmpty, !sealedSecret.isEmpty else {
+            throw ModelRelayError.wrongViewingPassword
+        }
         guard viewingPassword.count >= 8 else {
             throw ModelRelayError.wrongViewingPassword
         }
         do {
-            let key = try deriveKey(password: viewingPassword, salt: record.salt)
-            let sealed = try AES.GCM.SealedBox(combined: record.sealedSecret)
+            let key = try deriveKey(password: viewingPassword, salt: salt)
+            let sealed = try AES.GCM.SealedBox(combined: sealedSecret)
             let clear = try AES.GCM.open(sealed, using: key)
             guard let secret = String(data: clear, encoding: .utf8),
                   Self.constantTimeEqual(Self.digest(secret), record.digest) else {
@@ -84,34 +107,39 @@ final class ModelRelayLocalKeyVault {
     }
 
     private func deriveKey(password: String, salt: Data) throws -> SymmetricKey {
-        var output = [UInt8](repeating: 0, count: 32)
-        let status: Int32 = salt.withUnsafeBytes { saltBytes in
+        var derived = Data(count: 32)
+        let status = derived.withUnsafeMutableBytes { derivedBytes in
             password.withCString { passwordBytes in
-                CCKeyDerivationPBKDF(
-                    CCPBKDFAlgorithm(kCCPBKDF2),
-                    passwordBytes,
-                    password.lengthOfBytes(using: .utf8),
-                    saltBytes.bindMemory(to: UInt8.self).baseAddress,
-                    salt.count,
-                    CCPseudoRandomAlgorithm(kCCPRFHmacAlgSHA256),
-                    iterations,
-                    &output,
-                    output.count
-                )
+                salt.withUnsafeBytes { saltBytes in
+                    CCKeyDerivationPBKDF(
+                        CCPBKDFAlgorithm(kCCPBKDF2),
+                        passwordBytes,
+                        password.utf8.count,
+                        saltBytes.bindMemory(to: UInt8.self).baseAddress,
+                        salt.count,
+                        CCPseudoRandomAlgorithm(kCCPRFHmacAlgSHA256),
+                        iterations,
+                        derivedBytes.bindMemory(to: UInt8.self).baseAddress,
+                        32
+                    )
+                }
             }
         }
         guard status == kCCSuccess else {
             throw ModelRelayError.cryptoFailed
         }
-        return SymmetricKey(data: output)
+        return SymmetricKey(data: derived)
     }
 
     private static func randomBytes(count: Int) throws -> Data {
-        var bytes = [UInt8](repeating: 0, count: count)
-        guard SecRandomCopyBytes(kSecRandomDefault, count, &bytes) == errSecSuccess else {
+        var data = Data(count: count)
+        let status = data.withUnsafeMutableBytes {
+            SecRandomCopyBytes(kSecRandomDefault, count, $0.baseAddress!)
+        }
+        guard status == errSecSuccess else {
             throw ModelRelayError.cryptoFailed
         }
-        return Data(bytes)
+        return data
     }
 
     private static func base64URL(_ data: Data) -> String {

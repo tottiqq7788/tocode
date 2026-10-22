@@ -72,6 +72,7 @@ private struct InboundProjectFile {
 final class RemoteControlService {
     private let store: RemoteControlStore
     private let transport: RemoteControlTransporting
+    private let bindingKeys: BindingKeyStoring
     private let executor: TocodeCommandExecutor
     private let pageWriter: RemoteControlPageWriting
     private let opener: RemoteControlPageOpening
@@ -94,6 +95,7 @@ final class RemoteControlService {
     init(
         store: RemoteControlStore,
         transport: RemoteControlTransporting,
+        bindingKeys: BindingKeyStoring = KeychainBindingKeyStore(),
         executor: TocodeCommandExecutor,
         pageWriter: RemoteControlPageWriting = RemoteControlPageWriter(),
         opener: RemoteControlPageOpening = WorkspaceRemoteControlPageOpener(),
@@ -109,6 +111,7 @@ final class RemoteControlService {
     ) {
         self.store = store
         self.transport = transport
+        self.bindingKeys = bindingKeys
         self.executor = executor
         self.pageWriter = pageWriter
         self.opener = opener
@@ -137,6 +140,7 @@ final class RemoteControlService {
     var relayURL: String { record.relayURL }
     var links: [RemoteControlLink] { record.links }
     var isAssociated: Bool { !record.links.isEmpty }
+    var hasBindingKey: Bool { record.hasBindingKey }
 
     func setRelay(_ raw: String) throws {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -155,6 +159,25 @@ final class RemoteControlService {
         Task { await connectIfPossible() }
     }
 
+    func setBindingKey(_ secret: String) throws {
+        try bindingKeys.savePlaintext(secret)
+        record.bindingKeyDigest = BindingKeyDigest.hex(of: secret)
+        try store.save(record)
+    }
+
+    func clearBindingKey() throws {
+        try bindingKeys.deletePlaintext()
+        record.bindingKeyDigest = nil
+        try store.save(record)
+    }
+
+    func revealBindingKey() throws -> String {
+        guard let secret = try bindingKeys.loadPlaintext(), !secret.isEmpty else {
+            throw BindingKeyError.notSet
+        }
+        return secret
+    }
+
     func startAssociation() {
         associationTask?.cancel()
         associationTask = Task { [weak self] in
@@ -164,9 +187,16 @@ final class RemoteControlService {
 
     private func performAssociation() async {
         do {
+            guard let digest = record.bindingKeyDigest, record.hasBindingKey else {
+                throw BindingKeyError.notSet
+            }
             try await ensureDevice()
             guard let relay = URL(string: record.relayURL) else { throw URLError(.badURL) }
-            let pairing = try await transport.createPairing(relay: relay, token: record.deviceToken)
+            let pairing = try await transport.createPairing(
+                relay: relay,
+                token: record.deviceToken,
+                bindingKeyDigest: digest
+            )
             let payload = RemoteControlPayload.qr(relay: record.relayURL, code: pairing.code)
             let pageURL = try pageWriter.prepare(qrText: payload)
             guard opener.open(pageURL) else {

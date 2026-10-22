@@ -7603,7 +7603,7 @@ final class ScriptedRemoteTransport: RemoteControlTransporting {
     var onMessage: (([String: Any]) -> Void)?
     var onBinary: ((Data) -> Void)?
     func register(relay: URL, name: String) async throws -> (id: String, token: String) { ("device", "token") }
-    func createPairing(relay: URL, token: String) async throws -> (code: String, expiresAt: Int) { ("ABCD2345", 0) }
+    func createPairing(relay: URL, token: String, bindingKeyDigest: String) async throws -> (code: String, expiresAt: Int) { ("ABCD2345", 0) }
     func pairingStatus(relay: URL, token: String, code: String) async throws -> (status: String, link: RemoteControlLink?) {
         ("pending", nil)
     }
@@ -7639,7 +7639,7 @@ final class RedeemingRemoteTransport: RemoteControlTransporting {
     var onMessage: (([String: Any]) -> Void)?
     var onBinary: ((Data) -> Void)?
     func register(relay: URL, name: String) async throws -> (id: String, token: String) { ("device", "token") }
-    func createPairing(relay: URL, token: String) async throws -> (code: String, expiresAt: Int) { ("ABCD2345", 0) }
+    func createPairing(relay: URL, token: String, bindingKeyDigest: String) async throws -> (code: String, expiresAt: Int) { ("ABCD2345", 0) }
     func pairingStatus(relay: URL, token: String, code: String) async throws -> (status: String, link: RemoteControlLink?) {
         ("redeemed", RemoteControlLink(linkID: "link-new", androidID: "phone", androidName: "Pixel"))
     }
@@ -7667,6 +7667,13 @@ func testRemoteControlBrowserPage() {
     expect(html.contains("绑定应用成功") && !html.contains("http-equiv=\"refresh\""), "成功页面停止刷新并提示可关闭")
 }
 
+final class MemoryBindingKeyStore: BindingKeyStoring {
+    var secret: String?
+    func loadPlaintext() throws -> String? { secret }
+    func savePlaintext(_ secret: String) throws { self.secret = secret }
+    func deletePlaintext() throws { secret = nil }
+}
+
 @MainActor
 func testRemoteControlAssociationPage() async {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -7676,9 +7683,11 @@ func testRemoteControlAssociationPage() async {
     try? store.save(record)
     let page = MockRemotePage()
     let opener = MockRemoteOpener()
+    let keys = MemoryBindingKeyStore()
     let service = RemoteControlService(
         store: store,
         transport: RedeemingRemoteTransport(),
+        bindingKeys: keys,
         executor: TocodeCommandExecutor(
             launchAtLogin: MockTocodeLaunchAtLogin(),
             mouseWheel: MockTocodeWheel(),
@@ -7692,11 +7701,15 @@ func testRemoteControlAssociationPage() async {
         opener: opener,
         pollInterval: 0.01
     )
+    expect(!service.hasBindingKey, "未设置绑定时不能算已设密钥")
+    try? service.setBindingKey("binding-secret-1")
+    expect(service.hasBindingKey, "设置绑定密钥后菜单可勾选")
     expect(!service.isAssociated, "没有安卓时绑定应用不勾选")
     service.startAssociation()
     _ = await waitUntil { service.isAssociated }
     expect(opener.opened.count == 1, "绑定应用在浏览器打开本地页面")
     expect(page.prepared.first?.contains("code=ABCD2345") == true, "二维码内容只含中转地址和配对码")
+    expect(page.prepared.first?.contains("binding") != true, "二维码不含绑定密钥")
     expect(page.statuses.contains(.success), "扫码成功后页面改为成功")
     expect(service.isAssociated, "关联成功后菜单显示勾选")
 }

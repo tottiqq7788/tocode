@@ -111,7 +111,7 @@ func testModelRelayPromptFormLayout() {
     expect(!busyItem.isEnabled, "厂家测试或刷新期间菜单项禁用")
 
     let local = try! ModelRelayLocalKeyVault(iterations: 1)
-        .create(name: "本地客户端", viewingPassword: "password-123")
+        .create(name: "本地客户端")
     let localItem = ModelRelayPrompts.localKeyMenuItem(
         local.record,
         target: nil,
@@ -178,21 +178,26 @@ func testModelRelayValidationConfigAndVault() {
     }
 
     let vault = ModelRelayLocalKeyVault(iterations: 1)
-    let created = try! vault.create(name: "本地客户端", viewingPassword: "password-123")
+    let created = try! vault.create(name: "本地客户端")
     expect(created.secret.hasPrefix("tc_"), "本地 Key 使用 tc_ 前缀")
     expect(created.secret.count >= 45, "本地 Key 包含 32 字节随机量")
+    expect(created.record.salt == nil && created.record.sealedSecret == nil, "新本地 Key 不再写查看密码密文")
+    expect(!created.record.usesLegacyPasswordCipher, "新本地 Key 不走旧查看密码路径")
+    expect(vault.authenticates(created.secret, records: [created.record]), "本地 Key 摘要鉴权成功")
+    expect(!vault.authenticates("tc_invalid", records: [created.record]), "错误本地 Key 鉴权失败")
+
+    let legacy = try! vault.createLegacy(name: "旧客户端", viewingPassword: "password-123")
+    expect(legacy.record.usesLegacyPasswordCipher, "旧本地 Key 保留查看密码密文")
     expect(
-        (try? vault.reveal(created.record, viewingPassword: "password-123")) == created.secret,
-        "正确查看密码可解密本地 Key"
+        (try? vault.reveal(legacy.record, viewingPassword: "password-123")) == legacy.secret,
+        "正确查看密码可解密旧本地 Key"
     )
     do {
-        _ = try vault.reveal(created.record, viewingPassword: "wrong-password")
+        _ = try vault.reveal(legacy.record, viewingPassword: "wrong-password")
         expect(false, "错误查看密码不可解密")
     } catch {
         expect(error as? ModelRelayError == .wrongViewingPassword, "错误查看密码返回明确错误")
     }
-    expect(vault.authenticates(created.secret, records: [created.record]), "本地 Key 摘要鉴权成功")
-    expect(!vault.authenticates("tc_invalid", records: [created.record]), "错误本地 Key 鉴权失败")
 }
 
 func testModelRelayHTTPParser() {
@@ -239,7 +244,7 @@ func testModelRelayHTTPParser() {
 
 func testModelRelayRouterAndControlPlane() {
     let vault = ModelRelayLocalKeyVault(iterations: 1)
-    let local = try! vault.create(name: "client", viewingPassword: "password-123")
+    let local = try! vault.create(name: "client")
     let firstKey = ModelRelayUpstreamKeyReference(name: "first")
     let provider = ModelRelayProvider(
         name: "provider",
@@ -357,6 +362,7 @@ func testModelRelayRouterAndControlPlane() {
     let service = ModelRelayService(
         configStore: MemoryModelRelayConfigStore(initial),
         upstreamKeyStore: MemoryModelRelayKeyStore(),
+        localKeyStore: MemoryModelRelayKeyStore(),
         localKeyVault: vault,
         upstreamClient: ModelRelayUpstreamClient(sessionConfiguration: modelRelayTestSessionConfiguration())
     )
@@ -364,13 +370,15 @@ func testModelRelayRouterAndControlPlane() {
         service.snapshot().providers.flatMap(\.models).map(\.alias).sorted() == ["a", "b", "two/a"],
         "启动时剥离人工别名，冲突上游 id 自动加厂家前缀"
     )
-    _ = try! service.createLocalKey(name: "client-a", password: "password-123")
+    _ = try! service.createLocalKey(name: "client-a")
     do {
-        _ = try service.createLocalKey(name: "CLIENT-A", password: "password-456")
+        _ = try service.createLocalKey(name: "CLIENT-A")
         expect(false, "本地 Key 名称应保持唯一")
     } catch {
         expect(error as? ModelRelayError == .duplicateKeyName, "重复本地 Key 名返回明确错误")
     }
+    let info = try! service.connectionInfo(localKeyID: service.snapshot().localKeys[0].id)
+    expect(info.apiKey.hasPrefix("tc_"), "设备验证后可从钥匙串读取本地 Key")
 }
 
 func testModelRelayValidatedKeyControlPlane() async {
@@ -1129,7 +1137,7 @@ func testModelRelayUpstreamProxy() async {
 
 func testModelRelayHTTPServerRuntime() async {
     let vault = ModelRelayLocalKeyVault(iterations: 1)
-    let local = try! vault.create(name: "runtime", viewingPassword: "password-123")
+    let local = try! vault.create(name: "runtime")
     let upstreamKey = ModelRelayUpstreamKeyReference(name: "runtime-upstream")
     let provider = ModelRelayProvider(
         name: "runtime-provider",

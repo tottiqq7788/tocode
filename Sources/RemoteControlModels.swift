@@ -18,8 +18,48 @@ struct RemoteControlRecord: Codable, Equatable {
     var deviceID: String
     var deviceToken: String
     var links: [RemoteControlLink]
+    /// SHA-256 hex digest of the Mac binding key; plaintext lives in Keychain.
+    var bindingKeyDigest: String?
 
-    static let empty = RemoteControlRecord(relayURL: "https://totti.xin", deviceID: "", deviceToken: "", links: [])
+    static let empty = RemoteControlRecord(
+        relayURL: "https://totti.xin",
+        deviceID: "",
+        deviceToken: "",
+        links: [],
+        bindingKeyDigest: nil
+    )
+
+    var hasBindingKey: Bool {
+        guard let bindingKeyDigest else { return false }
+        return bindingKeyDigest.count == 64
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case relayURL, deviceID, deviceToken, links, bindingKeyDigest
+    }
+
+    init(
+        relayURL: String,
+        deviceID: String,
+        deviceToken: String,
+        links: [RemoteControlLink],
+        bindingKeyDigest: String? = nil
+    ) {
+        self.relayURL = relayURL
+        self.deviceID = deviceID
+        self.deviceToken = deviceToken
+        self.links = links
+        self.bindingKeyDigest = bindingKeyDigest
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        relayURL = try values.decode(String.self, forKey: .relayURL)
+        deviceID = try values.decode(String.self, forKey: .deviceID)
+        deviceToken = try values.decode(String.self, forKey: .deviceToken)
+        links = try values.decodeIfPresent([RemoteControlLink].self, forKey: .links) ?? []
+        bindingKeyDigest = try values.decodeIfPresent(String.self, forKey: .bindingKeyDigest)
+    }
 }
 
 enum RemoteControlPayload {

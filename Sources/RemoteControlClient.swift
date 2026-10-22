@@ -2,7 +2,7 @@ import Foundation
 
 protocol RemoteControlTransporting: AnyObject {
     func register(relay: URL, name: String) async throws -> (id: String, token: String)
-    func createPairing(relay: URL, token: String) async throws -> (code: String, expiresAt: Int)
+    func createPairing(relay: URL, token: String, bindingKeyDigest: String) async throws -> (code: String, expiresAt: Int)
     func pairingStatus(relay: URL, token: String, code: String) async throws -> (status: String, link: RemoteControlLink?)
     func deleteLink(relay: URL, token: String, linkID: String) async throws
     func connect(relay: URL, token: String) async throws
@@ -31,8 +31,13 @@ final class RemoteControlHTTPClient: RemoteControlTransporting {
         return (body["device_id"] as? String ?? "", body["device_token"] as? String ?? "")
     }
 
-    func createPairing(relay: URL, token: String) async throws -> (code: String, expiresAt: Int) {
-        let body = try await request(relay.appendingPathComponent("v1/pairings"), method: "POST", token: token, json: [:])
+    func createPairing(relay: URL, token: String, bindingKeyDigest: String) async throws -> (code: String, expiresAt: Int) {
+        let body = try await request(
+            relay.appendingPathComponent("v1/pairings"),
+            method: "POST",
+            token: token,
+            json: ["binding_key_digest": bindingKeyDigest]
+        )
         return (body["code"] as? String ?? "", body["expires_at"] as? Int ?? 0)
     }
 

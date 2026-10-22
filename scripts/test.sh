@@ -71,6 +71,9 @@ swiftc Tests/TestRunner.swift \
   Sources/WeChatArchiveService.swift \
   Sources/WeChatBindingPage.swift \
   Sources/WeChatAssociationService.swift \
+  Sources/DeviceOwnerAuth.swift \
+  Sources/BindingKeyStore.swift \
+  Sources/BindingKeyPrompt.swift \
   Sources/RemoteControlModels.swift \
   Sources/RemoteControlStore.swift \
   Sources/RemoteControlClient.swift \
@@ -112,6 +115,7 @@ swiftc Tests/TestRunner.swift \
   -framework ApplicationServices \
   -framework CoreGraphics \
   -framework CoreImage \
+  -framework LocalAuthentication \
   -framework Security \
   -framework UserNotifications \
   -framework ServiceManagement \

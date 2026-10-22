@@ -3,6 +3,7 @@ import Foundation
 final class ModelRelayService {
     private let configStore: ModelRelayConfigStoring
     private let upstreamKeyStore: ModelRelayUpstreamKeyStoring
+    private let localKeyStore: ModelRelayLocalKeyStoring
     private let localKeyVault: ModelRelayLocalKeyVault
     private let upstreamClient: ModelRelayUpstreamClient
     private let persistenceLock = NSRecursiveLock()
@@ -27,12 +28,14 @@ final class ModelRelayService {
     init(
         configStore: ModelRelayConfigStoring = FileModelRelayConfigStore(),
         upstreamKeyStore: ModelRelayUpstreamKeyStoring = KeychainModelRelayUpstreamKeyStore(),
+        localKeyStore: ModelRelayLocalKeyStoring = KeychainModelRelayLocalKeyStore(),
         localKeyVault: ModelRelayLocalKeyVault = ModelRelayLocalKeyVault(),
         upstreamClient: ModelRelayUpstreamClient = ModelRelayUpstreamClient(),
         callMetrics: ModelRelayCallMetricsRecording = ModelRelayCallMetricsStore()
     ) {
         self.configStore = configStore
         self.upstreamKeyStore = upstreamKeyStore
+        self.localKeyStore = localKeyStore
         self.localKeyVault = localKeyVault
         self.upstreamClient = upstreamClient
         self.callMetrics = callMetrics
@@ -891,28 +894,66 @@ enum ModelRelayAutomationClient {
     }
 
     @discardableResult
-    func createLocalKey(name: String, password: String) throws -> ModelRelayLocalKeyRecord {
+    func createLocalKey(name: String) throws -> ModelRelayLocalKeyRecord {
         persistenceLock.lock()
         defer { persistenceLock.unlock() }
         let normalizedName = try ModelRelayValidation.normalizedName(name)
-        guard password.count >= 8 else { throw ModelRelayError.invalidViewingPassword }
         let snapshot = configurationSnapshot()
         guard !snapshot.localKeys.contains(where: {
             $0.name.caseInsensitiveCompare(normalizedName) == .orderedSame
         }) else {
             throw ModelRelayError.duplicateKeyName
         }
-        let created = try localKeyVault.create(name: normalizedName, viewingPassword: password)
-        try mutateConfiguration { $0.localKeys.append(created.record) }
+        let created = try localKeyVault.create(name: normalizedName)
+        try localKeyStore.save(created.secret, id: created.record.id)
+        do {
+            try mutateConfiguration { $0.localKeys.append(created.record) }
+        } catch {
+            try? localKeyStore.delete(id: created.record.id)
+            throw error
+        }
         return created.record
     }
 
-    func connectionInfo(localKeyID: UUID, password: String) throws -> ModelRelayConnectionInfo {
+    func connectionInfo(localKeyID: UUID) throws -> ModelRelayConnectionInfo {
         let snapshot = configurationSnapshot()
         guard let record = snapshot.localKeys.first(where: { $0.id == localKeyID }) else {
             throw ModelRelayError.keyNotFound
         }
+        guard let key = try localKeyStore.load(id: localKeyID),
+              ModelRelayLocalKeyVault.constantTimeEqual(
+                ModelRelayLocalKeyVault.digest(key),
+                record.digest
+              ) else {
+            throw ModelRelayError.keyNotFound
+        }
+        return ModelRelayConnectionInfo(
+            baseURL: "http://127.0.0.1:\(snapshot.port)/v1",
+            apiKey: key,
+            models: router.availableAliases()
+        )
+    }
+
+    /// One-time migration from viewing-password ciphertext into Keychain.
+    func migrateLocalKey(localKeyID: UUID, password: String) throws -> ModelRelayConnectionInfo {
+        persistenceLock.lock()
+        defer { persistenceLock.unlock() }
+        let snapshot = configurationSnapshot()
+        guard let record = snapshot.localKeys.first(where: { $0.id == localKeyID }) else {
+            throw ModelRelayError.keyNotFound
+        }
+        guard record.usesLegacyPasswordCipher else {
+            throw ModelRelayError.wrongViewingPassword
+        }
         let key = try localKeyVault.reveal(record, viewingPassword: password)
+        try localKeyStore.save(key, id: record.id)
+        try mutateConfiguration { config in
+            guard let index = config.localKeys.firstIndex(where: { $0.id == localKeyID }) else {
+                return
+            }
+            config.localKeys[index].salt = nil
+            config.localKeys[index].sealedSecret = nil
+        }
         return ModelRelayConnectionInfo(
             baseURL: "http://127.0.0.1:\(snapshot.port)/v1",
             apiKey: key,
@@ -925,10 +966,19 @@ enum ModelRelayAutomationClient {
             throw ModelRelayError.keyNotFound
         }
         try mutateConfiguration { $0.localKeys.removeAll { $0.id == id } }
+        try localKeyStore.delete(id: id)
+    }
+
+    func connectionBlock(localKeyID: UUID) throws -> String {
+        try connectionInfo(localKeyID: localKeyID).clipboardText
     }
 
     func connectionBlock(localKeyID: UUID, password: String) throws -> String {
-        try connectionInfo(localKeyID: localKeyID, password: password).clipboardText
+        try migrateLocalKey(localKeyID: localKeyID, password: password).clipboardText
+    }
+
+    func localKeyNeedsMigration(_ id: UUID) -> Bool {
+        configurationSnapshot().localKeys.first(where: { $0.id == id })?.usesLegacyPasswordCipher == true
     }
 
     private func fetchModels(

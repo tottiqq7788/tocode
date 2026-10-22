@@ -40,7 +40,7 @@ final class CorruptModelRelayConfigStore: ModelRelayConfigStoring {
     }
 }
 
-final class MemoryModelRelayKeyStore: ModelRelayUpstreamKeyStoring {
+final class MemoryModelRelayKeyStore: ModelRelayUpstreamKeyStoring, ModelRelayLocalKeyStoring {
     private let lock = NSLock()
     private var values: [UUID: String]
     var saveError: Error?

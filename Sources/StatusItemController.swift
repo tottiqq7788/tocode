@@ -731,6 +731,13 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         remoteItem.image = NSImage(systemSymbolName: "iphone", accessibilityDescription: nil)
         let remoteMenu = NSMenu()
         remoteMenu.autoenablesItems = false
+        let bindingKey = remoteMenu.addItem(
+            withTitle: "绑定密钥",
+            action: #selector(manageBindingKey),
+            keyEquivalent: ""
+        )
+        bindingKey.target = self
+        ShortcutMenuAppearance.apply(to: bindingKey, enabled: remoteControl.hasBindingKey)
         let associate = remoteMenu.addItem(
             withTitle: "绑定应用",
             action: #selector(openRemoteAssociation),
@@ -1210,10 +1217,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     @objc private func addModelRelayLocalKey() {
         guard let input = ModelRelayPrompts.localKey() else { return }
         do {
-            _ = try modelRelay.createLocalKey(name: input.name, password: input.password)
+            _ = try modelRelay.createLocalKey(name: input.name)
             ModelRelayPrompts.showMessage(
                 title: "本地 Key 已生成",
-                detail: "点击该名称并输入查看密码，即可复制连接信息。"
+                detail: "点击该名称并通过设备验证后，即可复制连接信息。"
             )
         } catch {
             ModelRelayPrompts.showError(error, title: "本地 Key 未生成")
@@ -1222,21 +1229,35 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     @objc private func accessModelRelayLocalKey(_ sender: NSMenuItem) {
         guard let id = representedUUID(sender),
-              let record = modelRelay.snapshot().localKeys.first(where: { $0.id == id }),
-              let action = ModelRelayPrompts.localKeyAction(name: record.name) else { return }
-        do {
-            switch action {
-            case .copy(let password):
-                clipboard.copy(try modelRelay.connectionBlock(localKeyID: id, password: password))
-                ModelRelayPrompts.showMessage(
-                    title: "连接信息已复制",
-                    detail: "剪贴板包含 Base URL、API Key 和当前可用模型，请妥善保管。"
-                )
-            case .delete:
-                try modelRelay.deleteLocalKey(id: id)
+              let record = modelRelay.snapshot().localKeys.first(where: { $0.id == id }) else { return }
+        let needsMigration = modelRelay.localKeyNeedsMigration(id)
+        guard let action = ModelRelayPrompts.localKeyAction(
+            name: record.name,
+            needsMigration: needsMigration
+        ) else { return }
+        Task { @MainActor in
+            do {
+                switch action {
+                case .copy:
+                    try await DeviceOwnerAuth.evaluate(reason: "验证后复制本地中转连接信息")
+                    clipboard.copy(try modelRelay.connectionBlock(localKeyID: id))
+                    ModelRelayPrompts.showMessage(
+                        title: "连接信息已复制",
+                        detail: "剪贴板包含 Base URL、API Key 和当前可用模型，请妥善保管。"
+                    )
+                case .migrate(let password):
+                    clipboard.copy(try modelRelay.connectionBlock(localKeyID: id, password: password))
+                    ModelRelayPrompts.showMessage(
+                        title: "已迁移并复制",
+                        detail: "密钥已迁入钥匙串。之后复制只需设备验证。"
+                    )
+                case .delete:
+                    try await DeviceOwnerAuth.evaluate(reason: "验证后删除本地中转 Key")
+                    try modelRelay.deleteLocalKey(id: id)
+                }
+            } catch {
+                ModelRelayPrompts.showError(error, title: "本地 Key 操作失败")
             }
-        } catch {
-            ModelRelayPrompts.showError(error, title: "查看密码校验失败")
         }
     }
 
@@ -1508,7 +1529,52 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         hermesGateway.toggle()
     }
 
+    @objc private func manageBindingKey() {
+        Task { @MainActor in
+            await self.presentBindingKeyManagement()
+        }
+    }
+
+    @MainActor
+    private func presentBindingKeyManagement() async {
+        if remoteControl.hasBindingKey {
+            do {
+                try await DeviceOwnerAuth.evaluate(reason: "验证后可查看或管理绑定密钥")
+                let secret = try remoteControl.revealBindingKey()
+                switch BindingKeyPrompt.manage(hasSecret: true, revealed: secret) {
+                case .set(let next):
+                    try remoteControl.setBindingKey(next)
+                case .clear:
+                    try remoteControl.clearBindingKey()
+                case .cancel:
+                    break
+                }
+            } catch {
+                ModelRelayPrompts.showError(error, title: "绑定密钥")
+            }
+            return
+        }
+        switch BindingKeyPrompt.manage(hasSecret: false, revealed: nil) {
+        case .set(let secret):
+            do {
+                try remoteControl.setBindingKey(secret)
+            } catch {
+                ModelRelayPrompts.showError(error, title: "绑定密钥未保存")
+            }
+        case .clear, .cancel:
+            break
+        }
+    }
+
     @objc private func openRemoteAssociation() {
+        guard remoteControl.hasBindingKey else {
+            let alert = NSAlert()
+            alert.messageText = "请先设置绑定密钥"
+            alert.informativeText = "在「应用 → 绑定密钥」中设置后，才能生成绑定二维码。"
+            alert.addButton(withTitle: "好")
+            alert.runModal()
+            return
+        }
         remoteControl.startAssociation()
     }
 

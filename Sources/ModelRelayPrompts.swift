@@ -73,11 +73,11 @@ enum ModelRelayPrompts {
 
     struct LocalKeyInput {
         let name: String
-        let password: String
     }
 
     enum LocalKeyAction {
-        case copy(password: String)
+        case copy
+        case migrate(password: String)
         case delete
     }
 
@@ -312,32 +312,16 @@ enum ModelRelayPrompts {
     static func localKey() -> LocalKeyInput? {
         let name = NSTextField()
         name.placeholderString = "唯一显示名称"
-        let password = ModelRelaySecureTextField(frame: NSRect(x: 0, y: 0, width: 330, height: 24))
-        password.placeholderString = "至少 8 个字符"
-        let confirmation = ModelRelaySecureTextField(frame: NSRect(x: 0, y: 0, width: 330, height: 24))
-        confirmation.placeholderString = "再次输入查看密码"
         let alert = formAlert(
             title: "新增本地 Key",
-            information: "将自动生成 tc_ 前缀的随机 Key。查看密码不会保存；忘记后只能删除并重建。",
-            fields: [("名称", name), ("查看密码", password), ("确认密码", confirmation)],
+            information: "将自动生成 tc_ 前缀的随机 Key。复制连接信息时需通过本机 Touch ID 或设备密码验证。",
+            fields: [("名称", name)],
             primary: "生成"
         )
-        defer {
-            password.stringValue = ""
-            confirmation.stringValue = ""
-        }
         while alert.runModalFocusingFirstTextField() == .alertFirstButtonReturn {
             do {
                 let normalizedName = try ModelRelayValidation.normalizedName(name.stringValue)
-                guard password.stringValue.count >= 8 else {
-                    throw ModelRelayError.invalidViewingPassword
-                }
-                guard password.stringValue == confirmation.stringValue else {
-                    alert.informativeText = "两次输入的查看密码不一致。"
-                    alert.window.makeFirstResponder(password)
-                    continue
-                }
-                return LocalKeyInput(name: normalizedName, password: password.stringValue)
+                return LocalKeyInput(name: normalizedName)
             } catch {
                 alert.informativeText = error.localizedDescription
                 alert.window.makeFirstResponder(name)
@@ -346,21 +330,38 @@ enum ModelRelayPrompts {
         return nil
     }
 
-    static func localKeyAction(name: String) -> LocalKeyAction? {
-        let password = ModelRelaySecureTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
-        password.placeholderString = "查看密码"
+    static func localKeyAction(name: String, needsMigration: Bool) -> LocalKeyAction? {
+        if needsMigration {
+            let password = ModelRelaySecureTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
+            password.placeholderString = "旧查看密码（一次性迁移）"
+            let alert = NSAlert()
+            alert.messageText = name
+            alert.informativeText = "此密钥仍使用旧查看密码加密。输入一次查看密码后将迁入钥匙串，之后改用设备验证复制。"
+            alert.addButton(withTitle: "迁移并复制")
+            alert.addButton(withTitle: "删除…")
+            alert.addButton(withTitle: "取消")
+            alert.accessoryView = password
+            defer { password.stringValue = "" }
+            let response = alert.runModalFocusingFirstTextField()
+            if response == .alertFirstButtonReturn {
+                guard !password.stringValue.isEmpty else { return nil }
+                return .migrate(password: password.stringValue)
+            }
+            if response == .alertSecondButtonReturn,
+               confirm(title: "删除本地 Key“\(name)”？", detail: "删除后无法恢复，使用此 Key 的客户端将立即失去访问权限。") {
+                return .delete
+            }
+            return nil
+        }
         let alert = NSAlert()
         alert.messageText = name
-        alert.informativeText = "验证成功后可复制 Base URL、API Key 和可用模型；也可删除此 Key。"
+        alert.informativeText = "通过本机 Touch ID 或设备密码验证后，可复制 Base URL、API Key 和可用模型；也可删除此 Key。"
         alert.addButton(withTitle: "验证并复制")
         alert.addButton(withTitle: "删除…")
         alert.addButton(withTitle: "取消")
-        alert.accessoryView = password
-        defer { password.stringValue = "" }
-        let response = alert.runModalFocusingFirstTextField()
+        let response = alert.runModal()
         if response == .alertFirstButtonReturn {
-            guard !password.stringValue.isEmpty else { return nil }
-            return .copy(password: password.stringValue)
+            return .copy
         }
         if response == .alertSecondButtonReturn,
            confirm(title: "删除本地 Key“\(name)”？", detail: "删除后无法恢复，使用此 Key 的客户端将立即失去访问权限。") {

@@ -10,6 +10,7 @@ FRAMEWORKS=(
   -framework ApplicationServices
   -framework CoreGraphics
   -framework CoreImage
+  -framework LocalAuthentication
   -framework Security
   -framework UserNotifications
   -framework ServiceManagement
