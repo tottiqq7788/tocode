@@ -152,10 +152,12 @@ final class RemoteControlService {
         record.deviceToken = ""
         record.links = []
         try store.save(record)
+        DiagnosticLog.shared.event("relay.set", detail: ["host": url.host ?? ""])
         transport.disconnect()
     }
 
     func start() {
+        DiagnosticLog.shared.event("relay.start_service", deviceID: record.deviceID)
         Task { await connectIfPossible() }
     }
 
@@ -250,7 +252,17 @@ final class RemoteControlService {
 
     func handle(_ message: [String: Any]) {
         let op = message["op"] as? String ?? ""
+        if op == "ready" {
+            let linkIDs = message["link_ids"] as? [Any] ?? []
+            DiagnosticLog.shared.event(
+                "peer.ready",
+                deviceID: record.deviceID,
+                detail: ["link_count": linkIDs.count, "side": message["side"] as? String ?? ""]
+            )
+            return
+        }
         if op == "link_revoked", let linkID = message["link_id"] as? String {
+            DiagnosticLog.shared.event("link.revoked", linkID: linkID, deviceID: record.deviceID)
             record.links.removeAll { $0.linkID == linkID }
             try? store.save(record)
             return
@@ -270,6 +282,17 @@ final class RemoteControlService {
             let path = message["path"] as? String ?? ""
             let offset = (message["offset"] as? NSNumber)?.intValue ?? 0
             let cursor = message["cursor"] as? String ?? ""
+            DiagnosticLog.shared.event(
+                "app.inbound",
+                linkID: linkID,
+                deviceID: record.deviceID,
+                detail: [
+                    "kind": kind,
+                    "request_id": requestID,
+                    "has_path": !path.isEmpty,
+                    "has_text": !text.isEmpty,
+                ]
+            )
             if kind == "download" {
                 Task {
                     await replyDownload(
@@ -327,6 +350,17 @@ final class RemoteControlService {
                 if !reply.body.isEmpty {
                     payload["body"] = reply.body
                 }
+                DiagnosticLog.shared.event(
+                    "app.outbound_result",
+                    linkID: linkID,
+                    deviceID: record.deviceID,
+                    detail: [
+                        "kind": kind,
+                        "request_id": requestID,
+                        "ok": reply.ok,
+                        "error": reply.ok ? "" : String(reply.text.prefix(80)),
+                    ]
+                )
                 try? await transport.send(payload)
             }
             return
@@ -449,11 +483,13 @@ final class RemoteControlService {
         record.deviceID = created.id
         record.deviceToken = created.token
         try store.save(record)
+        DiagnosticLog.shared.event("device.registered", deviceID: record.deviceID, detail: ["host": relay.host ?? ""])
         try await transport.connect(relay: relay, token: record.deviceToken)
     }
 
     private func connectIfPossible() async {
         guard !record.deviceToken.isEmpty, let relay = URL(string: record.relayURL) else { return }
+        DiagnosticLog.shared.event("ws.connect_if_possible", deviceID: record.deviceID, detail: ["host": relay.host ?? ""])
         try? await transport.connect(relay: relay, token: record.deviceToken)
     }
 

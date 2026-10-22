@@ -9379,6 +9379,46 @@ func testHermesGatewayFollowsTocodeAndStopsRetrying() {
     expect(broken.1.launches.isEmpty && broken.0.phase == .failed, "配置写不进去时不启动网关")
 }
 
+func testDiagnosticLogSanitizeAndWrite() {
+    let cleaned = DiagnosticLog.sanitize([
+        "kind": "chat",
+        "request_id": "r1",
+        "token": "secret-token",
+        "binding_key": "mac-key",
+        "text": "hello body",
+        "path": "/Users/me/secret.txt",
+        "ok": true,
+        "retry_ms": 2000,
+    ])
+    expect(cleaned["kind"] as? String == "chat", "诊断保留 kind")
+    expect(cleaned["request_id"] as? String == "r1", "诊断保留 request_id")
+    expect(cleaned["ok"] as? Bool == true, "诊断保留 ok")
+    expect(cleaned["retry_ms"] as? Int == 2000, "诊断保留 retry_ms")
+    expect(cleaned["token"] == nil, "诊断过滤 token")
+    expect(cleaned["binding_key"] == nil, "诊断过滤 binding_key")
+    expect(cleaned["text"] == nil, "诊断过滤 text")
+    expect(cleaned["path"] == nil, "诊断过滤 path")
+
+    let home = FileManager.default.temporaryDirectory
+        .appendingPathComponent("tocode-diag-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: home) }
+    let log = DiagnosticLog(home: home.path)
+    log.event("ws.ping_fail", detail: ["reason": "unanswered", "token": "should-drop"])
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.timeZone = TimeZone(secondsFromGMT: 0)
+    formatter.dateFormat = "yyyyMMdd"
+    let file = home
+        .appendingPathComponent("Library/Application Support/com.tocode.app/diagnostics", isDirectory: true)
+        .appendingPathComponent("mac-\(formatter.string(from: Date())).jsonl")
+    // append is sync under lock
+    Thread.sleep(forTimeInterval: 0.05)
+    let raw = (try? String(contentsOf: file, encoding: .utf8)) ?? ""
+    expect(raw.contains("\"event\":\"ws.ping_fail\"") || raw.contains("\"event\" : \"ws.ping_fail\""), "诊断写入 ws.ping_fail")
+    expect(!raw.contains("should-drop"), "落盘不含 token 值")
+    expect(!raw.contains("\"token\""), "落盘不含 token 键")
+}
+
 @main
 struct TestRunnerMain {
     static func main() async {
@@ -9492,6 +9532,7 @@ struct TestRunnerMain {
         testTocodeCommandParser()
         await testTocodeCommandExecutorMapping()
         testTocodeCLIRunnerAndIPC()
+        testDiagnosticLogSanitizeAndWrite()
 
         if failures == 0 {
             print("\nALL TESTS PASSED")

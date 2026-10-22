@@ -76,6 +76,7 @@ swiftc Tests/TestRunner.swift \
   Sources/BindingKeyPrompt.swift \
   Sources/RemoteControlModels.swift \
   Sources/RemoteControlStore.swift \
+  Sources/DiagnosticLog.swift \
   Sources/RemoteControlClient.swift \
   Sources/RemoteControlService.swift \
   Sources/RemoteControlPage.swift \

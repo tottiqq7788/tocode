@@ -71,6 +71,12 @@ final class RemoteControlHTTPClient: RemoteControlTransporting {
         parts?.path = "/v1/ws"
         parts?.queryItems = [URLQueryItem(name: "token", value: token)]
         guard let url = parts?.url else { throw URLError(.badURL) }
+        let corr = DiagnosticLog.shared.bumpConnectionCorr()
+        DiagnosticLog.shared.event(
+            "ws.connect_intent",
+            corr: corr,
+            detail: ["host": relay.host ?? "", "scheme": parts?.scheme ?? ""]
+        )
         start(url)
     }
 
@@ -93,6 +99,7 @@ final class RemoteControlHTTPClient: RemoteControlTransporting {
     }
 
     func disconnect() {
+        DiagnosticLog.shared.event("ws.disconnect", detail: ["reason": "manual"])
         lock.lock()
         let old = task
         task = nil
@@ -112,9 +119,11 @@ final class RemoteControlHTTPClient: RemoteControlTransporting {
         next.maximumMessageSize = PhoneProjectAttachments.byteLimit
         lock.lock()
         let old = task
+        let replaced = old != nil
         task = next
         pingAnswered = true
         lock.unlock()
+        DiagnosticLog.shared.event("ws.open", detail: ["replaced_previous": replaced, "host": url.host ?? ""])
         old?.cancel(with: .goingAway, reason: nil)
         next.resume()
         receiveLoop(next)
@@ -141,7 +150,12 @@ final class RemoteControlHTTPClient: RemoteControlTransporting {
                     break
                 }
                 self.receiveLoop(task)
-            case .failure:
+            case .failure(let error):
+                let ns = error as NSError
+                DiagnosticLog.shared.event(
+                    "ws.receive_fail",
+                    detail: ["domain": ns.domain, "code": ns.code, "message": String(ns.localizedDescription.prefix(120))]
+                )
                 self.reconnect(after: task)
             }
         }
@@ -156,6 +170,7 @@ final class RemoteControlHTTPClient: RemoteControlTransporting {
         let delay = retryDelay
         retryDelay = min(retryDelay * 2, Self.retryMax)
         lock.unlock()
+        DiagnosticLog.shared.event("ws.reconnect", detail: ["retry_ms": Int(delay * 1000), "host": url.host ?? ""])
         DispatchQueue.global().asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self else { return }
             self.lock.lock()
@@ -175,11 +190,20 @@ final class RemoteControlHTTPClient: RemoteControlTransporting {
             self.lock.unlock()
             guard live else { return }
             guard answered else {
+                DiagnosticLog.shared.event("ws.ping_fail", detail: ["reason": "unanswered"])
                 watched.cancel(with: .abnormalClosure, reason: nil)
                 return
             }
             watched.sendPing { [weak self] error in
-                guard let self, error == nil else { return }
+                guard let self else { return }
+                if let error {
+                    let ns = error as NSError
+                    DiagnosticLog.shared.event(
+                        "ws.ping_fail",
+                        detail: ["reason": "send_error", "domain": ns.domain, "code": ns.code]
+                    )
+                    return
+                }
                 self.lock.lock()
                 if self.task === watched { self.pingAnswered = true }
                 self.lock.unlock()

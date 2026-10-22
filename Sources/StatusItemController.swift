@@ -771,6 +771,14 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             systemSymbolName: HermesGatewayMenu.symbolName(phase: hermesGateway.phase),
             accessibilityDescription: HermesGatewayMenu.title
         )
+        let diagnostics = remoteMenu.addItem(
+            withTitle: "打开诊断日志",
+            action: #selector(openDiagnosticLogs),
+            keyEquivalent: ""
+        )
+        diagnostics.target = self
+        diagnostics.image = NSImage(systemSymbolName: "doc.text.magnifyingglass", accessibilityDescription: "诊断日志")
+        diagnostics.toolTip = "打开本地关联通道诊断日志文件夹，不含密钥与聊天正文"
         remoteItem.submenu = remoteMenu
 
         // 微信
@@ -1586,6 +1594,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             return
         }
         remoteControl.startAssociation()
+    }
+
+    @objc private func openDiagnosticLogs() {
+        DiagnosticLog.shared.openInFinder()
     }
 
     @objc private func bindWeChat() {
