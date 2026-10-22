@@ -8762,6 +8762,19 @@ func testPhoneHermesFilePreview() {
     }
     let binary = PhoneHermesDirectory.preview(root: root.path, relative: "src/blob.bin")
     expect(!binary.ok && binary.text == "这个文件不能预览", "二进制文件不预览")
+    let pdfBytes = Data("%PDF-1.1\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n".utf8)
+    try! pdfBytes.write(to: root.appendingPathComponent("src/note.pdf"))
+    let pdf = PhoneHermesDirectory.preview(root: root.path, relative: "src/note.pdf")
+    expect(
+        pdf.ok
+            && pdf.body["format"] as? String == "pdf"
+            && pdf.body["content"] as? String == pdfBytes.base64EncodedString()
+            && pdf.body["truncated"] as? Bool == false,
+        "小 PDF 整份以 format=pdf 返回"
+    )
+    try! Data("not-a-pdf".utf8).write(to: root.appendingPathComponent("src/fake.pdf"))
+    let fakePdf = PhoneHermesDirectory.preview(root: root.path, relative: "src/fake.pdf")
+    expect(!fakePdf.ok && fakePdf.text == "这个文件不能预览", "扩展名是 pdf 但魔数不对时拒绝")
     let folder = PhoneHermesDirectory.preview(root: root.path, relative: "src")
     expect(!folder.ok && folder.text == "这是文件夹", "文件夹不能当文件预览")
     let png = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")!

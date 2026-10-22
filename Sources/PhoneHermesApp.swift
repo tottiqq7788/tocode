@@ -278,6 +278,9 @@ enum PhoneHermesDirectory {
         case .notImage:
             break
         }
+        if ext == "pdf" {
+            return pdfPreview(file: file, root: root, data: data)
+        }
         guard looksLikeText(data.prefix(8_192)) else { return .failure("这个文件不能预览") }
         if data.count > previewReadLimit { data = data.prefix(previewReadLimit) }
         var slice = data
@@ -320,9 +323,29 @@ enum PhoneHermesDirectory {
     }
 
     private static let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "webp", "heic", "heif"]
-    /// 预览结果整包上限是 20 万字符。base64 留出信封和路径的余量。
+    /// 预览结果整包上限约 150 万字符。图片 base64 仍按紧凑预算；PDF 可用更大额度。
     private static let imageBase64Budget = 150_000
+    private static let pdfBase64Budget = 1_400_000
     private static let imageByteLimit: Int64 = 20 * 1024 * 1024
+    private static let pdfByteLimit: Int64 = 20 * 1024 * 1024
+
+    /// 魔数为 %PDF 且编码后不超过预览通道上限时整份返回；过大明确失败，不截断半份。
+    private static func pdfPreview(file: String, root: String, data: Data) -> PhoneHermesAppReply {
+        guard data.starts(with: Data("%PDF".utf8)) else { return .failure("这个文件不能预览") }
+        if data.count > pdfByteLimit { return .failure("这个文件不能预览") }
+        let encoded = data.base64EncodedString()
+        if encoded.count > pdfBase64Budget { return .failure("这个 PDF 太大，没法预览") }
+        let name = (file as NSString).lastPathComponent
+        let shown = String(file.dropFirst(root.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        return .success("", body: [
+            "name": name,
+            "path": shown,
+            "format": "pdf",
+            "content": encoded,
+            "next": 0,
+            "truncated": false
+        ])
+    }
 
     private enum ImagePreview {
         case notImage
