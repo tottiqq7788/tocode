@@ -183,6 +183,10 @@ extension KeyboardShortcutMappingTarget: Codable {
 enum KeyboardMappingAction: String, Codable, CaseIterable, Equatable, Hashable {
     case switchDesktopLeft
     case switchDesktopRight
+    case missionControl
+    case appExpose
+    case showDesktop
+    case launchpad
     case openFinderAtRoot
     case copyFinderSelectedPath
     case initRootFromFinder
@@ -194,6 +198,9 @@ enum KeyboardMappingAction: String, Codable, CaseIterable, Equatable, Hashable {
     case toggleCodexSync
     case openWeChatLocation
     case blackout
+    case dismissBlackout
+    case toggleDockAutohideRestrict
+    case lockScreen
     case toggleVerticalWheel
     case toggleHorizontalWheel
     case toggleDoubleCommandQ
@@ -206,6 +213,14 @@ enum KeyboardMappingAction: String, Codable, CaseIterable, Equatable, Hashable {
             return "向左切换桌面"
         case .switchDesktopRight:
             return "向右切换桌面"
+        case .missionControl:
+            return "调度中心"
+        case .appExpose:
+            return "应用程序窗口"
+        case .showDesktop:
+            return "显示桌面"
+        case .launchpad:
+            return "Launchpad"
         case .openFinderAtRoot:
             return "访问路径"
         case .copyFinderSelectedPath:
@@ -228,6 +243,12 @@ enum KeyboardMappingAction: String, Codable, CaseIterable, Equatable, Hashable {
             return "文件位置"
         case .blackout:
             return "临时黑屏"
+        case .dismissBlackout:
+            return "取消黑屏"
+        case .toggleDockAutohideRestrict:
+            return DockAutohideRestrictStore.menuTitle
+        case .lockScreen:
+            return "锁定屏幕"
         case .toggleVerticalWheel:
             return MouseWheelReverseStore.verticalTitle
         case .toggleHorizontalWheel:
@@ -247,6 +268,14 @@ enum KeyboardMappingAction: String, Codable, CaseIterable, Equatable, Hashable {
             return "arrow.left.square"
         case .switchDesktopRight:
             return "arrow.right.square"
+        case .missionControl:
+            return "square.grid.3x3"
+        case .appExpose:
+            return "rectangle.on.rectangle"
+        case .showDesktop:
+            return "menubar.dock.rectangle"
+        case .launchpad:
+            return "circle.grid.3x3"
         case .openFinderAtRoot:
             return "macwindow"
         case .copyFinderSelectedPath:
@@ -269,6 +298,12 @@ enum KeyboardMappingAction: String, Codable, CaseIterable, Equatable, Hashable {
             return "folder"
         case .blackout:
             return "display.trianglebadge.exclamationmark"
+        case .dismissBlackout:
+            return "sun.max"
+        case .toggleDockAutohideRestrict:
+            return "dock.rectangle"
+        case .lockScreen:
+            return "lock.fill"
         case .toggleVerticalWheel:
             return "arrow.up.arrow.down"
         case .toggleHorizontalWheel:
@@ -284,7 +319,7 @@ enum KeyboardMappingAction: String, Codable, CaseIterable, Equatable, Hashable {
 
     var group: KeyboardMappingActionGroup {
         switch self {
-        case .switchDesktopLeft, .switchDesktopRight:
+        case .switchDesktopLeft, .switchDesktopRight, .missionControl, .appExpose, .showDesktop, .launchpad:
             return .system
         case .openFinderAtRoot, .toggleHidden, .toggleFinderMove, .toggleFinderCommandQ:
             return .finder
@@ -294,7 +329,7 @@ enum KeyboardMappingAction: String, Codable, CaseIterable, Equatable, Hashable {
             return .wechat
         case .toggleVerticalWheel, .toggleHorizontalWheel, .toggleDoubleCommandQ:
             return .input
-        case .blackout:
+        case .blackout, .dismissBlackout, .toggleDockAutohideRestrict, .lockScreen:
             return .tools
         case .toggleLaunchAtLogin:
             return .settings
@@ -303,14 +338,21 @@ enum KeyboardMappingAction: String, Codable, CaseIterable, Equatable, Hashable {
         }
     }
 
-    /// 系统「调度中心 → 向左/向右移动一个空间」的默认触发键。
-    /// 物理方向键始终带 SecondaryFn；只设 Control 时系统不会把它当成空间切换热键。
+    /// 系统「调度中心」相关默认触发键。物理方向键始终带 SecondaryFn。
     var synthesizedShortcut: RecordedShortcut? {
         switch self {
         case .switchDesktopLeft:
             return RecordedShortcut(keyCode: 123, modifiers: [.control, .function], keyLabel: "\u{2190}")
         case .switchDesktopRight:
             return RecordedShortcut(keyCode: 124, modifiers: [.control, .function], keyLabel: "\u{2192}")
+        case .missionControl:
+            return RecordedShortcut(keyCode: 126, modifiers: [.control, .function], keyLabel: "\u{2191}")
+        case .appExpose:
+            return RecordedShortcut(keyCode: 125, modifiers: [.control, .function], keyLabel: "\u{2193}")
+        case .showDesktop:
+            return RecordedShortcut(keyCode: 103, modifiers: [.function], keyLabel: "F11")
+        case .launchpad:
+            return RecordedShortcut(keyCode: 118, modifiers: [.function], keyLabel: "F4")
         default:
             return nil
         }
@@ -352,7 +394,8 @@ enum KeyboardMappingAction: String, Codable, CaseIterable, Equatable, Hashable {
             return .quit
         case .copyFinderSelectedPath:
             return .finder(.copy)
-        case .switchDesktopLeft, .switchDesktopRight, .openFinderAtRoot:
+        case .switchDesktopLeft, .switchDesktopRight, .missionControl, .appExpose, .showDesktop, .launchpad,
+            .openFinderAtRoot, .dismissBlackout, .toggleDockAutohideRestrict, .lockScreen:
             return nil
         }
     }
@@ -370,7 +413,7 @@ enum KeyboardMappingAction: String, Codable, CaseIterable, Equatable, Hashable {
         switch self {
         case .toggleHidden, .toggleFinderMove, .toggleFinderCommandQ, .toggleCodexSync,
             .initRootFromFinder, .toggleVerticalWheel, .toggleHorizontalWheel, .toggleDoubleCommandQ,
-            .toggleLaunchAtLogin:
+            .toggleLaunchAtLogin, .toggleDockAutohideRestrict:
             return true
         default:
             return false

@@ -4228,7 +4228,7 @@ func testDirectoryRootResolverPriority() {
     expect(!hermesFollow.followEnabled, "hermes跟随缺省关闭")
     hermesFollow.followEnabled = true
     expect(hermesDefaults.bool(forKey: HermesFollowSettingsStore.followEnabledKey), "hermes跟随写入偏好")
-    expect(KeyboardMappingAction.allCases.count == 18, "终端跟随不进入映射功能表")
+    expect(KeyboardMappingAction.allCases.count == 25, "终端跟随不进入映射功能表")
     expect(KeyboardMappingAction.initRootFromFinder.title == "访达跟随", "映射文案为访达跟随")
     expect(KeyboardMappingAction.toggleCodexSync.title == "codex跟随", "映射文案为 codex跟随")
     expect(KeyboardMappingActionGroup.directory.title == "配置", "映射分组名为配置")
@@ -4245,15 +4245,28 @@ func testKeyboardShortcutMappingActionTargets() {
 
     let left = KeyboardMappingAction.switchDesktopLeft
     let right = KeyboardMappingAction.switchDesktopRight
-    expect(KeyboardMappingAction.allCases.count == 18, "本期提供桌面切换与 Tocode 一次性动作/开关")
+    expect(KeyboardMappingAction.allCases.count == 25, "本期提供桌面切换与 Tocode 一次性动作/开关")
     expect(
         KeyboardMappingAction.allCases.contains(.blackout)
             && KeyboardMappingAction.allCases.contains(.quit)
+            && KeyboardMappingAction.allCases.contains(.missionControl)
+            && KeyboardMappingAction.allCases.contains(.dismissBlackout)
+            && KeyboardMappingAction.allCases.contains(.lockScreen)
             && !KeyboardMappingAction.allCases.contains { $0.rawValue.contains("model") },
-        "收录临时黑屏与退出，不收录模型切换"
+        "收录调度中心、取消黑屏、锁定屏幕与退出，不收录模型切换"
     )
     expect(left.title == "向左切换桌面", "向左功能提供中文名称")
     expect(right.title == "向右切换桌面", "向右功能提供中文名称")
+    expect(KeyboardMappingAction.missionControl.title == "调度中心", "调度中心文案")
+    expect(KeyboardMappingAction.appExpose.title == "应用程序窗口", "应用程序窗口文案")
+    expect(KeyboardMappingAction.showDesktop.title == "显示桌面", "显示桌面文案")
+    expect(KeyboardMappingAction.launchpad.title == "Launchpad", "Launchpad 文案")
+    expect(KeyboardMappingAction.dismissBlackout.title == "取消黑屏", "取消黑屏文案")
+    expect(KeyboardMappingAction.lockScreen.title == "锁定屏幕", "锁定屏幕文案")
+    expect(KeyboardMappingAction.missionControl.group == .system, "调度中心归系统组")
+    expect(KeyboardMappingAction.dismissBlackout.group == .tools, "取消黑屏归工具组")
+    expect(KeyboardMappingAction.toggleDockAutohideRestrict.group == .tools, "限制程序坞弹出归工具组")
+    expect(KeyboardMappingAction.lockScreen.group == .tools, "锁定屏幕归工具组")
     expect(
         left.synthesizedShortcut == RecordedShortcut(keyCode: 123, modifiers: [.control, .function], keyLabel: "\u{2190}"),
         "向左切换桌面解析为系统 ⌃←（含方向键自带的 Fn）"
@@ -4262,12 +4275,36 @@ func testKeyboardShortcutMappingActionTargets() {
         right.synthesizedShortcut == RecordedShortcut(keyCode: 124, modifiers: [.control, .function], keyLabel: "\u{2192}"),
         "向右切换桌面解析为系统 ⌃→（含方向键自带的 Fn）"
     )
+    expect(
+        KeyboardMappingAction.missionControl.synthesizedShortcut
+            == RecordedShortcut(keyCode: 126, modifiers: [.control, .function], keyLabel: "\u{2191}"),
+        "调度中心解析为 ⌃↑"
+    )
+    expect(
+        KeyboardMappingAction.appExpose.synthesizedShortcut
+            == RecordedShortcut(keyCode: 125, modifiers: [.control, .function], keyLabel: "\u{2193}"),
+        "应用程序窗口解析为 ⌃↓"
+    )
+    expect(
+        KeyboardMappingAction.showDesktop.synthesizedShortcut
+            == RecordedShortcut(keyCode: 103, modifiers: [.function], keyLabel: "F11"),
+        "显示桌面解析为 F11"
+    )
+    expect(
+        KeyboardMappingAction.launchpad.synthesizedShortcut
+            == RecordedShortcut(keyCode: 118, modifiers: [.function], keyLabel: "F4"),
+        "Launchpad 解析为 F4"
+    )
     expect(KeyboardMappingAction.blackout.synthesizedShortcut == nil, "临时黑屏不走组合键合成")
+    expect(KeyboardMappingAction.dismissBlackout.synthesizedShortcut == nil, "取消黑屏不走组合键合成")
+    expect(KeyboardMappingAction.lockScreen.synthesizedShortcut == nil, "锁定屏幕不走组合键合成")
     expect(KeyboardMappingAction.blackout.command == .blackout, "临时黑屏复用命令执行器")
     expect(KeyboardMappingAction.readClipboardRoot.command == .root(.clipboard), "读取剪贴板复用 root clipboard")
     expect(KeyboardMappingAction.copyFinderSelectedPath.command == .finder(.copy), "复制访达选中路径复用 finder copy")
     expect(KeyboardMappingAction.openFinderAtRoot.command == nil, "访问路径保持菜单展示根，不映射 CLI root open")
     expect(KeyboardMappingAction.switchDesktopLeft.command == nil, "切桌面不进 CLI")
+    expect(KeyboardMappingAction.dismissBlackout.command == nil, "取消黑屏走覆盖层")
+    expect(KeyboardMappingAction.lockScreen.command == nil, "锁定屏幕走 ScreenLock")
     expect(
         KeyboardShortcutMappingTarget.action(right).resolvedShortcut == right.synthesizedShortcut,
         "桌面功能目标解析为固定组合键"
@@ -4520,7 +4557,7 @@ func testMappedOpenURL() {
     expect(MappedURL.normalized("example.com") == nil, "没有协议不能保存")
     expect(MappedURL.normalized("   ") == nil, "纯空白不能保存")
     expect(MappedURL.normalized("") == nil, "空文本不能保存")
-    expect(KeyboardMappingAction.allCases.count == 18, "打开网址不进入无参数功能表")
+    expect(KeyboardMappingAction.allCases.count == 25, "打开网址不进入无参数功能表")
 
     let raw = "https://example.com"
     let target = KeyboardShortcutMappingTarget.openURL(raw)
@@ -4588,6 +4625,9 @@ func testKeyboardMappingActionDispatchAndYield() {
     var copyPathCalls = 0
     var readClipboardCalls = 0
     var blackoutCalls = 0
+    var dismissBlackoutCalls = 0
+    var dockToggleCalls = 0
+    var lockScreenCalls = 0
     dispatcher.execute = { command in
         executed.append(command)
         if command == .hidden(.toggle) {
@@ -4608,12 +4648,32 @@ func testKeyboardMappingActionDispatchAndYield() {
     dispatcher.copyFinderSelectedPath = { copyPathCalls += 1 }
     dispatcher.readClipboardRoot = { readClipboardCalls += 1 }
     dispatcher.activateBlackout = { blackoutCalls += 1 }
+    dispatcher.dismissBlackout = { dismissBlackoutCalls += 1 }
+    dispatcher.toggleDockAutohideRestrict = {
+        dockToggleCalls += 1
+        return "已开启"
+    }
+    dispatcher.lockScreen = {
+        lockScreenCalls += 1
+        return true
+    }
 
     dispatcher.perform(.blackout)
     expect(blackoutCalls == 1, "临时黑屏直接激活覆盖层")
     expect(executed.isEmpty, "临时黑屏不绕行命令执行器")
     expect(notices.isEmpty, "临时黑屏成功不额外通知")
 
+    dispatcher.perform(.dismissBlackout)
+    expect(dismissBlackoutCalls == 1, "取消黑屏直接解除覆盖层")
+    dispatcher.perform(.toggleDockAutohideRestrict)
+    expect(dockToggleCalls == 1, "限制程序坞弹出走既有服务")
+    expect(notices.contains { $0.0 == KeyboardMappingAction.toggleDockAutohideRestrict.title && $0.1 == "已开启" }, "限制程序坞弹出发短通知")
+    dispatcher.perform(.lockScreen)
+    expect(lockScreenCalls == 1, "锁定屏幕走 ScreenLock")
+    expect(notices.contains { $0.0 == "锁定屏幕" && $0.1 == "已锁定屏幕" }, "锁定屏幕成功发短通知")
+
+    executed.removeAll()
+    notices.removeAll()
     dispatcher.perform(.toggleHidden)
     expect(executed == [.hidden(.toggle)], "开关只调用一次 toggle")
     expect(notices.count == 1 && notices[0].0 == "显示/隐藏隐藏文件" && notices[0].1 == "已切换为 开", "开关成功发短通知")
@@ -7610,6 +7670,7 @@ final class ScriptedRemoteTransport: RemoteControlTransporting {
     func deleteLink(relay: URL, token: String, linkID: String) async throws {}
     func connect(relay: URL, token: String) async throws {}
     func send(_ object: [String: Any]) async throws { sent.append(object) }
+    func sendBytes(_ data: Data) async throws { sent.append(["op": "binary", "size": data.count]) }
     func disconnect() {}
 }
 
@@ -7646,6 +7707,7 @@ final class RedeemingRemoteTransport: RemoteControlTransporting {
     func deleteLink(relay: URL, token: String, linkID: String) async throws {}
     func connect(relay: URL, token: String) async throws {}
     func send(_ object: [String: Any]) async throws {}
+    func sendBytes(_ data: Data) async throws {}
     func disconnect() {}
 }
 
@@ -8266,6 +8328,22 @@ func testPhoneHermesChatGate() async {
     expect(nested.ok && nestedNames == ["nested.txt"], "点进文件夹只列那一层")
     expect(!PhoneHermesDirectory.list(root: wide.path, includeHidden: false, relative: "../").ok, "目录拒绝点段")
     expect(!PhoneHermesDirectory.list(root: wide.path, includeHidden: false, relative: "f00.txt").ok, "文件不能当作文件夹列")
+    switch PhoneHermesDirectory.packDownload(root: wide.path, relatives: ["../secret"]) {
+    case .failure(let text):
+        expect(text == "有文件不在项目里", "下载拒绝点段路径")
+    case .success:
+        expect(false, "下载拒绝点段路径")
+    }
+    switch PhoneHermesDirectory.packDownload(root: wide.path, relatives: ["f00.txt"]) {
+    case .success(let name, let mode, let data):
+        expect(mode == "file", "单文件下载原样传输")
+        expect(name == "f00.txt", "单文件下载保留文件名")
+        expect(!data.isEmpty, "单文件下载有正文")
+    case .failure(let text):
+        expect(false, "单文件下载应成功，实际：\(text)")
+    }
+    expect(PhoneHermesApp.downloadRelatives(from: #"["a.md","dir"]"#) == ["a.md", "dir"], "下载列表解析 JSON 数组")
+    expect(PhoneHermesApp.downloadRelatives(from: "not-json") == nil, "下载列表拒绝非 JSON")
 
     let database = root.appendingPathComponent("projects.db").path
     let directoryExists: (String) -> Bool = { path in

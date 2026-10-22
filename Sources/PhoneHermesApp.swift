@@ -157,6 +157,11 @@ enum PhoneHermesEnvironment {
     }
 }
 
+enum PhoneDownloadPack: Equatable {
+    case success(name: String, mode: String, data: Data)
+    case failure(String)
+}
+
 enum PhoneHermesDirectory {
     static let pageSize = 80
 
@@ -213,6 +218,77 @@ enum PhoneHermesDirectory {
             "truncated": end < rows.count,
             "root": rootReal
         ])
+    }
+
+    /// 打包选中的项目内相对路径。单文件原样；含文件夹或多文件时打成临时 zip（仅传输）。
+    static func packDownload(
+        root: String,
+        relatives: [String],
+        byteLimit: Int = PhoneProjectAttachments.byteLimit,
+        fileManager: FileManager = .default
+    ) -> PhoneDownloadPack {
+        let cleaned = relatives
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !cleaned.isEmpty else { return .failure("请选择要下载的文件") }
+        guard cleaned.count <= 200 else { return .failure("一次选得太多了") }
+        let rootReal = canonical(root)
+        var resolved: [(relative: String, path: String, isDir: Bool)] = []
+        for relative in cleaned {
+            guard let path = fileInside(root: rootReal, relative: relative) else {
+                return .failure("有文件不在项目里")
+            }
+            var isDir: ObjCBool = false
+            guard fileManager.fileExists(atPath: path, isDirectory: &isDir) else {
+                return .failure("文件不存在")
+            }
+            resolved.append((relative, path, isDir.boolValue))
+        }
+        if resolved.count == 1, !resolved[0].isDir {
+            guard let data = fileManager.contents(atPath: resolved[0].path) else {
+                return .failure("读不出这个文件")
+            }
+            guard !data.isEmpty else { return .failure("空文件不能下载") }
+            guard data.count <= byteLimit else { return .failure("超过 20MB，没法下载") }
+            return .success(
+                name: (resolved[0].path as NSString).lastPathComponent,
+                mode: "file",
+                data: data
+            )
+        }
+        let staging = fileManager.temporaryDirectory
+            .appendingPathComponent("tocode-dl-\(UUID().uuidString)", isDirectory: true)
+        let zipURL = fileManager.temporaryDirectory
+            .appendingPathComponent("tocode-dl-\(UUID().uuidString).zip")
+        defer {
+            try? fileManager.removeItem(at: staging)
+            try? fileManager.removeItem(at: zipURL)
+        }
+        do {
+            try fileManager.createDirectory(at: staging, withIntermediateDirectories: true)
+            for item in resolved {
+                let destination = staging.appendingPathComponent(item.relative)
+                try fileManager.createDirectory(
+                    at: destination.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+                try fileManager.copyItem(atPath: item.path, toPath: destination.path)
+            }
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
+            process.currentDirectoryURL = staging
+            process.arguments = ["-r", "-q", zipURL.path, "."]
+            try process.run()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else { return .failure("打包失败") }
+            guard let data = fileManager.contents(atPath: zipURL.path), !data.isEmpty else {
+                return .failure("打包失败")
+            }
+            guard data.count <= byteLimit else { return .failure("超过 20MB，没法下载") }
+            return .success(name: "tocode-download.zip", mode: "zip", data: data)
+        } catch {
+            return .failure("打包失败")
+        }
     }
 
     static let previewPageCharacters = 12_000
@@ -982,7 +1058,23 @@ enum PhoneHermesApp {
         return project
     }
 
-    private static func ownedProject(_ projectID: String, profile: String, database: (String) -> String) -> HermesProfileProjects.Project? {
+    static func downloadRelatives(from text: String) -> [String]? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let data = trimmed.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [Any] else {
+            return nil
+        }
+        var paths: [String] = []
+        paths.reserveCapacity(json.count)
+        for item in json {
+            guard let path = item as? String else { return nil }
+            paths.append(path)
+        }
+        return paths
+    }
+
+    static func ownedProject(_ projectID: String, profile: String, database: (String) -> String) -> HermesProfileProjects.Project? {
         guard HermesProfileProjects.isProjectID(projectID) else { return nil }
         return HermesProfileProjects.project(databasePath: database(profile), id: projectID)
     }

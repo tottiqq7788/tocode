@@ -157,6 +157,16 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         actionDispatcher.activateBlackout = { [weak self] in
             self?.screenBlackout.activate()
         }
+        actionDispatcher.dismissBlackout = { [weak self] in
+            self?.screenBlackout.dismiss()
+        }
+        actionDispatcher.toggleDockAutohideRestrict = { [weak self] in
+            guard let self else { return "不可用" }
+            let next = !self.dockAutohideRestrict.isEffective
+            _ = self.dockAutohideRestrict.setEnabled(next)
+            return self.dockAutohideRestrict.isEffective ? "已开启" : "已关闭"
+        }
+        actionDispatcher.lockScreen = { ScreenLock.lock() }
         macTimers.onChange = { [weak self] in
             MainActor.assumeIsolated {
                 self?.refreshLiveTimerMenuItems()

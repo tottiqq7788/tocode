@@ -7,6 +7,7 @@ protocol RemoteControlTransporting: AnyObject {
     func deleteLink(relay: URL, token: String, linkID: String) async throws
     func connect(relay: URL, token: String) async throws
     func send(_ object: [String: Any]) async throws
+    func sendBytes(_ data: Data) async throws
     func disconnect()
     var onMessage: (([String: Any]) -> Void)? { get set }
     var onBinary: ((Data) -> Void)? { get set }
@@ -85,6 +86,10 @@ final class RemoteControlHTTPClient: RemoteControlTransporting {
         let data = try JSONSerialization.data(withJSONObject: object)
         guard let text = String(data: data, encoding: .utf8) else { throw URLError(.cannotDecodeContentData) }
         try await current()?.send(.string(text))
+    }
+
+    func sendBytes(_ data: Data) async throws {
+        try await current()?.send(.data(data))
     }
 
     func disconnect() {

@@ -28,7 +28,7 @@ protocol KeyboardShortcutRemapControlling: AnyObject {
     func deleteMapping(id: UUID)
 }
 
-/// 把 Tocode 动作交给既有命令执行器或菜单方法；桌面切换不经过这里。
+/// 把 Tocode 动作交给既有命令执行器或菜单方法；带合成快捷键的系统项不经过这里。
 final class KeyboardMappingActionDispatcher {
     var execute: (TocodeCommand) -> TocodeCommandResult = { _ in
         .failure(.operationFailed("命令执行器不可用"))
@@ -38,10 +38,29 @@ final class KeyboardMappingActionDispatcher {
     var copyFinderSelectedPath: () -> Void = {}
     var readClipboardRoot: () -> Void = {}
     var activateBlackout: () -> Void = {}
+    var dismissBlackout: () -> Void = {}
+    var toggleDockAutohideRestrict: () -> String = { DockAutohideRestrictStore.menuTitle }
+    var lockScreen: () -> Bool = { ScreenLock.lock() }
 
     func perform(_ action: KeyboardMappingAction) {
         if action == .blackout {
             activateBlackout()
+            return
+        }
+        if action == .dismissBlackout {
+            dismissBlackout()
+            return
+        }
+        if action == .toggleDockAutohideRestrict {
+            notify(action.title, toggleDockAutohideRestrict())
+            return
+        }
+        if action == .lockScreen {
+            if lockScreen() {
+                notify(action.title, "已锁定屏幕")
+            } else {
+                notify(action.title, "无法锁定屏幕")
+            }
             return
         }
         if let command = action.command {

@@ -270,6 +270,18 @@ final class RemoteControlService {
             let path = message["path"] as? String ?? ""
             let offset = (message["offset"] as? NSNumber)?.intValue ?? 0
             let cursor = message["cursor"] as? String ?? ""
+            if kind == "download" {
+                Task {
+                    await replyDownload(
+                        linkID: linkID,
+                        requestID: requestID,
+                        profile: profile,
+                        projectID: projectID,
+                        text: text
+                    )
+                }
+                return
+            }
             let includeHidden = showHiddenFiles()
             let runtime = phoneHermes
             let profiles = phoneHermesProfiles
@@ -522,6 +534,71 @@ final class RemoteControlService {
 
     private func dropHeldFile(linkID: String, hold: String) -> Bool {
         PhoneHermesApp.dropHeldAttachment(linkID: linkID, hold: hold)
+    }
+
+    private func replyDownload(linkID: String, requestID: String, profile: String, projectID: String, text: String) async {
+        func fail(_ message: String) async {
+            try? await transport.send([
+                "op": "app_result",
+                "link_id": linkID,
+                "request_id": requestID,
+                "kind": "download",
+                "ok": false,
+                "text": message,
+            ])
+        }
+        let snapshot = await phoneHermes.snapshot()
+        guard snapshot.installed else {
+            await fail(PhoneHermesApp.missingHermes)
+            return
+        }
+        guard let relatives = PhoneHermesApp.downloadRelatives(from: text) else {
+            await fail("下载列表无效")
+            return
+        }
+        let names = HermesProfileCatalog.names()
+        let active = HermesProfileCatalog.accepted(
+            profile.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? phoneHermesProfiles.resolved(among: names)
+                : profile,
+            among: names
+        )
+        guard let project = PhoneHermesApp.ownedProject(
+            projectID,
+            profile: active,
+            database: { HermesProfileProjects.databasePath(home: NSHomeDirectory(), profile: $0) }
+        ) else {
+            await fail(PhoneHermesApp.needProject)
+            return
+        }
+        switch PhoneHermesDirectory.packDownload(root: project.rootPath, relatives: relatives) {
+        case .failure(let message):
+            await fail(message)
+        case .success(let name, let mode, let data):
+            do {
+                try await transport.send([
+                    "op": "file_reply",
+                    "link_id": linkID,
+                    "message_id": requestID,
+                    "name": name,
+                    "size": data.count,
+                    "kind": "file",
+                    "text": mode,
+                ])
+                try await transport.sendBytes(data)
+                try await transport.send([
+                    "op": "app_result",
+                    "link_id": linkID,
+                    "request_id": requestID,
+                    "kind": "download",
+                    "ok": true,
+                    "text": "",
+                    "body": ["mode": mode, "name": name],
+                ])
+            } catch {
+                await fail("发送失败")
+            }
+        }
     }
 
     private func replyProjectFile(
