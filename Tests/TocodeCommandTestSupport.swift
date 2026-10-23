@@ -225,6 +225,51 @@ final class MockBookmarkSync: BookmarkSyncCommanding {
         }
         return .success(ledger)
     }
+
+    var backupPack = BookmarkBackupPack.empty
+
+    func backupStatusPayload() -> [String: Any] {
+        let sorted = backupPack.slots.sorted { $0.day < $1.day }
+        return [
+            "slotCount": sorted.count,
+            "maxSlots": BookmarkBackupPack.maxSlots,
+            "days": sorted.map(\.day)
+        ]
+    }
+
+    func backupListPayload() -> [[String: Any]] {
+        backupPack.slots.sorted { $0.day < $1.day }.map { slot in
+            [
+                "day": slot.day,
+                "takenAt": slot.takenAt,
+                "entries": slot.ledger.entries.count,
+                "tombstones": slot.ledger.tombstones.count,
+                "folders": slot.ledger.folders.count
+            ]
+        }
+    }
+
+    func backupNowForCLI() async -> Result<BookmarkBackupPack, Error> {
+        let today = BookmarkBackupPackLogic.dayString()
+        backupPack = BookmarkBackupPackLogic.upsert(
+            pack: backupPack,
+            day: today,
+            ledger: ledger,
+            takenAt: Date().timeIntervalSince1970,
+            today: today
+        )
+        return .success(backupPack)
+    }
+
+    func restoreBackupForCLI(day: String?) async -> Result<BookmarkLedgerSnapshot, Error> {
+        guard let slot = BookmarkBackupPackLogic.slot(in: backupPack, day: day) else {
+            return .failure(TocodeCommandError.operationFailed("找不到备份槽：\(day ?? "最近一日")"))
+        }
+        var restored = slot.ledger
+        restored.remoteRevision = ledger.remoteRevision
+        ledger = restored
+        return .success(ledger)
+    }
 }
 
 final class MockBookmarkKeyStore: BookmarkSyncKeyStoring {

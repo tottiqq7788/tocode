@@ -77,6 +77,10 @@ protocol BookmarkSyncCommanding: AnyObject {
     func updateCLI(url: String, title: String?, folder: BookmarkFolderPath?, siblingIndex: Int?, newURL: String?) throws -> BookmarkEntry
     func deleteCLI(url: String) throws
     func pullRemoteForCLI() async -> Result<BookmarkLedgerSnapshot, Error>
+    func backupStatusPayload() -> [String: Any]
+    func backupListPayload() -> [[String: Any]]
+    func backupNowForCLI() async -> Result<BookmarkBackupPack, Error>
+    func restoreBackupForCLI(day: String?) async -> Result<BookmarkLedgerSnapshot, Error>
 }
 
 @MainActor

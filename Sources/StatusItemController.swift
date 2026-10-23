@@ -696,6 +696,37 @@ final class StatusItemController: NSObject {
         ShortcutMenuAppearance.apply(to: remoteSyncItem, enabled: bookmarkSync.isRemoteEnabled)
         remoteSyncItem.image = NSImage(systemSymbolName: "icloud", accessibilityDescription: nil)
 
+        let backupItem = bookmarkMenu.addItem(withTitle: "备份", action: nil, keyEquivalent: "")
+        backupItem.image = NSImage(systemSymbolName: "externaldrive", accessibilityDescription: nil)
+        let backupMenu = NSMenu()
+        backupMenu.autoenablesItems = false
+        let backupList = bookmarkSync.backupListPayload()
+        if backupList.isEmpty {
+            let emptyItem = backupMenu.addItem(withTitle: "暂无日备", action: nil, keyEquivalent: "")
+            emptyItem.isEnabled = false
+        } else {
+            for slot in backupList.reversed() {
+                let day = slot["day"] as? String ?? "?"
+                let entries = slot["entries"] as? Int ?? 0
+                let item = backupMenu.addItem(
+                    withTitle: "还原 \(day)（\(entries) 条）",
+                    action: #selector(restoreBookmarkBackup(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = day
+            }
+        }
+        backupMenu.addItem(NSMenuItem.separator())
+        let backupNowItem = backupMenu.addItem(
+            withTitle: "立即备份",
+            action: #selector(runBookmarkBackupNow),
+            keyEquivalent: ""
+        )
+        backupNowItem.target = self
+        backupNowItem.image = NSImage(systemSymbolName: "arrow.down.doc", accessibilityDescription: nil)
+        backupItem.submenu = backupMenu
+
         let installItem = bookmarkMenu.addItem(withTitle: "拓展安装", action: nil, keyEquivalent: "")
         installItem.image = NSImage(systemSymbolName: "puzzlepiece.extension", accessibilityDescription: nil)
         let installMenu = NSMenu()
@@ -1460,6 +1491,54 @@ final class StatusItemController: NSObject {
 
     @objc private func openBookmarkSyncLog() {
         BookmarkSyncLogWindow.present(log: bookmarkSync.activityLog)
+    }
+
+    @objc private func runBookmarkBackupNow() {
+        Task { @MainActor in
+            switch await bookmarkSync.backupNowForCLI() {
+            case .success(let pack):
+                let alert = NSAlert()
+                alert.messageText = "日备完成"
+                alert.informativeText = "已写入 \(pack.slots.count) 个槽位（最多 \(BookmarkBackupPack.maxSlots) 日）。"
+                alert.addButton(withTitle: "好")
+                alert.runModal()
+            case .failure(let error):
+                let alert = NSAlert()
+                alert.alertStyle = .warning
+                alert.messageText = "日备失败"
+                alert.informativeText = error.localizedDescription
+                alert.addButton(withTitle: "好")
+                alert.runModal()
+            }
+        }
+    }
+
+    @objc private func restoreBookmarkBackup(_ sender: NSMenuItem) {
+        guard let day = sender.representedObject as? String else { return }
+        let confirm = NSAlert()
+        confirm.alertStyle = .warning
+        confirm.messageText = "从 \(day) 还原书签？"
+        confirm.informativeText = "将用该日备份整本覆盖正式账本，并写回已连接浏览器。此操作不可撤销；还原前建议先「立即备份」。"
+        confirm.addButton(withTitle: "还原")
+        confirm.addButton(withTitle: "取消")
+        guard confirm.runModal() == .alertFirstButtonReturn else { return }
+        Task { @MainActor in
+            switch await bookmarkSync.restoreBackupForCLI(day: day) {
+            case .success(let snapshot):
+                let alert = NSAlert()
+                alert.messageText = "已还原"
+                alert.informativeText = "正式账本现为 \(snapshot.entries.count) 条（来自 \(day)）。"
+                alert.addButton(withTitle: "好")
+                alert.runModal()
+            case .failure(let error):
+                let alert = NSAlert()
+                alert.alertStyle = .warning
+                alert.messageText = "还原失败"
+                alert.informativeText = error.localizedDescription
+                alert.addButton(withTitle: "好")
+                alert.runModal()
+            }
+        }
     }
 
     @objc private func installBookmarkExtension(_ sender: NSMenuItem) {

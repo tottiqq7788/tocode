@@ -3,12 +3,15 @@ import Foundation
 @MainActor
 final class BookmarkSyncService {
     private let ledgerStore: BookmarkLedgerStore
+    private let backupStore: BookmarkBackupStore
     private let keyStore: BookmarkSyncKeyStoring
     private var settings: BookmarkSyncSettingsStore
     private let relayBaseURL: URL
     private let session: URLSession
     private var ledger: BookmarkLedgerSnapshot
     private var pushWork: Task<Void, Never>?
+    private var backupWork: Task<Void, Never>?
+    private var dailyBackupTimer: Timer?
     private var connectedBrowsers: Set<String> = []
     let activityLog: BookmarkSyncActivityLog
 
@@ -21,6 +24,7 @@ final class BookmarkSyncService {
 
     init(
         ledgerStore: BookmarkLedgerStore = .live,
+        backupStore: BookmarkBackupStore = .live,
         keyStore: BookmarkSyncKeyStoring = KeychainBookmarkSyncKeyStore(),
         settings: BookmarkSyncSettingsStore = BookmarkSyncSettingsStore(),
         relayBaseURL: URL = URL(string: "https://totti.xin")!,
@@ -28,6 +32,7 @@ final class BookmarkSyncService {
         activityLog: BookmarkSyncActivityLog = BookmarkSyncActivityLog()
     ) {
         self.ledgerStore = ledgerStore
+        self.backupStore = backupStore
         self.keyStore = keyStore
         self.settings = settings
         self.relayBaseURL = relayBaseURL
@@ -35,6 +40,10 @@ final class BookmarkSyncService {
         self.activityLog = activityLog
         self.ledger = ledgerStore.load()
         activityLog.append("书签同步服务已启动，账本 \(ledger.entries.count) 条，墓碑 \(ledger.tombstones.count) 条。")
+    }
+
+    deinit {
+        dailyBackupTimer?.invalidate()
     }
 
     var snapshot: BookmarkLedgerSnapshot { ledger }
@@ -403,6 +412,272 @@ final class BookmarkSyncService {
             guard !Task.isCancelled else { return }
             await self?.syncRemoteNow()
         }
+    }
+
+    // MARK: - 七日备份
+
+    func scheduleDailyBackupMonitoring() {
+        ensureDailyBackupIfNeeded()
+        dailyBackupTimer?.invalidate()
+        let timer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.ensureDailyBackupIfNeeded()
+            }
+        }
+        timer.tolerance = 120
+        RunLoop.main.add(timer, forMode: .common)
+        dailyBackupTimer = timer
+    }
+
+    func ensureDailyBackupIfNeeded() {
+        let today = BookmarkBackupPackLogic.dayString()
+        if settings.lastBackupDay == today {
+            return
+        }
+        backupWork?.cancel()
+        backupWork = Task { [weak self] in
+            _ = try? await self?.runDailyBackup(force: false)
+        }
+    }
+
+    func backupStatusPayload() -> [String: Any] {
+        let pack = backupStore.load()
+        let sorted = pack.slots.sorted { $0.day < $1.day }
+        var payload: [String: Any] = [
+            "slotCount": sorted.count,
+            "maxSlots": BookmarkBackupPack.maxSlots,
+            "days": sorted.map(\.day),
+            "today": BookmarkBackupPackLogic.dayString(),
+            "remoteEnabled": isRemoteEnabled,
+            "hasRemoteKey": hasRemoteKey,
+            "packRemoteRevision": pack.remoteRevision
+        ]
+        if let last = settings.lastBackupDay {
+            payload["lastBackupDay"] = last
+        }
+        return payload
+    }
+
+    func backupListPayload() -> [[String: Any]] {
+        backupStore.load().slots.sorted { $0.day < $1.day }.map { slot in
+            [
+                "day": slot.day,
+                "takenAt": slot.takenAt,
+                "entries": slot.ledger.entries.count,
+                "tombstones": slot.ledger.tombstones.count,
+                "folders": slot.ledger.folders.count
+            ]
+        }
+    }
+
+    func backupNowForCLI() async -> Result<BookmarkBackupPack, Error> {
+        do {
+            let pack = try await runDailyBackup(force: true)
+            return .success(pack)
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    func restoreBackupForCLI(day: String?) async -> Result<BookmarkLedgerSnapshot, Error> {
+        do {
+            let snapshot = try await restoreBackup(day: day)
+            return .success(snapshot)
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    @discardableResult
+    private func runDailyBackup(force: Bool) async throws -> BookmarkBackupPack {
+        let today = BookmarkBackupPackLogic.dayString()
+        if !force, settings.lastBackupDay == today {
+            return backupStore.load()
+        }
+        activityLog.append(force ? "开始立即日备…" : "开始每日日备…")
+        do {
+            var pack = backupStore.load()
+            pack = BookmarkBackupPackLogic.upsert(
+                pack: pack,
+                day: today,
+                ledger: ledger,
+                takenAt: Date().timeIntervalSince1970,
+                today: today
+            )
+            if settings.isRemoteEnabled, let secret = await loadSecretOffMain() {
+                pack = try await syncBackupPackRemote(local: pack, secret: secret, today: today)
+            }
+            try backupStore.save(pack)
+            settings.lastBackupDay = today
+            activityLog.append(
+                "日备完成：\(today)，槽位 \(pack.slots.count)/\(BookmarkBackupPack.maxSlots)，账本 \(ledger.entries.count) 条。"
+            )
+            return pack
+        } catch {
+            activityLog.append("日备失败：\(error.localizedDescription)")
+            throw error
+        }
+    }
+
+    private func restoreBackup(day: String?) async throws -> BookmarkLedgerSnapshot {
+        var pack = backupStore.load()
+        var slot = BookmarkBackupPackLogic.slot(in: pack, day: day)
+        if slot == nil, settings.isRemoteEnabled, let secret = await loadSecretOffMain() {
+            activityLog.append("本机无该日备槽，尝试拉取备份房间…")
+            pack = try await syncBackupPackRemote(local: pack, secret: secret, today: BookmarkBackupPackLogic.dayString())
+            try backupStore.save(pack)
+            slot = BookmarkBackupPackLogic.slot(in: pack, day: day)
+        }
+        guard let slot else {
+            let label = day ?? "最近一日"
+            throw TocodeCommandError.operationFailed("找不到备份槽：\(label)")
+        }
+
+        var formalRevision = ledger.remoteRevision
+        if settings.isRemoteEnabled, let secret = await loadSecretOffMain() {
+            let roomID = BookmarkSyncCrypto.roomID(for: secret)
+            let verifier = BookmarkSyncCrypto.verifier(for: secret)
+            if let remote = try await fetchRoom(roomID: roomID, verifier: verifier) {
+                formalRevision = remote.revision
+            }
+        }
+
+        var restored = slot.ledger
+        restored.remoteRevision = formalRevision
+        ledger = restored
+        try persist()
+        activityLog.append(
+            "已从 \(slot.day) 还原：账本 \(ledger.entries.count) 条，墓碑 \(ledger.tombstones.count) 条。"
+        )
+
+        if settings.isRemoteEnabled, let secret = await loadSecretOffMain() {
+            try await pushRoomReplacingRemote(secret: secret)
+            activityLog.append("还原后正式房间已强制推送，修订 \(ledger.remoteRevision)。")
+        }
+        return ledger
+    }
+
+    private func loadSecretOffMain() async -> String? {
+        let store = keyStore
+        do {
+            return try await Task.detached(priority: .utility) {
+                try store.loadPlaintext()
+            }.value
+        } catch {
+            activityLog.append("远程密钥暂时不可用：\(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    private func syncBackupPackRemote(
+        local: BookmarkBackupPack,
+        secret: String,
+        today: String
+    ) async throws -> BookmarkBackupPack {
+        let roomID = BookmarkSyncCrypto.backupRoomID(for: secret)
+        let verifier = BookmarkSyncCrypto.backupVerifier(for: secret)
+        var pack = local
+        if let remote = try await fetchRoom(roomID: roomID, verifier: verifier) {
+            let remotePack = try BookmarkSyncCrypto.decryptPack(ciphertextBase64: remote.ciphertext, secret: secret)
+            pack = BookmarkBackupPackLogic.mergePreferringLocal(local: pack, remote: remotePack, today: today)
+            pack.remoteRevision = remote.revision
+        }
+        let ciphertext = try BookmarkSyncCrypto.encryptPack(pack, secret: secret)
+        let expected = pack.remoteRevision
+        var body = RoomPayload(
+            room_id: roomID,
+            verifier: verifier,
+            ciphertext: ciphertext,
+            revision: expected + 1,
+            expected_revision: expected
+        )
+        var request = URLRequest(url: relayBaseURL.appendingPathComponent("v1/bookmark-rooms/\(roomID)"))
+        request.httpMethod = "PUT"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(body)
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw BookmarkSyncRemoteError.badResponse
+        }
+        if http.statusCode == 409 {
+            activityLog.append("备份房间推送冲突（409），拉回合并后重试。")
+            if let remote = try await fetchRoom(roomID: roomID, verifier: verifier) {
+                let remotePack = try BookmarkSyncCrypto.decryptPack(ciphertextBase64: remote.ciphertext, secret: secret)
+                pack = BookmarkBackupPackLogic.mergePreferringLocal(local: pack, remote: remotePack, today: today)
+                pack.remoteRevision = remote.revision
+                body = RoomPayload(
+                    room_id: roomID,
+                    verifier: verifier,
+                    ciphertext: try BookmarkSyncCrypto.encryptPack(pack, secret: secret),
+                    revision: remote.revision + 1,
+                    expected_revision: remote.revision
+                )
+                request.httpBody = try JSONEncoder().encode(body)
+                let (retryData, retryResponse) = try await session.data(for: request)
+                guard let retryHTTP = retryResponse as? HTTPURLResponse, retryHTTP.statusCode == 200 else {
+                    throw BookmarkSyncRemoteError.conflict
+                }
+                if let saved = try? JSONDecoder().decode(RoomGetResponse.self, from: retryData) {
+                    pack.remoteRevision = saved.revision
+                } else {
+                    pack.remoteRevision = remote.revision + 1
+                }
+            }
+            return pack
+        }
+        guard http.statusCode == 200 else {
+            throw BookmarkSyncRemoteError.http(http.statusCode)
+        }
+        if let saved = try? JSONDecoder().decode(RoomGetResponse.self, from: data) {
+            pack.remoteRevision = saved.revision
+        } else {
+            pack.remoteRevision = expected + 1
+        }
+        return pack
+    }
+
+    /// 还原后强制推正式房间：409 时只取修订号，不把远端正式账本合并回来。
+    private func pushRoomReplacingRemote(secret: String) async throws {
+        let roomID = BookmarkSyncCrypto.roomID(for: secret)
+        let verifier = BookmarkSyncCrypto.verifier(for: secret)
+        var expected = ledger.remoteRevision
+        for attempt in 0..<3 {
+            let body = RoomPayload(
+                room_id: roomID,
+                verifier: verifier,
+                ciphertext: try BookmarkSyncCrypto.encrypt(snapshot: ledger, secret: secret),
+                revision: expected + 1,
+                expected_revision: expected
+            )
+            var request = URLRequest(url: relayBaseURL.appendingPathComponent("v1/bookmark-rooms/\(roomID)"))
+            request.httpMethod = "PUT"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONEncoder().encode(body)
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                throw BookmarkSyncRemoteError.badResponse
+            }
+            if http.statusCode == 409 {
+                activityLog.append("还原推送冲突（409），取远端修订后强制覆盖（第 \(attempt + 1) 次）。")
+                guard let remote = try await fetchRoom(roomID: roomID, verifier: verifier) else {
+                    throw BookmarkSyncRemoteError.conflict
+                }
+                expected = remote.revision
+                ledger.remoteRevision = remote.revision
+                continue
+            }
+            guard http.statusCode == 200 else {
+                throw BookmarkSyncRemoteError.http(http.statusCode)
+            }
+            if let saved = try? JSONDecoder().decode(RoomGetResponse.self, from: data) {
+                ledger.remoteRevision = saved.revision
+            } else {
+                ledger.remoteRevision = expected + 1
+            }
+            try persist(notifyBrowsers: false)
+            return
+        }
+        throw BookmarkSyncRemoteError.conflict
     }
 
     private struct RoomPayload: Codable {

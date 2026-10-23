@@ -14,6 +14,8 @@ swiftc Tests/TestRunner.swift \
   Sources/BookmarkURL.swift \
   Sources/BookmarkLedger.swift \
   Sources/BookmarkLedgerStore.swift \
+  Sources/BookmarkBackupPack.swift \
+  Sources/BookmarkBackupStore.swift \
   Sources/BookmarkSyncCrypto.swift \
   Sources/BookmarkSyncKeyStore.swift \
   Sources/BookmarkSyncSettingsStore.swift \

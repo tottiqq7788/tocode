@@ -93,6 +93,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if bookmarkSync.isRemoteEnabled {
             Task { await bookmarkSync.syncRemoteNow() }
         }
+        bookmarkSync.scheduleDailyBackupMonitoring()
 
         let modelRelay = ModelRelayService()
         self.modelRelay = modelRelay

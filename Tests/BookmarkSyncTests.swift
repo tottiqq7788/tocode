@@ -258,6 +258,19 @@ func testBookmarkCLIParser() {
     )
     expect(TocodeCommandParser.parse("bookmark delete --url https://a.com") == .success(.bookmark(.delete("https://a.com"))), "bookmark delete")
     expect(TocodeCommandParser.parse("bookmark pull") == .success(.bookmark(.pull)), "bookmark pull")
+    expect(TocodeCommandParser.parse("bookmark backup status") == .success(.bookmark(.backup(.status))), "bookmark backup status")
+    expect(TocodeCommandParser.parse("bookmark backup list") == .success(.bookmark(.backup(.list))), "bookmark backup list")
+    expect(TocodeCommandParser.parse("bookmark backup now") == .success(.bookmark(.backup(.now))), "bookmark backup now")
+    expect(
+        TocodeCommandParser.parse("bookmark backup restore") == .success(.bookmark(.backup(.restore(day: nil)))),
+        "bookmark backup restore 默认最近"
+    )
+    expect(
+        TocodeCommandParser.parse("bookmark backup restore --day 2026-10-20")
+            == .success(.bookmark(.backup(.restore(day: "2026-10-20")))),
+        "bookmark backup restore --day"
+    )
+    expect(TocodeCommandParser.helpText.contains("bookmark backup"), "help 含 backup")
     expect(TocodeCommandParser.helpText.contains("bookmark list"), "help 含 bookmark")
     expect(TocodeCommandParser.parse("bookmark add").isFailure, "bookmark add 缺 url 失败")
 }
@@ -664,5 +677,160 @@ func testBookmarkSyncCryptoRoundTrip() {
         expect(opened == snapshot, "加密往返一致")
     } catch {
         expect(false, "加密往返不应失败: \(error)")
+    }
+}
+
+func testBookmarkBackupPackUpsertPruneAndRestoreReplace() {
+    let folder = BookmarkFolderPath(kind: .other, segments: [])
+    func ledger(url: String, at: Double) -> BookmarkLedgerSnapshot {
+        BookmarkLedgerMerge.unionMerge(
+            ledger: .empty,
+            incoming: [BookmarkEntry(url: url, title: url, folder: folder, updatedAt: at)],
+            browserKey: "cli"
+        )
+    }
+
+    var pack = BookmarkBackupPack.empty
+    pack = BookmarkBackupPackLogic.upsert(
+        pack: pack,
+        day: "2026-10-20",
+        ledger: ledger(url: "https://a.com", at: 1),
+        takenAt: 1,
+        today: "2026-10-23"
+    )
+    pack = BookmarkBackupPackLogic.upsert(
+        pack: pack,
+        day: "2026-10-20",
+        ledger: ledger(url: "https://overwritten.com", at: 2),
+        takenAt: 2,
+        today: "2026-10-23"
+    )
+    expect(pack.slots.count == 1, "同日覆盖仍一槽")
+    expect(pack.slots[0].ledger.entries.first?.url == "https://overwritten.com", "同日覆盖取新账本")
+
+    for offset in 0..<10 {
+        let day = String(format: "2026-10-%02d", 14 + offset)
+        pack = BookmarkBackupPackLogic.upsert(
+            pack: pack,
+            day: day,
+            ledger: ledger(url: "https://d\(offset).com", at: Double(offset)),
+            takenAt: Double(offset),
+            today: "2026-10-23"
+        )
+    }
+    expect(pack.slots.count == 7, "最多保留 7 日")
+    expect(pack.slots.map(\.day).min() == "2026-10-17", "丢掉早于 today−6 的槽")
+    expect(pack.slots.map(\.day).max() == "2026-10-23", "保留今日")
+
+    let chosen = BookmarkBackupPackLogic.slot(in: pack, day: "2026-10-20")
+    expect(chosen?.ledger.entries.first?.url == "https://d6.com", "按日取槽")
+
+    var formal = ledger(url: "https://live.com", at: 99)
+    formal.remoteRevision = 5
+    if let slot = BookmarkBackupPackLogic.slot(in: pack, day: "2026-10-20") {
+        var restored = slot.ledger
+        restored.remoteRevision = formal.remoteRevision
+        formal = restored
+    }
+    expect(formal.entries.first?.url == "https://d6.com", "还原整本替换正式条目")
+    expect(formal.remoteRevision == 5, "还原保留正式修订号")
+    expect(!formal.entries.contains { $0.url == "https://live.com" }, "还原不保留还原前条目")
+}
+
+func testBookmarkBackupRoomIsolatedFromFormal() {
+    let secret = "backup-room-isolation-key"
+    let formal = BookmarkSyncCrypto.roomID(for: secret)
+    let backup = BookmarkSyncCrypto.backupRoomID(for: secret)
+    expect(formal != backup, "备份房间与正式房间隔离")
+    expect(BookmarkSyncCrypto.verifier(for: secret) != BookmarkSyncCrypto.backupVerifier(for: secret), "备份校验值与正式不同")
+
+    let pack = BookmarkBackupPack(
+        version: 1,
+        slots: [
+            BookmarkBackupSlot(
+                day: "2026-10-23",
+                takenAt: 1,
+                ledger: BookmarkLedgerSnapshot(
+                    version: 1,
+                    entries: [
+                        BookmarkEntry(
+                            url: "https://pack.example",
+                            title: "P",
+                            folder: BookmarkFolderPath(kind: .toolbar, segments: []),
+                            updatedAt: 1
+                        )
+                    ],
+                    tombstones: [],
+                    remoteRevision: 0,
+                    joinedBrowserKeys: []
+                )
+            )
+        ],
+        remoteRevision: 2
+    )
+    do {
+        let cipher = try BookmarkSyncCrypto.encryptPack(pack, secret: secret)
+        expect(!cipher.contains("pack.example"), "备份密文不含明文网址")
+        let opened = try BookmarkSyncCrypto.decryptPack(ciphertextBase64: cipher, secret: secret)
+        expect(opened == pack, "备份包加密往返一致")
+    } catch {
+        expect(false, "备份包加密往返不应失败: \(error)")
+    }
+}
+
+@MainActor
+func testBookmarkBackupCLIRestore() async {
+    let bookmarks = MockBookmarkSync()
+    bookmarks.ledger = BookmarkLedgerMerge.unionMerge(
+        ledger: .empty,
+        incoming: [
+            BookmarkEntry(
+                url: "https://live.com",
+                title: "Live",
+                folder: BookmarkFolderPath(kind: .other, segments: []),
+                updatedAt: 1
+            )
+        ],
+        browserKey: "cli"
+    )
+    bookmarks.backupPack = BookmarkBackupPackLogic.upsert(
+        pack: .empty,
+        day: "2026-10-21",
+        ledger: BookmarkLedgerMerge.unionMerge(
+            ledger: .empty,
+            incoming: [
+                BookmarkEntry(
+                    url: "https://backup.com",
+                    title: "Backup",
+                    folder: BookmarkFolderPath(kind: .toolbar, segments: []),
+                    updatedAt: 2
+                )
+            ],
+            browserKey: "cli"
+        ),
+        takenAt: 2,
+        today: "2026-10-23"
+    )
+
+    let executor = TocodeCommandExecutor(
+        mouseWheel: MockTocodeWheel(),
+        shortcuts: MockTocodeShortcuts(),
+        weChat: MockTocodeWeChat(),
+        bookmarkSync: bookmarks,
+        notify: { _, _ in }
+    )
+
+    if case .success(let listed) = executor.execute("bookmark backup list") {
+        expect(listed.text.contains("2026-10-21"), "backup list 含日槽")
+    } else {
+        expect(false, "backup list 含日槽")
+    }
+
+    if case .success(let restored) = await executor.executeAsync("bookmark backup restore --day 2026-10-21") {
+        expect(restored.text.contains("backup.com") == false || restored.text.contains("\"ok\""), "restore 返回 ok")
+        expect(bookmarks.ledger.entries.first?.url == "https://backup.com", "CLI restore 整本覆盖")
+        expect(!bookmarks.ledger.entries.contains { $0.url == "https://live.com" }, "CLI restore 去掉旧正式条目")
+    } else {
+        expect(false, "CLI restore 成功")
     }
 }

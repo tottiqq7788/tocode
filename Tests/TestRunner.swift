@@ -9306,6 +9306,9 @@ struct TestRunnerMain {
         testBookmarkNamedSupersededByRootedPath()
         testBookmarkSiblingIndexCanonicalizeOnCollision()
         testBookmarkSyncCryptoRoundTrip()
+        testBookmarkBackupPackUpsertPruneAndRestoreReplace()
+        testBookmarkBackupRoomIsolatedFromFormal()
+        await testBookmarkBackupCLIRestore()
 
         if failures == 0 {
             print("\nALL TESTS PASSED")

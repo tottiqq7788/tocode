@@ -88,6 +88,12 @@ enum TocodeCLIArgumentPrep {
         if verb == "bookmark", sub == "pull" || sub == "sync" {
             return sendTimeout
         }
+        if verb == "bookmark", sub == "backup" {
+            let backupSub = arguments.dropFirst(2).first?.lowercased()
+            if backupSub == "now" || backupSub == "restore" {
+                return sendTimeout
+            }
+        }
         return defaultTimeout
     }
 

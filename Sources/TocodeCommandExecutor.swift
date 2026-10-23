@@ -143,6 +143,8 @@ final class TocodeCommandExecutor {
             return executeWechat(subcommand)
         case .bookmark(.pull):
             return .failure(.operationFailed("bookmark pull 需要通过 CLI 异步执行"))
+        case .bookmark(.backup(.now)), .bookmark(.backup(.restore)):
+            return .failure(.operationFailed("bookmark backup now/restore 需要通过 CLI 异步执行"))
         case .bookmark(let subcommand):
             return executeBookmark(subcommand)
         case .blackout:
@@ -202,6 +204,12 @@ final class TocodeCommandExecutor {
         }
         if case .bookmark(.pull) = command {
             return await executeBookmarkPull()
+        }
+        if case .bookmark(.backup(.now)) = command {
+            return await executeBookmarkBackupNow()
+        }
+        if case .bookmark(.backup(.restore(let day))) = command {
+            return await executeBookmarkBackupRestore(day: day)
         }
         return execute(command)
     }
@@ -331,6 +339,12 @@ final class TocodeCommandExecutor {
                 return .failure(.operationFailed("bookmark pull 需要通过 CLI 异步执行"))
             case .log(let lines):
                 return .success(TocodeCommandOutput(sync.activityLog.dumpText(maxLines: lines)))
+            case .backup(.status):
+                return BookmarkCLIJSON.encode(sync.backupStatusPayload()).map(TocodeCommandOutput.init)
+            case .backup(.list):
+                return BookmarkCLIJSON.encode(sync.backupListPayload()).map(TocodeCommandOutput.init)
+            case .backup(.now), .backup(.restore):
+                return .failure(.operationFailed("bookmark backup now/restore 需要通过 CLI 异步执行"))
             }
         }
     }
@@ -355,6 +369,57 @@ final class TocodeCommandExecutor {
                     "remoteEnabled": sync.isRemoteEnabled,
                     "hasRemoteKey": true
                 ]
+                return BookmarkCLIJSON.encode(payload).map(TocodeCommandOutput.init)
+            }
+        }
+    }
+
+    private func executeBookmarkBackupNow() async -> TocodeCommandResult {
+        switch requireBookmarkSync() {
+        case .failure(let error):
+            return .failure(error)
+        case .success(let sync):
+            switch await sync.backupNowForCLI() {
+            case .failure(let error):
+                if let commandError = error as? TocodeCommandError {
+                    return .failure(commandError)
+                }
+                return .failure(.operationFailed(error.localizedDescription))
+            case .success(let pack):
+                let sorted = pack.slots.sorted { $0.day < $1.day }
+                let payload: [String: Any] = [
+                    "ok": true,
+                    "slotCount": sorted.count,
+                    "days": sorted.map(\.day),
+                    "packRemoteRevision": pack.remoteRevision
+                ]
+                return BookmarkCLIJSON.encode(payload).map(TocodeCommandOutput.init)
+            }
+        }
+    }
+
+    private func executeBookmarkBackupRestore(day: String?) async -> TocodeCommandResult {
+        switch requireBookmarkSync() {
+        case .failure(let error):
+            return .failure(error)
+        case .success(let sync):
+            switch await sync.restoreBackupForCLI(day: day) {
+            case .failure(let error):
+                if let commandError = error as? TocodeCommandError {
+                    return .failure(commandError)
+                }
+                return .failure(.operationFailed(error.localizedDescription))
+            case .success(let snapshot):
+                var payload: [String: Any] = [
+                    "ok": true,
+                    "entries": snapshot.entries.count,
+                    "tombstones": snapshot.tombstones.count,
+                    "folders": snapshot.folders.count,
+                    "remoteRevision": snapshot.remoteRevision
+                ]
+                if let day {
+                    payload["restoredDay"] = day
+                }
                 return BookmarkCLIJSON.encode(payload).map(TocodeCommandOutput.init)
             }
         }

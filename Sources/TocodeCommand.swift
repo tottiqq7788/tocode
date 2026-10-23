@@ -66,6 +66,13 @@ struct TocodeBookmarkUpdatePayload: Equatable {
     var newURL: String?
 }
 
+enum TocodeBookmarkBackupCommand: Equatable {
+    case status
+    case list
+    case now
+    case restore(day: String?)
+}
+
 enum TocodeBookmarkCommand: Equatable {
     case status
     case list
@@ -75,6 +82,7 @@ enum TocodeBookmarkCommand: Equatable {
     case delete(String)
     case pull
     case log(Int)
+    case backup(TocodeBookmarkBackupCommand)
 }
 
 enum TocodeCommand: Equatable {
@@ -200,6 +208,9 @@ enum TocodeCommandParser {
         bookmark delete --url <url>         删除并写墓碑
         bookmark pull                       用本机远程同步密钥拉取并合并最新账本
         bookmark log [行数]                 打印最近同步活动日志（默认 80 行）
+        bookmark backup status|list|now     七日备份状态 / 列表 / 立即日备
+        bookmark backup restore [--day YYYY-MM-DD]
+                                            从指定日（默认最近）整本还原正式账本
 
       其他
         blackout（别名 .lshp）                工具 → 临时黑屏
@@ -398,9 +409,62 @@ enum TocodeCommandParser {
                 return .failure(.invalidArguments("bookmark log [行数]"))
             }
             return .success(.bookmark(.log(min(lines, 2000))))
+        case "backup":
+            return parseBookmarkBackup(Array(tokens.dropFirst()))
         default:
             return .failure(.unknownCommand("bookmark \(sub)"))
         }
+    }
+
+    private static func parseBookmarkBackup(_ tokens: [String]) -> Result<TocodeCommand, TocodeCommandError> {
+        guard let sub = tokens.first?.lowercased() else {
+            return .failure(.missingValue("bookmark backup status|list|now|restore"))
+        }
+        switch sub {
+        case "status":
+            guard tokens.count == 1 else { return .failure(.invalidArguments("bookmark backup status")) }
+            return .success(.bookmark(.backup(.status)))
+        case "list":
+            guard tokens.count == 1 else { return .failure(.invalidArguments("bookmark backup list")) }
+            return .success(.bookmark(.backup(.list)))
+        case "now":
+            guard tokens.count == 1 else { return .failure(.invalidArguments("bookmark backup now")) }
+            return .success(.bookmark(.backup(.now)))
+        case "restore":
+            return parseBookmarkBackupRestore(Array(tokens.dropFirst()))
+        default:
+            return .failure(.unknownCommand("bookmark backup \(sub)"))
+        }
+    }
+
+    private static func parseBookmarkBackupRestore(_ tokens: [String]) -> Result<TocodeCommand, TocodeCommandError> {
+        if tokens.isEmpty {
+            return .success(.bookmark(.backup(.restore(day: nil))))
+        }
+        var day: String?
+        var cursor = 0
+        while cursor < tokens.count {
+            let token = tokens[cursor]
+            switch token {
+            case "--day":
+                guard cursor + 1 < tokens.count else {
+                    return .failure(.missingValue("bookmark backup restore --day YYYY-MM-DD"))
+                }
+                day = tokens[cursor + 1]
+                cursor += 2
+            default:
+                if day == nil, BookmarkBackupPackLogic.parseDay(token) != nil {
+                    day = token
+                    cursor += 1
+                } else {
+                    return .failure(.invalidArguments("bookmark backup restore \(token)"))
+                }
+            }
+        }
+        if let day, BookmarkBackupPackLogic.parseDay(day) == nil {
+            return .failure(.invalidArguments("bookmark backup restore --day 须为 YYYY-MM-DD"))
+        }
+        return .success(.bookmark(.backup(.restore(day: day))))
     }
 
     private static func parseBookmarkAdd(_ tokens: [String]) -> Result<TocodeCommand, TocodeCommandError> {
