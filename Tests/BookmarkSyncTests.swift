@@ -606,6 +606,93 @@ func testBookmarkToolbarRootSegmentsPreserved() {
     expect(!folderKeys.contains("named|totti"), "不再把根下子夹收成 named")
 }
 
+func testBookmarkMobileRootAliasOnDeviceBookmarks() {
+    let nodes: [[String: Any]] = [
+        [
+            "type": "folder",
+            "title": "",
+            "index": 0,
+            "children": [
+                [
+                    "type": "folder",
+                    "title": "书签栏",
+                    "index": 0,
+                    "dateAdded": 1.0,
+                    "children": [] as [Any]
+                ],
+                [
+                    "type": "folder",
+                    "title": "其他书签",
+                    "index": 1,
+                    "dateAdded": 1.0,
+                    "children": [] as [Any]
+                ],
+                [
+                    "type": "folder",
+                    "title": "移动设备上的书签",
+                    "index": 2,
+                    "dateAdded": 1.0,
+                    "children": [
+                        [
+                            "type": "folder",
+                            "title": "phone-shell",
+                            "index": 0,
+                            "dateAdded": 2.0,
+                            "children": [] as [Any]
+                        ]
+                    ]
+                ]
+            ]
+        ]
+    ]
+    let layout = BookmarkLedgerMerge.layout(fromBrowserNodes: nodes)
+    let keys = Set(layout.folders.map(\.pathKey))
+    expect(keys.contains("mobile|phone-shell"), "移动设备上的书签下空夹摄入为 mobile")
+    expect(!keys.contains(where: { $0.hasPrefix("named|") && $0.contains("phone") }), "不得收成 named")
+}
+
+@MainActor
+func testBookmarkFolderTombstonesCLIList() {
+    expect(
+        TocodeCommandParser.parse("bookmark folder tombstones") == .success(.bookmark(.folder(.tombstones))),
+        "bookmark folder tombstones"
+    )
+    expect(
+        TocodeCommandParser.parse("bookmark folder tombstones --json")
+            == .success(.bookmark(.folder(.tombstones))),
+        "bookmark folder tombstones --json"
+    )
+    expect(TocodeCommandParser.helpText.contains("tombstones"), "help 含 tombstones")
+
+    let path = BookmarkFolderPath(kind: .other, segments: ["gone"])
+    var ledger = BookmarkLedgerSnapshot.empty
+    ledger.folderTombstones = [
+        BookmarkFolderTombstone(path: path, deletedAt: 100)
+    ]
+    ledger.folders = [
+        BookmarkFolderRecord(path: BookmarkFolderPath(kind: .toolbar, segments: ["live"]), siblingIndex: 0, updatedAt: 1)
+    ]
+    let bookmarks = MockBookmarkSync()
+    bookmarks.ledger = ledger
+    let executor = TocodeCommandExecutor(
+        mouseWheel: MockTocodeWheel(),
+        shortcuts: MockTocodeShortcuts(),
+        weChat: MockTocodeWeChat(),
+        bookmarkSync: bookmarks,
+        notify: { _, _ in }
+    )
+    if case .success(let out) = executor.execute("bookmark folder tombstones --json") {
+        let data = Data(out.text.utf8)
+        let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        expect((obj?["count"] as? Int) == 1, "tombstones count=1")
+        expect((obj?["overlapWithLiveFolders"] as? Int) == 0, "与现存夹交集 0")
+        let byKind = obj?["byKind"] as? [String: Any]
+        expect((byKind?["other"] as? Int) == 1, "byKind other=1")
+    } else {
+        expect(false, "tombstones CLI 应成功")
+    }
+}
+
 func testBookmarkFirefoxMenuRootMapsToOther() {
     // Firefox：书签工具栏 + 书签菜单（内含 Mozilla Firefox 空夹）+ 其他书签。
     let nodes: [[String: Any]] = [

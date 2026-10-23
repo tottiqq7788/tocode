@@ -436,6 +436,10 @@ final class BookmarkSyncService {
         BookmarkCLIFolderTree.build(from: ledger)
     }
 
+    func folderTombstonesPayload() -> [String: Any] {
+        BookmarkCLIFolderTombstones.build(from: ledger)
+    }
+
     func folderTombstonesForBrowser() -> [BookmarkFolderTombstone] {
         ledger.folderTombstones
     }

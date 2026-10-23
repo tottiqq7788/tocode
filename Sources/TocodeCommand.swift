@@ -78,6 +78,8 @@ enum TocodeBookmarkFolderCommand: Equatable {
     case delete(path: String, recursive: Bool)
     case pruneEmpty(under: String?)
     case move(path: String, to: String?, index: Int?)
+    /// 只读列出夹墓碑统计（无 prune）。
+    case tombstones
 }
 
 enum TocodeBookmarkCommand: Equatable {
@@ -228,6 +230,8 @@ enum TocodeCommandParser {
         bookmark folder move <path> --index <n>
         bookmark folder move <path> --to <newPath> [--index <n>]
                                             同父改序，或改路径并迁移子项
+        bookmark folder tombstones [--json]
+                                            只读夹墓碑统计（条数/按根/与现存夹交集；无 prune）
         bookmark apply --file <plan.json> [--dry-run]
                                             串行批处理 add|update|delete
         bookmark backup status|list|now     七日备份状态 / 列表 / 立即日备
@@ -235,7 +239,7 @@ enum TocodeCommandParser {
                                             从指定日（默认最近）整本还原正式账本
 
       书签 --folder / folder 路径
-        toolbar|other|mobile|书签栏|其他书签|移动设备书签
+        toolbar|other|mobile|书签栏|其他书签|移动设备书签|移动设备上的书签
                                             三个根（可单独）
         toolbar/<路径>  other/<路径>  mobile/<路径>
         书签栏/<路径>  其他书签/<路径> …
@@ -460,7 +464,7 @@ enum TocodeCommandParser {
 
     private static func parseBookmarkFolder(_ tokens: [String]) -> Result<TocodeCommand, TocodeCommandError> {
         guard let sub = tokens.first?.lowercased() else {
-            return .failure(.missingValue("bookmark folder create|delete|prune-empty|move"))
+            return .failure(.missingValue("bookmark folder create|delete|prune-empty|move|tombstones"))
         }
         let rest = Array(tokens.dropFirst())
         switch sub {
@@ -472,6 +476,14 @@ enum TocodeCommandParser {
             return parseFolderPrune(rest)
         case "move":
             return parseFolderMove(rest)
+        case "tombstones":
+            if rest.isEmpty {
+                return .success(.bookmark(.folder(.tombstones)))
+            }
+            guard rest.count == 1, rest[0] == "--json" || rest[0] == "-json" else {
+                return .failure(.invalidArguments("bookmark folder tombstones [--json]"))
+            }
+            return .success(.bookmark(.folder(.tombstones)))
         default:
             return .failure(.unknownCommand("bookmark folder \(sub)"))
         }

@@ -11,6 +11,7 @@ enum BookmarkCLIFolder {
             ("其他书签", .other),
             ("其他", .other),
             ("mobile", .mobile),
+            ("移动设备上的书签", .mobile),
             ("移动设备书签", .mobile),
             ("移动", .mobile)
         ]
@@ -18,7 +19,7 @@ enum BookmarkCLIFolder {
     }()
 
     static var helpHint: String {
-        "合法 --folder：toolbar|other|mobile|书签栏|其他书签|移动设备书签（可单独或作前缀，如 toolbar/工作/a）；named:a/b 为具名；无前缀 a/b 亦为 named"
+        "合法 --folder：toolbar|other|mobile|书签栏|其他书签|移动设备书签|移动设备上的书签（可单独或作前缀，如 toolbar/工作/a）；named:a/b 为具名；无前缀 a/b 亦为 named"
     }
 
     static func parse(_ raw: String?) -> Result<BookmarkFolderPath?, TocodeCommandError> {
@@ -102,6 +103,45 @@ enum BookmarkCLIFolder {
         [
             "kind": folder.kind.rawValue,
             "segments": folder.segments
+        ]
+    }
+}
+
+enum BookmarkCLIFolderTombstones {
+    /// 只读审计：条数、按 kind、与现存 folders 交集、按 deletedAt 摘要（无 prune）。
+    static func build(from snapshot: BookmarkLedgerSnapshot) -> [String: Any] {
+        let folderKeys = Set(snapshot.folders.map(\.pathKey))
+        var byKind: [String: Int] = [:]
+        var overlapKeys: [String] = []
+        var items: [[String: Any]] = []
+        for stone in snapshot.folderTombstones {
+            let kind = stone.path.kind.rawValue
+            byKind[kind, default: 0] += 1
+            if folderKeys.contains(stone.pathKey) {
+                overlapKeys.append(stone.pathKey)
+            }
+            items.append([
+                "kind": kind,
+                "segments": stone.path.segments,
+                "pathKey": stone.pathKey,
+                "deletedAt": stone.deletedAt,
+                "overlapsLiveFolder": folderKeys.contains(stone.pathKey)
+            ])
+        }
+        items.sort { a, b in
+            let da = a["deletedAt"] as? Double ?? 0
+            let db = b["deletedAt"] as? Double ?? 0
+            if da != db { return da > db }
+            let ka = a["pathKey"] as? String ?? ""
+            let kb = b["pathKey"] as? String ?? ""
+            return ka < kb
+        }
+        return [
+            "count": snapshot.folderTombstones.count,
+            "byKind": byKind,
+            "overlapWithLiveFolders": overlapKeys.count,
+            "overlapPathKeys": overlapKeys.sorted(),
+            "items": items
         ]
     }
 }
@@ -233,6 +273,7 @@ protocol BookmarkSyncCommanding: AnyObject {
     func backupNowForCLI() async -> Result<BookmarkBackupPack, Error>
     func restoreBackupForCLI(day: String?) async -> Result<BookmarkLedgerSnapshot, Error>
     func foldersTreePayload() -> [[String: Any]]
+    func folderTombstonesPayload() -> [String: Any]
     func createFolderCLI(path: BookmarkFolderPath, siblingIndex: Int?) throws -> BookmarkFolderRecord
     func deleteFolderCLI(path: BookmarkFolderPath, recursive: Bool) throws -> BookmarkLedgerSnapshot
     func pruneEmptyFoldersCLI(under: BookmarkFolderPath?) throws -> [BookmarkFolderPath]

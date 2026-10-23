@@ -284,6 +284,10 @@ final class MockBookmarkSync: BookmarkSyncCommanding {
         BookmarkCLIFolderTree.build(from: ledger)
     }
 
+    func folderTombstonesPayload() -> [String: Any] {
+        BookmarkCLIFolderTombstones.build(from: ledger)
+    }
+
     func createFolderCLI(path: BookmarkFolderPath, siblingIndex: Int?) throws -> BookmarkFolderRecord {
         if BookmarkLedgerMerge.isRootFolderPath(path) {
             throw TocodeCommandError.invalidArguments("不可对书签根执行 folder create")

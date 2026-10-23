@@ -428,6 +428,8 @@ final class TocodeCommandExecutor {
             } catch {
                 return .failure(.operationFailed(error.localizedDescription))
             }
+        case .tombstones:
+            return BookmarkCLIJSON.encode(sync.folderTombstonesPayload()).map(TocodeCommandOutput.init)
         case .move(let pathRaw, let toRaw, let index):
             switch BookmarkCLIFolder.parse(pathRaw) {
             case .failure(let error):

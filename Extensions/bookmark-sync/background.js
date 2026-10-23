@@ -73,7 +73,13 @@ function isBookmarksMenuTitle(title) {
 function isMobileTitle(title) {
   const raw = title || "";
   const lower = raw.toLowerCase();
-  const exact = ["移动设备书签", "mobile bookmarks", "移动收藏夹"];
+  // 「移动设备上的书签」为部分中文界面根标题（勿收成 named）。
+  const exact = [
+    "移动设备书签",
+    "移动设备上的书签",
+    "mobile bookmarks",
+    "移动收藏夹"
+  ];
   if (exact.some((x) => lower === x || raw === x)) return true;
   if (lower.includes("mobile")) return true;
   return false;

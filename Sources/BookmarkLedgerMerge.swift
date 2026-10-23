@@ -862,7 +862,9 @@ enum BookmarkLedgerMerge {
             || lower.contains("未整理") {
             return .other
         }
-        if ["移动设备书签", "mobile bookmarks", "移动收藏夹"].contains(where: { lower == $0 || title == $0 })
+        // 「移动设备上的书签」为部分中文界面根标题，须映为 mobile（勿收成 named）。
+        if ["移动设备书签", "移动设备上的书签", "mobile bookmarks", "移动收藏夹"]
+            .contains(where: { lower == $0 || title == $0 })
             || lower.contains("mobile") {
             return .mobile
         }
