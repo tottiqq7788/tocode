@@ -18,6 +18,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var mouseWheel: MouseWheelReverseService?
     private var dockAutohideRestrict: DockAutohideRestrictService?
     private var macTimers: MacTimerService?
+    private var bookmarkSync: BookmarkSyncService?
+    private var bookmarkBridge: BookmarkNativeBridge?
     private var weChat: WeChatAssociationService?
     private var controller: StatusItemController?
     private var commandExecutor: TocodeCommandExecutor?
@@ -56,6 +58,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         dockAutohideRestrict = dockRestrict
         let macTimers = MacTimerService()
         self.macTimers = macTimers
+        let bookmarkSync = BookmarkSyncService()
+        self.bookmarkSync = bookmarkSync
+        let bookmarkBridge = BookmarkNativeBridge()
+        self.bookmarkBridge = bookmarkBridge
+        bookmarkBridge.attach(service: bookmarkSync)
+        do {
+            try bookmarkBridge.start()
+        } catch {
+            NSLog("Tocode 书签同步桥启动失败: %@", error.localizedDescription)
+        }
+        if bookmarkSync.isRemoteEnabled {
+            Task { await bookmarkSync.syncRemoteNow() }
+        }
 
         let blackout = ScreenBlackoutService(overlay: ScreenBlackoutOverlay())
 
@@ -106,6 +121,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             mouseWheel: wheel,
             dockAutohideRestrict: dockRestrict,
             macTimers: macTimers,
+            bookmarkSync: bookmarkSync,
             weChat: weChat,
             remoteControl: remote,
             hermesGateway: hermesGateway,
@@ -190,6 +206,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mouseWheel?.shutdown()
         dockAutohideRestrict?.shutdown()
         macTimers?.shutdown()
+        bookmarkBridge?.stop()
+        bookmarkBridge = nil
+        bookmarkSync = nil
         weChat?.stop()
     }
 }

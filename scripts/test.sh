@@ -10,6 +10,17 @@ swiftc Tests/TestRunner.swift \
   Tests/ModelRelayTestSupport.swift \
   Tests/ModelRelayCallMetricsTestSupport.swift \
   Tests/ModelRelayTests.swift \
+  Tests/BookmarkSyncTests.swift \
+  Sources/BookmarkURL.swift \
+  Sources/BookmarkLedger.swift \
+  Sources/BookmarkLedgerStore.swift \
+  Sources/BookmarkSyncCrypto.swift \
+  Sources/BookmarkSyncKeyStore.swift \
+  Sources/BookmarkSyncSettingsStore.swift \
+  Sources/BookmarkSyncService.swift \
+  Sources/BookmarkSyncPrompt.swift \
+  Sources/BookmarkNativeBridge.swift \
+  Sources/BookmarkExtensionInstall.swift \
   Sources/FileSystemService.swift \
   Sources/ClipboardService.swift \
   Sources/RootPathStore.swift \
@@ -118,6 +129,7 @@ swiftc Tests/TestRunner.swift \
   -framework UserNotifications \
   -framework ServiceManagement \
   -framework Network \
+  -framework CryptoKit \
   -lsqlite3
 
 ./build/tests

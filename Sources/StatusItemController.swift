@@ -21,6 +21,7 @@ final class StatusItemController: NSObject {
     private let mouseWheel: MouseWheelReverseService
     private let dockAutohideRestrict: DockAutohideRestrictService
     private let macTimers: MacTimerControlling
+    private let bookmarkSync: BookmarkSyncService
     private let shortcutPoster: TrackpadShortcutEventPosting
     private let launchAtLogin: LaunchAtLoginControlling
     private let weChat: WeChatAssociationControlling
@@ -57,6 +58,7 @@ final class StatusItemController: NSObject {
         mouseWheel: MouseWheelReverseService,
         dockAutohideRestrict: DockAutohideRestrictService = DockAutohideRestrictService(),
         macTimers: MacTimerControlling = MacTimerService(),
+        bookmarkSync: BookmarkSyncService = BookmarkSyncService(),
         shortcutPoster: TrackpadShortcutEventPosting = SystemTrackpadShortcutEventPoster(),
         launchAtLogin: LaunchAtLoginControlling = LaunchAtLoginService(),
         weChat: WeChatAssociationControlling,
@@ -81,6 +83,7 @@ final class StatusItemController: NSObject {
         self.mouseWheel = mouseWheel
         self.dockAutohideRestrict = dockAutohideRestrict
         self.macTimers = macTimers
+        self.bookmarkSync = bookmarkSync
         self.shortcutPoster = shortcutPoster
         self.launchAtLogin = launchAtLogin
         self.weChat = weChat
@@ -671,6 +674,37 @@ final class StatusItemController: NSObject {
         }
         timerItem.submenu = timerMenu
         liveTimerMenu = timerMenu
+
+        let bookmarkItem = toolsMenu.addItem(withTitle: "书签同步", action: nil, keyEquivalent: "")
+        bookmarkItem.image = NSImage(systemSymbolName: "bookmark", accessibilityDescription: nil)
+        let bookmarkMenu = NSMenu()
+        bookmarkMenu.autoenablesItems = false
+        let remoteSyncItem = bookmarkMenu.addItem(
+            withTitle: "远程同步",
+            action: #selector(configureBookmarkRemoteSync),
+            keyEquivalent: ""
+        )
+        remoteSyncItem.target = self
+        ShortcutMenuAppearance.apply(to: remoteSyncItem, enabled: bookmarkSync.isRemoteEnabled)
+        remoteSyncItem.image = NSImage(systemSymbolName: "icloud", accessibilityDescription: nil)
+
+        let installItem = bookmarkMenu.addItem(withTitle: "拓展安装", action: nil, keyEquivalent: "")
+        installItem.image = NSImage(systemSymbolName: "puzzlepiece.extension", accessibilityDescription: nil)
+        let installMenu = NSMenu()
+        installMenu.autoenablesItems = false
+        for browser in BookmarkBrowser.allCases {
+            let item = installMenu.addItem(
+                withTitle: browser.title,
+                action: #selector(installBookmarkExtension(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = browser.rawValue
+            let connected = bookmarkSync.connectedBrowserKeys.contains { $0.hasPrefix("\(browser.rawValue):") }
+            ShortcutMenuAppearance.apply(to: item, enabled: connected)
+        }
+        installItem.submenu = installMenu
+        bookmarkItem.submenu = bookmarkMenu
 
         let blackoutItem = toolsMenu.addItem(
             withTitle: "临时黑屏",
@@ -1385,6 +1419,46 @@ final class StatusItemController: NSObject {
     /// 显示临时黑屏；再次点击时若已显示则为 no-op。
     @objc private func activateScreenBlackout() {
         screenBlackout.activate()
+    }
+
+    @objc private func configureBookmarkRemoteSync() {
+        Task { @MainActor in
+            let action = await BookmarkSyncPrompt.present(
+                hasKey: bookmarkSync.hasRemoteKey,
+                isEnabled: bookmarkSync.isRemoteEnabled,
+                revealKey: { try self.bookmarkSync.loadRemoteKeyPlaintext() }
+            )
+            do {
+                switch action {
+                case .save(let secret, let enable):
+                    try bookmarkSync.saveRemoteKey(secret, enable: enable)
+                case .setEnabled(let enabled):
+                    bookmarkSync.setRemoteEnabled(enabled)
+                case .delete:
+                    try bookmarkSync.deleteRemoteKey()
+                case .cancel:
+                    break
+                }
+            } catch {
+                let alert = NSAlert()
+                alert.alertStyle = .warning
+                alert.messageText = "远程同步失败"
+                alert.informativeText = error.localizedDescription
+                alert.addButton(withTitle: "好")
+                alert.runModal()
+            }
+        }
+    }
+
+    @objc private func installBookmarkExtension(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let browser = BookmarkBrowser(rawValue: raw) else {
+            return
+        }
+        BookmarkExtensionInstall.install(
+            browser: browser,
+            connectedKeys: bookmarkSync.connectedBrowserKeys
+        )
     }
 
     @objc private func configureTrackpadShortcut(_ sender: NSMenuItem) {

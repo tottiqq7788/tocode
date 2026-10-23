@@ -15,6 +15,7 @@ FRAMEWORKS=(
   -framework UserNotifications
   -framework ServiceManagement
   -framework Network
+  -framework CryptoKit
   -lsqlite3
 )
 
@@ -32,6 +33,8 @@ for file in Sources/*.swift; do
       ;;
     ModelRelay*.swift)
       APP_SOURCES+=("$file")
+      ;;
+    BookmarkNativeHostMain.swift)
       ;;
     TocodeCLIRunner.swift)
       CLI_SOURCES+=("$file")
@@ -51,6 +54,15 @@ mkdir -p build
 swiftc -O "${CLI_SOURCES[@]}" \
   -o build/tocode \
   "${FRAMEWORKS[@]}"
+
+swiftc -O Sources/BookmarkNativeHostMain.swift \
+  -o "$APP/Contents/MacOS/tocode-bookmark-host" \
+  "${FRAMEWORKS[@]}"
+cp "$APP/Contents/MacOS/tocode-bookmark-host" build/tocode-bookmark-host
+
+mkdir -p "$APP/Contents/Resources/Extensions"
+rm -rf "$APP/Contents/Resources/Extensions/bookmark-sync"
+cp -R Extensions/bookmark-sync "$APP/Contents/Resources/Extensions/bookmark-sync"
 
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 
