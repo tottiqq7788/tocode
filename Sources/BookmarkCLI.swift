@@ -176,6 +176,13 @@ enum BookmarkCLIFolderTree {
     }
 }
 
+/// CLI add 回执：区分真正新建与命中既有 URL 的合并（upsert）。
+struct BookmarkCLIAddResult {
+    var entry: BookmarkEntry
+    /// false = canonical URL 已在账本，本次为合并/更新布局。
+    var created: Bool
+}
+
 enum BookmarkCLIJSON {
     static func entry(_ entry: BookmarkEntry) -> [String: Any] {
         [
@@ -187,6 +194,13 @@ enum BookmarkCLIJSON {
             "siblingIndex": entry.siblingIndex,
             "updatedAt": entry.updatedAt
         ]
+    }
+
+    static func addResult(_ result: BookmarkCLIAddResult) -> [String: Any] {
+        var body = entry(result.entry)
+        body["created"] = result.created
+        body["merged"] = !result.created
+        return body
     }
 
     static func encode(_ value: Any) -> Result<String, TocodeCommandError> {
@@ -210,7 +224,7 @@ protocol BookmarkSyncCommanding: AnyObject {
     var activityLog: BookmarkSyncActivityLog { get }
 
     func entry(url: String) -> BookmarkEntry?
-    func addCLI(url: String, title: String?, folder: BookmarkFolderPath?, siblingIndex: Int?) throws -> BookmarkEntry
+    func addCLI(url: String, title: String?, folder: BookmarkFolderPath?, siblingIndex: Int?) throws -> BookmarkCLIAddResult
     func updateCLI(url: String, title: String?, folder: BookmarkFolderPath?, siblingIndex: Int?, newURL: String?) throws -> BookmarkEntry
     func deleteCLI(url: String) throws
     func pullRemoteForCLI() async -> Result<BookmarkLedgerSnapshot, Error>

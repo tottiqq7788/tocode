@@ -834,13 +834,19 @@ enum BookmarkLedgerMerge {
     }
 
     /// 把误记为 other/named 且首段为书签栏别名的路径收成 toolbar + 余下段。
+    /// 例外：`other/书签栏`、`other/toolbar` 等「仅一段别名」的空壳保留字面路径，避免收成不可删的根。
+    /// `other/书签工具栏/官网` 仍归一到 `toolbar/官网`。
     static func normalizeFolderPath(_ path: BookmarkFolderPath) -> BookmarkFolderPath {
         guard path.kind == .other || path.kind == .named,
               let first = path.segments.first,
               isToolbarAliasTitle(first) else {
             return path
         }
-        return BookmarkFolderPath(kind: .toolbar, segments: Array(path.segments.dropFirst()))
+        let rest = Array(path.segments.dropFirst())
+        if path.kind == .other, rest.isEmpty {
+            return path
+        }
+        return BookmarkFolderPath(kind: .toolbar, segments: rest)
     }
 
     private static func mapRoot(_ title: String) -> BookmarkFolderKind {

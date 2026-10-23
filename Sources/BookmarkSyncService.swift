@@ -303,10 +303,11 @@ final class BookmarkSyncService {
         title: String?,
         folder: BookmarkFolderPath?,
         siblingIndex: Int? = nil
-    ) throws -> BookmarkEntry {
+    ) throws -> BookmarkCLIAddResult {
         guard let canonical = BookmarkURL.canonicalize(url) else {
             throw TocodeCommandError.invalidArguments("bookmark add --url")
         }
+        let existed = ledger.entries.contains { $0.url == canonical }
         if ledger.tombstones.contains(where: { $0.url == canonical }) {
             ledger = BookmarkLedgerSnapshot(
                 version: ledger.version,
@@ -333,7 +334,7 @@ final class BookmarkSyncService {
         guard let saved = entry(url: canonical) else {
             throw TocodeCommandError.operationFailed("书签写入后无法读取")
         }
-        return saved
+        return BookmarkCLIAddResult(entry: saved, created: !existed)
     }
 
     func updateCLI(
@@ -518,14 +519,30 @@ final class BookmarkSyncService {
                     let title = op["title"] as? String
                     let folder = try parseOptionalFolder(op["folder"], label: "apply[\(i)]")
                     let index = op["index"] as? Int ?? op["siblingIndex"] as? Int
+                    let existedBefore: Bool = {
+                        guard let canonical = BookmarkURL.canonicalize(url) else { return false }
+                        return ledger.entries.contains { $0.url == canonical }
+                    }()
                     if dryRun {
                         results.append([
-                            "index": i, "op": "add", "url": url, "ok": true, "dryRun": true
+                            "index": i,
+                            "op": "add",
+                            "url": url,
+                            "ok": true,
+                            "dryRun": true,
+                            "created": !existedBefore,
+                            "merged": existedBefore
                         ])
                     } else {
-                        let entry = try addCLI(url: url, title: title, folder: folder, siblingIndex: index)
+                        let added = try addCLI(url: url, title: title, folder: folder, siblingIndex: index)
                         results.append([
-                            "index": i, "op": "add", "url": entry.url, "ok": true, "id": entry.id
+                            "index": i,
+                            "op": "add",
+                            "url": added.entry.url,
+                            "ok": true,
+                            "id": added.entry.id,
+                            "created": added.created,
+                            "merged": !added.created
                         ])
                     }
                 case "update":

@@ -16,6 +16,18 @@ func testBookmarkURLCanonicalize() {
         "根路径有无斜杠同一条"
     )
     expect(BookmarkURL.canonicalize("ftp://a.com") == nil, "非 http(s) 拒绝")
+    // query/fragment 百分号编码与解码形态同一身份（与扩展 canonicalize 对齐）
+    let encodedFrag = "https://bijie.e-tecsun.com/#/login?redirect=%2F"
+    let decodedFrag = "https://bijie.e-tecsun.com#/login?redirect=/"
+    expect(
+        BookmarkURL.canonicalize(encodedFrag) == BookmarkURL.canonicalize(decodedFrag),
+        "fragment 中 %2F 与 / 同一条"
+    )
+    expect(
+        BookmarkURL.canonicalize("https://a.com/?q=%2Fpath")
+            == BookmarkURL.canonicalize("https://a.com?q=/path"),
+        "query 中 %2F 与 / 同一条"
+    )
 }
 
 func testBookmarkLedgerUnionAndDedupe() {
@@ -649,6 +661,26 @@ func testBookmarkToolbarAliasNormalizedFromOther() {
     let misfiled = BookmarkFolderPath(kind: .other, segments: ["书签工具栏", "官网"])
     let normalized = BookmarkLedgerMerge.normalizeFolderPath(misfiled)
     expect(normalized.kind == .toolbar && normalized.segments == ["官网"], "other/书签工具栏/… 归一到 toolbar")
+
+    let shellAliases = ["书签工具栏", "toolbar", "书签栏"]
+    for name in shellAliases {
+        let shell = BookmarkFolderPath(kind: .other, segments: [name])
+        let kept = BookmarkLedgerMerge.normalizeFolderPath(shell)
+        expect(
+            kept.kind == .other && kept.segments == [name],
+            "other/\(name) 空壳保留字面路径"
+        )
+        do {
+            let after = try BookmarkLedgerMerge.deleteFolder(shell, recursive: true, now: 9, in: .empty)
+            expect(
+                after.folderTombstones.contains { $0.pathKey == shell.sortKey },
+                "other/\(name) 可删并写墓碑"
+            )
+            expect(!BookmarkLedgerMerge.isRootFolderPath(kept), "空壳不是根")
+        } catch {
+            expect(false, "other/\(name) 删除不应失败: \(error)")
+        }
+    }
 
     var ledger = BookmarkLedgerMerge.unionMerge(
         ledger: .empty,
@@ -1300,6 +1332,28 @@ func testFolderRemovalCircuitBreakThreshold() {
         }
     }
     expect(failed.contains(pathKey), "连续失败达上限后进入 failedFolderRemovals")
+}
+
+@MainActor
+func testBookmarkAddReportsCreatedVsMerged() {
+    let bookmarks = MockBookmarkSync()
+    let first = try? bookmarks.addCLI(
+        url: "https://dup.example/#/x?q=%2F",
+        title: "D",
+        folder: BookmarkFolderPath(kind: .toolbar, segments: ["其它"]),
+        siblingIndex: 0
+    )
+    expect(first?.created == true, "首次 add created=true")
+    expect(bookmarks.ledger.entries.count == 1, "首次写入一条")
+    let second = try? bookmarks.addCLI(
+        url: "https://dup.example#/x?q=/",
+        title: "D2",
+        folder: BookmarkFolderPath(kind: .toolbar, segments: ["工作"]),
+        siblingIndex: 1
+    )
+    expect(second?.created == false, "编码变体 add merged")
+    expect(second?.entry.folder.segments == ["工作"], "合并可改夹")
+    expect(bookmarks.ledger.entries.count == 1, "变体不加条数")
 }
 
 func testBookmarkOnlinePresenceMultiConnection() {

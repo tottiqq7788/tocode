@@ -289,13 +289,13 @@ final class TocodeCommandExecutor {
                     return .failure(error)
                 case .success(let folder):
                     do {
-                        let entry = try sync.addCLI(
+                        let added = try sync.addCLI(
                             url: payload.url,
                             title: payload.title,
                             folder: folder,
                             siblingIndex: payload.siblingIndex
                         )
-                        return BookmarkCLIJSON.encode(BookmarkCLIJSON.entry(entry)).map(TocodeCommandOutput.init)
+                        return BookmarkCLIJSON.encode(BookmarkCLIJSON.addResult(added)).map(TocodeCommandOutput.init)
                     } catch let error as TocodeCommandError {
                         return .failure(error)
                     } catch {

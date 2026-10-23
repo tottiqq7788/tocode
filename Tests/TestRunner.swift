@@ -9328,6 +9328,7 @@ struct TestRunnerMain {
         testTrustedAlignFingerprintAndPoisonGate()
         testFolderRemovalCircuitBreakThreshold()
         testBookmarkOnlinePresenceMultiConnection()
+        testBookmarkAddReportsCreatedVsMerged()
 
         if failures == 0 {
             print("\nALL TESTS PASSED")

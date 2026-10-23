@@ -654,19 +654,47 @@ function flattenBookmarks(nodes, out = []) {
   return out;
 }
 
+/// 与主机 BookmarkURL.canonicalize 对齐：协议/主机小写、去默认端口与路径尾 `/`；
+/// query/fragment 按解码形态参与身份（%2F 与 / 同一条），避免扩展与账本分叉。
+function decodeURIComponentLenient(s) {
+  if (!s) return "";
+  try {
+    return decodeURIComponent(s.replace(/\+/g, " "));
+  } catch (_) {
+    return s;
+  }
+}
+
 function canonicalize(raw) {
   try {
     const u = new URL(raw);
     if (u.protocol !== "http:" && u.protocol !== "https:") return null;
-    u.protocol = u.protocol.toLowerCase();
-    u.hostname = u.hostname.toLowerCase();
-    if ((u.protocol === "http:" && u.port === "80") || (u.protocol === "https:" && u.port === "443")) {
-      u.port = "";
+    const protocol = u.protocol.toLowerCase();
+    const hostname = u.hostname.toLowerCase();
+    if (!hostname) return null;
+    let port = u.port;
+    if ((protocol === "http:" && port === "80") || (protocol === "https:" && port === "443")) {
+      port = "";
     }
-    if (u.pathname.length > 1 && u.pathname.endsWith("/")) {
-      u.pathname = u.pathname.slice(0, -1);
+    let pathname = u.pathname || "";
+    if (pathname.length > 1 && pathname.endsWith("/")) {
+      pathname = pathname.slice(0, -1);
     }
-    return u.toString();
+    if (pathname === "/") pathname = "";
+    const query = decodeURIComponentLenient(u.search.startsWith("?") ? u.search.slice(1) : u.search);
+    const fragment = decodeURIComponentLenient(u.hash.startsWith("#") ? u.hash.slice(1) : u.hash);
+    let out = protocol + "//";
+    if (u.username) {
+      out += encodeURIComponent(u.username);
+      if (u.password) out += ":" + encodeURIComponent(u.password);
+      out += "@";
+    }
+    out += hostname;
+    if (port) out += ":" + port;
+    out += pathname;
+    if (query) out += "?" + query;
+    if (fragment) out += "#" + fragment;
+    return out;
   } catch (_) {
     return null;
   }

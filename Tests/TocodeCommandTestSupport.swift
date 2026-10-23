@@ -146,10 +146,11 @@ final class MockBookmarkSync: BookmarkSyncCommanding {
         return ledger.entries.first { $0.url == canonical }
     }
 
-    func addCLI(url: String, title: String?, folder: BookmarkFolderPath?, siblingIndex: Int?) throws -> BookmarkEntry {
+    func addCLI(url: String, title: String?, folder: BookmarkFolderPath?, siblingIndex: Int?) throws -> BookmarkCLIAddResult {
         guard let canonical = BookmarkURL.canonicalize(url) else {
             throw TocodeCommandError.invalidArguments("bookmark add --url")
         }
+        let existed = ledger.entries.contains { $0.url == canonical }
         let resolvedTitle = (title?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
             ? title!.trimmingCharacters(in: .whitespacesAndNewlines)
             : canonical
@@ -177,7 +178,7 @@ final class MockBookmarkSync: BookmarkSyncCommanding {
         guard let saved = entry(url: canonical) else {
             throw TocodeCommandError.operationFailed("mock add failed")
         }
-        return saved
+        return BookmarkCLIAddResult(entry: saved, created: !existed)
     }
 
     func updateCLI(
@@ -344,16 +345,35 @@ final class MockBookmarkSync: BookmarkSyncCommanding {
                 switch action {
                 case "add":
                     let url = op["url"] as? String ?? ""
+                    let existedBefore: Bool = {
+                        guard let canonical = BookmarkURL.canonicalize(url) else { return false }
+                        return ledger.entries.contains { $0.url == canonical }
+                    }()
                     if dryRun {
-                        results.append(["index": i, "op": "add", "url": url, "ok": true, "dryRun": true])
+                        results.append([
+                            "index": i,
+                            "op": "add",
+                            "url": url,
+                            "ok": true,
+                            "dryRun": true,
+                            "created": !existedBefore,
+                            "merged": existedBefore
+                        ])
                     } else {
-                        let entry = try addCLI(
+                        let added = try addCLI(
                             url: url,
                             title: op["title"] as? String,
                             folder: folder,
                             siblingIndex: op["index"] as? Int
                         )
-                        results.append(["index": i, "op": "add", "url": entry.url, "ok": true])
+                        results.append([
+                            "index": i,
+                            "op": "add",
+                            "url": added.entry.url,
+                            "ok": true,
+                            "created": added.created,
+                            "merged": !added.created
+                        ])
                     }
                 case "update":
                     let url = op["url"] as? String ?? ""

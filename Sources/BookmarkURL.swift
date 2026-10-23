@@ -1,7 +1,8 @@
 import Foundation
 
 enum BookmarkURL {
-    /// 规范化书签网址：协议与主机小写，去掉默认端口与路径末尾斜杠，查询与片段原样保留。
+    /// 规范化书签网址：协议与主机小写，去掉默认端口与路径末尾斜杠。
+    /// 查询与片段按 URLComponents 解码形态参与身份（`%2F` 与 `/` 同一条），与扩展 canonicalize 对齐。
     static func canonicalize(_ raw: String) -> String? {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
