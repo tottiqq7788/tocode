@@ -74,9 +74,11 @@ final class TocodeSocketTransport: TocodeIPCTransport {
             sent += count
         }
 
+        // bookmark list 等响应可远超 64KB；按行读到换行，总上限防失控。
+        let maxResponseBytes = 16 * 1024 * 1024
         var buffer = [UInt8](repeating: 0, count: 65536)
         var accumulated = Data()
-        while accumulated.count < 65536 {
+        while true {
             let count = read(socket, &buffer, buffer.count)
             if count == 0 {
                 break
@@ -89,6 +91,9 @@ final class TocodeSocketTransport: TocodeIPCTransport {
                 break
             }
             accumulated.append(contentsOf: buffer.prefix(count))
+            if accumulated.count > maxResponseBytes {
+                return .failure(.transport("响应超过 \(maxResponseBytes) 字节上限"))
+            }
             if accumulated.last == 0x0A {
                 break
             }

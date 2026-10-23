@@ -46,6 +46,8 @@ enum BookmarkCLIJSON {
             "url": entry.url,
             "title": entry.title,
             "folder": BookmarkCLIFolder.encode(entry.folder),
+            "index": entry.siblingIndex,
+            "siblingIndex": entry.siblingIndex,
             "updatedAt": entry.updatedAt
         ]
     }
@@ -68,10 +70,11 @@ protocol BookmarkSyncCommanding: AnyObject {
     var hasRemoteKey: Bool { get }
     var connectedBrowserKeys: [String] { get }
     var snapshot: BookmarkLedgerSnapshot { get }
+    var activityLog: BookmarkSyncActivityLog { get }
 
     func entry(url: String) -> BookmarkEntry?
-    func addCLI(url: String, title: String?, folder: BookmarkFolderPath?) throws -> BookmarkEntry
-    func updateCLI(url: String, title: String?, folder: BookmarkFolderPath?, newURL: String?) throws -> BookmarkEntry
+    func addCLI(url: String, title: String?, folder: BookmarkFolderPath?, siblingIndex: Int?) throws -> BookmarkEntry
+    func updateCLI(url: String, title: String?, folder: BookmarkFolderPath?, siblingIndex: Int?, newURL: String?) throws -> BookmarkEntry
     func deleteCLI(url: String) throws
     func pullRemoteForCLI() async -> Result<BookmarkLedgerSnapshot, Error>
 }

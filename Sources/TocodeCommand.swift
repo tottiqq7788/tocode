@@ -55,12 +55,14 @@ struct TocodeBookmarkAddPayload: Equatable {
     var url: String
     var title: String?
     var folder: String?
+    var siblingIndex: Int?
 }
 
 struct TocodeBookmarkUpdatePayload: Equatable {
     var url: String
     var title: String?
     var folder: String?
+    var siblingIndex: Int?
     var newURL: String?
 }
 
@@ -72,6 +74,7 @@ enum TocodeBookmarkCommand: Equatable {
     case update(TocodeBookmarkUpdatePayload)
     case delete(String)
     case pull
+    case log(Int)
 }
 
 enum TocodeCommand: Equatable {
@@ -192,10 +195,11 @@ enum TocodeCommandParser {
         bookmark status                     条数、远程开关、是否有密钥、修订号
         bookmark list                       全部书签 JSON 数组
         bookmark get <url>                  单条书签 JSON
-        bookmark add --url <url> [--title <标题>] [--folder toolbar|other|mobile|<路径>]
-        bookmark update --url <url> [--title <标题>] [--folder ...] [--new-url <url>]
+        bookmark add --url <url> [--title <标题>] [--folder toolbar|other|mobile|<路径>] [--index <n>]
+        bookmark update --url <url> [--title <标题>] [--folder ...] [--index <n>] [--new-url <url>]
         bookmark delete --url <url>         删除并写墓碑
         bookmark pull                       用本机远程同步密钥拉取并合并最新账本
+        bookmark log [行数]                 打印最近同步活动日志（默认 80 行）
 
       其他
         blackout（别名 .lshp）                工具 → 临时黑屏
@@ -386,6 +390,14 @@ enum TocodeCommandParser {
         case "pull", "sync":
             guard tokens.count == 1 else { return .failure(.invalidArguments("bookmark pull")) }
             return .success(.bookmark(.pull))
+        case "log":
+            if tokens.count == 1 {
+                return .success(.bookmark(.log(80)))
+            }
+            guard tokens.count == 2, let lines = Int(tokens[1]), lines > 0 else {
+                return .failure(.invalidArguments("bookmark log [行数]"))
+            }
+            return .success(.bookmark(.log(min(lines, 2000))))
         default:
             return .failure(.unknownCommand("bookmark \(sub)"))
         }
@@ -395,22 +407,30 @@ enum TocodeCommandParser {
         var url: String?
         var title: String?
         var folder: String?
-        var index = 0
-        while index < tokens.count {
-            let token = tokens[index]
+        var siblingIndex: Int?
+        var cursor = 0
+        while cursor < tokens.count {
+            let token = tokens[cursor]
             switch token {
             case "--url":
-                guard index + 1 < tokens.count else { return .failure(.missingValue("bookmark add --url <url>")) }
-                url = tokens[index + 1]
-                index += 2
+                guard cursor + 1 < tokens.count else { return .failure(.missingValue("bookmark add --url <url>")) }
+                url = tokens[cursor + 1]
+                cursor += 2
             case "--title":
-                guard index + 1 < tokens.count else { return .failure(.missingValue("bookmark add --title <标题>")) }
-                title = tokens[index + 1]
-                index += 2
+                guard cursor + 1 < tokens.count else { return .failure(.missingValue("bookmark add --title <标题>")) }
+                title = tokens[cursor + 1]
+                cursor += 2
             case "--folder":
-                guard index + 1 < tokens.count else { return .failure(.missingValue("bookmark add --folder <folder>")) }
-                folder = tokens[index + 1]
-                index += 2
+                guard cursor + 1 < tokens.count else { return .failure(.missingValue("bookmark add --folder <folder>")) }
+                folder = tokens[cursor + 1]
+                cursor += 2
+            case "--index":
+                guard cursor + 1 < tokens.count else { return .failure(.missingValue("bookmark add --index <n>")) }
+                guard let value = Int(tokens[cursor + 1]), value >= 0 else {
+                    return .failure(.invalidArguments("bookmark add --index 须为非负整数"))
+                }
+                siblingIndex = value
+                cursor += 2
             default:
                 return .failure(.invalidArguments("bookmark add \(token)"))
             }
@@ -418,34 +438,47 @@ enum TocodeCommandParser {
         guard let url, !url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return .failure(.missingValue("bookmark add --url <url>"))
         }
-        return .success(.bookmark(.add(TocodeBookmarkAddPayload(url: url, title: title, folder: folder))))
+        return .success(.bookmark(.add(TocodeBookmarkAddPayload(
+            url: url,
+            title: title,
+            folder: folder,
+            siblingIndex: siblingIndex
+        ))))
     }
 
     private static func parseBookmarkUpdate(_ tokens: [String]) -> Result<TocodeCommand, TocodeCommandError> {
         var url: String?
         var title: String?
         var folder: String?
+        var siblingIndex: Int?
         var newURL: String?
-        var index = 0
-        while index < tokens.count {
-            let token = tokens[index]
+        var cursor = 0
+        while cursor < tokens.count {
+            let token = tokens[cursor]
             switch token {
             case "--url":
-                guard index + 1 < tokens.count else { return .failure(.missingValue("bookmark update --url <url>")) }
-                url = tokens[index + 1]
-                index += 2
+                guard cursor + 1 < tokens.count else { return .failure(.missingValue("bookmark update --url <url>")) }
+                url = tokens[cursor + 1]
+                cursor += 2
             case "--title":
-                guard index + 1 < tokens.count else { return .failure(.missingValue("bookmark update --title <标题>")) }
-                title = tokens[index + 1]
-                index += 2
+                guard cursor + 1 < tokens.count else { return .failure(.missingValue("bookmark update --title <标题>")) }
+                title = tokens[cursor + 1]
+                cursor += 2
             case "--folder":
-                guard index + 1 < tokens.count else { return .failure(.missingValue("bookmark update --folder <folder>")) }
-                folder = tokens[index + 1]
-                index += 2
+                guard cursor + 1 < tokens.count else { return .failure(.missingValue("bookmark update --folder <folder>")) }
+                folder = tokens[cursor + 1]
+                cursor += 2
+            case "--index":
+                guard cursor + 1 < tokens.count else { return .failure(.missingValue("bookmark update --index <n>")) }
+                guard let value = Int(tokens[cursor + 1]), value >= 0 else {
+                    return .failure(.invalidArguments("bookmark update --index 须为非负整数"))
+                }
+                siblingIndex = value
+                cursor += 2
             case "--new-url":
-                guard index + 1 < tokens.count else { return .failure(.missingValue("bookmark update --new-url <url>")) }
-                newURL = tokens[index + 1]
-                index += 2
+                guard cursor + 1 < tokens.count else { return .failure(.missingValue("bookmark update --new-url <url>")) }
+                newURL = tokens[cursor + 1]
+                cursor += 2
             default:
                 return .failure(.invalidArguments("bookmark update \(token)"))
             }
@@ -453,13 +486,14 @@ enum TocodeCommandParser {
         guard let url, !url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return .failure(.missingValue("bookmark update --url <url>"))
         }
-        guard title != nil || folder != nil || newURL != nil else {
-            return .failure(.missingValue("bookmark update 至少提供 --title / --folder / --new-url 之一"))
+        guard title != nil || folder != nil || siblingIndex != nil || newURL != nil else {
+            return .failure(.missingValue("bookmark update 至少提供 --title / --folder / --index / --new-url 之一"))
         }
         return .success(.bookmark(.update(TocodeBookmarkUpdatePayload(
             url: url,
             title: title,
             folder: folder,
+            siblingIndex: siblingIndex,
             newURL: newURL
         ))))
     }

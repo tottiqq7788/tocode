@@ -21,15 +21,13 @@ enum BookmarkSyncPrompt {
     }
 
     private static func presentCreate() -> Action {
-        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
-        field.stringValue = BookmarkSyncKeyFactory.generate()
-        field.placeholderString = "至少 32 个字符，或粘贴已有密钥"
-
-        let stack = NSStackView(views: [labeled("远程同步密钥", field)])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 8
-        stack.frame = NSRect(x: 0, y: 0, width: 400, height: 48)
+        let field = PromptTextFields.secure(
+            string: BookmarkSyncKeyFactory.generate(),
+            placeholder: "至少 32 个字符，或粘贴已有密钥"
+        )
+        let stack = PromptTextFields.accessoryStack([
+            PromptTextFields.labeled("远程同步密钥", field)
+        ])
 
         let alert = NSAlert()
         alert.messageText = "远程同步"
@@ -124,15 +122,5 @@ enum BookmarkSyncPrompt {
         alert.informativeText = message
         alert.addButton(withTitle: "好")
         alert.runModal()
-    }
-
-    private static func labeled(_ title: String, _ field: NSView) -> NSView {
-        let label = NSTextField(labelWithString: title)
-        label.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        let row = NSStackView(views: [label, field])
-        row.orientation = .vertical
-        row.alignment = .leading
-        row.spacing = 2
-        return row
     }
 }

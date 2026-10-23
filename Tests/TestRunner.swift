@@ -1517,6 +1517,7 @@ func testUserManualPages() {
     expect(joined.contains("自动隐藏和显示程序坞"), "说明书写明需系统自动隐藏")
     expect(joined.contains("定时器"), "说明书覆盖 mac 定时器")
     expect(joined.contains("书签同步"), "说明书覆盖书签同步")
+    expect(joined.contains("同步日志"), "说明书覆盖同步日志")
     expect(joined.contains("tocode bookmark"), "说明书覆盖 bookmark CLI")
     expect(joined.contains("一次性"), "说明书覆盖一次性调度")
     expect(joined.contains("cron"), "说明书覆盖 cron 调度")
@@ -9293,8 +9294,12 @@ struct TestRunnerMain {
         testBookmarkLedgerUnionAndDedupe()
         testBookmarkLedgerTombstoneAfterJoin()
         testBookmarkLedgerChangeURLCollision()
+        testBookmarkSyncActivityLog()
+        testBookmarkExtensionOpenHelpers()
         testBookmarkCLIParser()
         await testBookmarkCLIExecutorCRUDAndPull()
+        testBookmarkSiblingIndexClamp()
+        testBookmarkLayoutIndexAndLegacyDecode()
         testBookmarkSyncCryptoRoundTrip()
 
         if failures == 0 {

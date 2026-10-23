@@ -133,11 +133,11 @@ enum ModelRelayPrompts {
         provider.selectItem(at: draft.presetIndex ?? providerPresets.count)
         let url = NSTextField(string: draft.customBaseURL)
         url.placeholderString = "https://api.example.com/v1"
-        let secret = ModelRelaySecureTextField(
-            frame: NSRect(x: 0, y: 0, width: 330, height: 24)
+        let secret = PromptTextFields.secure(
+            string: draft.secret,
+            placeholder: existing == nil ? "上游 API Key" : "留空则保留现有 Key",
+            width: 330
         )
-        secret.stringValue = draft.secret
-        secret.placeholderString = existing == nil ? "上游 API Key" : "留空则保留现有 Key"
 
         let modelHint: String
         if let existing {
@@ -332,15 +332,16 @@ enum ModelRelayPrompts {
 
     static func localKeyAction(name: String, needsMigration: Bool) -> LocalKeyAction? {
         if needsMigration {
-            let password = ModelRelaySecureTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
-            password.placeholderString = "旧查看密码（一次性迁移）"
+            let password = PromptTextFields.secure(placeholder: "旧查看密码（一次性迁移）")
             let alert = NSAlert()
             alert.messageText = name
             alert.informativeText = "此密钥仍使用旧查看密码加密。输入一次查看密码后将迁入钥匙串，之后改用设备验证复制。"
             alert.addButton(withTitle: "迁移并复制")
             alert.addButton(withTitle: "删除…")
             alert.addButton(withTitle: "取消")
-            alert.accessoryView = password
+            alert.accessoryView = PromptTextFields.accessoryStack([
+                PromptTextFields.labeled("查看密码", password)
+            ])
             defer { password.stringValue = "" }
             let response = alert.runModalFocusingFirstTextField()
             if response == .alertFirstButtonReturn {
@@ -736,22 +737,3 @@ private final class ModelRelayProviderFormBridge: NSObject, NSTextFieldDelegate 
     }
 }
 
-/// 菜单栏应用没有 Edit 菜单，因此在安全输入框内显式支持粘贴和全选。
-@MainActor
-private final class ModelRelaySecureTextField: NSSecureTextField {
-    override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
-        guard flags == .command else { return super.performKeyEquivalent(with: event) }
-        switch event.charactersIgnoringModifiers?.lowercased() {
-        case "v":
-            guard let editor = currentEditor() else { return super.performKeyEquivalent(with: event) }
-            editor.paste(self)
-            return true
-        case "a":
-            selectText(self)
-            return true
-        default:
-            return super.performKeyEquivalent(with: event)
-        }
-    }
-}

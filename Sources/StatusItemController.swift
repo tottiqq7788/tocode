@@ -679,6 +679,14 @@ final class StatusItemController: NSObject {
         bookmarkItem.image = NSImage(systemSymbolName: "bookmark", accessibilityDescription: nil)
         let bookmarkMenu = NSMenu()
         bookmarkMenu.autoenablesItems = false
+        let syncLogItem = bookmarkMenu.addItem(
+            withTitle: "同步日志",
+            action: #selector(openBookmarkSyncLog),
+            keyEquivalent: ""
+        )
+        syncLogItem.target = self
+        syncLogItem.image = NSImage(systemSymbolName: "text.alignleft", accessibilityDescription: nil)
+
         let remoteSyncItem = bookmarkMenu.addItem(
             withTitle: "远程同步",
             action: #selector(configureBookmarkRemoteSync),
@@ -1448,6 +1456,10 @@ final class StatusItemController: NSObject {
                 alert.runModal()
             }
         }
+    }
+
+    @objc private func openBookmarkSyncLog() {
+        BookmarkSyncLogWindow.present(log: bookmarkSync.activityLog)
     }
 
     @objc private func installBookmarkExtension(_ sender: NSMenuItem) {

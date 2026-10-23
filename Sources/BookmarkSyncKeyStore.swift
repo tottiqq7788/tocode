@@ -27,10 +27,15 @@ final class KeychainBookmarkSyncKeyStore: BookmarkSyncKeyStoring {
         var query = baseQuery()
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
+        // 禁止弹出钥匙串解锁框：否则会卡住 @MainActor，IPC/扩展桥全部无响应。
+        query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         if status == errSecItemNotFound {
             return nil
+        }
+        if status == errSecInteractionNotAllowed || status == errSecAuthFailed {
+            throw BookmarkSyncKeyError.keychain(status)
         }
         guard status == errSecSuccess,
               let data = result as? Data,

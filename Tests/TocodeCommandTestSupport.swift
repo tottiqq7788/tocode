@@ -134,6 +134,7 @@ final class MockBookmarkSync: BookmarkSyncCommanding {
     var remoteKey = false
     var connected: [String] = []
     var pullResult: Result<BookmarkLedgerSnapshot, Error>?
+    let activityLog = BookmarkSyncActivityLog(capacity: 50, fileURL: nil)
 
     var isRemoteEnabled: Bool { remoteEnabled }
     var hasRemoteKey: Bool { remoteKey }
@@ -145,7 +146,7 @@ final class MockBookmarkSync: BookmarkSyncCommanding {
         return ledger.entries.first { $0.url == canonical }
     }
 
-    func addCLI(url: String, title: String?, folder: BookmarkFolderPath?) throws -> BookmarkEntry {
+    func addCLI(url: String, title: String?, folder: BookmarkFolderPath?, siblingIndex: Int?) throws -> BookmarkEntry {
         guard let canonical = BookmarkURL.canonicalize(url) else {
             throw TocodeCommandError.invalidArguments("bookmark add --url")
         }
@@ -159,6 +160,7 @@ final class MockBookmarkSync: BookmarkSyncCommanding {
                     url: canonical,
                     title: resolvedTitle,
                     folder: folder ?? BookmarkFolderPath(kind: .other, segments: []),
+                    siblingIndex: siblingIndex ?? 0,
                     updatedAt: Date().timeIntervalSince1970
                 )
             ],
@@ -170,7 +172,13 @@ final class MockBookmarkSync: BookmarkSyncCommanding {
         return saved
     }
 
-    func updateCLI(url: String, title: String?, folder: BookmarkFolderPath?, newURL: String?) throws -> BookmarkEntry {
+    func updateCLI(
+        url: String,
+        title: String?,
+        folder: BookmarkFolderPath?,
+        siblingIndex: Int?,
+        newURL: String?
+    ) throws -> BookmarkEntry {
         guard entry(url: url) != nil else {
             throw TocodeCommandError.operationFailed("找不到该书签：\(url)")
         }
@@ -180,6 +188,7 @@ final class MockBookmarkSync: BookmarkSyncCommanding {
                 to: newURL,
                 title: title,
                 folder: folder,
+                siblingIndex: siblingIndex,
                 updatedAt: Date().timeIntervalSince1970,
                 in: ledger
             )
@@ -192,6 +201,7 @@ final class MockBookmarkSync: BookmarkSyncCommanding {
             urlRaw: url,
             title: title,
             folder: folder,
+            siblingIndex: siblingIndex,
             updatedAt: Date().timeIntervalSince1970,
             in: ledger
         )

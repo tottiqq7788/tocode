@@ -16,11 +16,14 @@ enum BookmarkNativeHostMain {
         let stdoutHandle = FileHandle.standardOutput
         let stdinHandle = FileHandle.standardInput
 
-        let queue = DispatchQueue(label: "com.tocode.bookmark.host")
+        // 必须两路并行：stdin 阻塞读若与 socket→stdout 共用串行队列，下行永远不会跑，
+        // 表现为扩展只上报 tree、永远收不到 tree_ok/upsert（无 apply_result）。
+        let inbound = DispatchQueue(label: "com.tocode.bookmark.host.inbound")
+        let outbound = DispatchQueue(label: "com.tocode.bookmark.host.outbound")
         let group = DispatchGroup()
 
         group.enter()
-        queue.async {
+        inbound.async {
             while true {
                 guard let message = readNativeMessage(from: stdinHandle) else { break }
                 guard client.sendFramed(message) else { break }
@@ -29,7 +32,7 @@ enum BookmarkNativeHostMain {
         }
 
         group.enter()
-        queue.async {
+        outbound.async {
             while true {
                 guard let message = client.receiveFramed() else { break }
                 guard writeNativeMessage(message, to: stdoutHandle) else { break }

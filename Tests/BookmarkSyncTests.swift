@@ -32,9 +32,41 @@ func testBookmarkLedgerUnionAndDedupe() {
     )
     expect(ledger.entries.count == 1, "同网址去重后只留一条")
     expect(ledger.entries[0].url == "https://a.com", "规范化网址")
-    expect(ledger.entries[0].folder.kind == .toolbar, "文件夹优先书签栏")
+    expect(ledger.entries[0].folder.kind == .toolbar, "LWW 取较新文件夹")
     expect(ledger.entries[0].title == "A2", "标题取较新")
     expect(ledger.joinedBrowserKeys == ["chrome:Default"], "记录已加入浏览器")
+
+    // 较旧的 toolbar 不覆盖较新的 other（纯 LWW，无 kind 优先级）
+    ledger = BookmarkLedgerMerge.unionMerge(
+        ledger: ledger,
+        incoming: [
+            BookmarkEntry(
+                url: "https://a.com",
+                title: "A-old",
+                folder: folderToolbar,
+                siblingIndex: 0,
+                updatedAt: 1
+            )
+        ],
+        browserKey: "chrome:Default"
+    )
+    expect(ledger.entries[0].folder.kind == .toolbar && ledger.entries[0].title == "A2", "较旧不覆盖")
+    ledger = BookmarkLedgerMerge.unionMerge(
+        ledger: ledger,
+        incoming: [
+            BookmarkEntry(
+                url: "https://a.com",
+                title: "A3",
+                folder: folderOther,
+                siblingIndex: 5,
+                updatedAt: 9
+            )
+        ],
+        browserKey: "chrome:Default"
+    )
+    expect(ledger.entries[0].folder.kind == .other, "较新 other 胜出")
+    expect(ledger.entries[0].siblingIndex == 5, "较新 siblingIndex 胜出")
+    expect(ledger.entries[0].title == "A3", "较新标题胜出")
 
     ledger = BookmarkLedgerMerge.unionMerge(
         ledger: ledger,
@@ -98,6 +130,7 @@ func testBookmarkLedgerChangeURLCollision() {
         to: "https://new.com",
         title: "Changed",
         folder: nil,
+        siblingIndex: nil,
         updatedAt: 5,
         in: ledger
     )
@@ -107,14 +140,98 @@ func testBookmarkLedgerChangeURLCollision() {
     expect(ledger.entries[0].title == "Changed", "较新标题写入已存在条")
 }
 
+func testBookmarkSyncActivityLog() {
+    let log = BookmarkSyncActivityLog(capacity: 3)
+    log.append("one")
+    log.append("two")
+    log.append("three")
+    log.append("four")
+    expect(log.entries.map(\.message) == ["two", "three", "four"], "环形缓冲只留最近容量条")
+    expect(
+        BookmarkSyncActivityLog.sanitize("保存密钥：abcSECRET123") == "保存[已隐藏]",
+        "脱敏密钥片段"
+    )
+    expect(
+        BookmarkSyncActivityLog.sanitize("远程推送完成，修订 3。").contains("修订 3"),
+        "普通消息保留"
+    )
+    var changed = 0
+    log.onChange = { changed += 1 }
+    log.append("five")
+    expect(changed == 1, "追加触发 onChange")
+    log.clear()
+    expect(log.entries.isEmpty && changed == 2, "清空触发 onChange")
+}
+
+func testBookmarkExtensionOpenHelpers() {
+    expect(BookmarkBrowser.chrome.extensionPageURL.absoluteString == "chrome://extensions", "Chrome 扩展页")
+    expect(BookmarkBrowser.edge.extensionPageURL.absoluteString == "edge://extensions", "Edge 扩展页")
+    expect(
+        BookmarkBrowser.firefox.extensionPageURL.absoluteString
+            == "about:debugging#/runtime/this-firefox",
+        "Firefox 扩展页"
+    )
+    expect(BookmarkBrowser.chrome.applicationNames.first == "Google Chrome", "Chrome 优先应用名")
+    expect(BookmarkBrowser.edge.applicationNames == ["Microsoft Edge"], "Edge 应用名")
+    expect(BookmarkBrowser.firefox.applicationNames.contains("Firefox"), "Firefox 应用名")
+    expect(
+        BookmarkBrowser.firefox.extensionPageURL.absoluteString.hasPrefix("about:debugging"),
+        "Firefox 用 about:debugging 而非 about:addons"
+    )
+
+    expect(
+        BookmarkExtensionInstall.stagedExtensionDirectory(for: .chrome).path.hasSuffix(
+            "bookmark-sync-chrome"
+        ),
+        "Chrome 可加载副本按浏览器分目录"
+    )
+    expect(
+        BookmarkExtensionInstall.stagedExtensionDirectory(for: .firefox).path.hasSuffix(
+            "bookmark-sync-firefox"
+        ),
+        "Firefox 可加载副本按浏览器分目录"
+    )
+    if BookmarkExtensionInstall.bundledExtensionDirectory() != nil {
+        do {
+            let chrome = try BookmarkExtensionInstall.prepareInstallableExtensionDirectory(for: .chrome)
+            expect(
+                FileManager.default.fileExists(atPath: chrome.appendingPathComponent("manifest.json").path),
+                "Chrome 同步后含 manifest.json"
+            )
+            let chromeManifest = try Data(
+                contentsOf: chrome.appendingPathComponent("manifest.json")
+            )
+            let chromeJSON = try JSONSerialization.jsonObject(with: chromeManifest) as? [String: Any]
+            let chromeBG = chromeJSON?["background"] as? [String: Any]
+            expect(chromeBG?["service_worker"] as? String == "background.js", "Chrome 用 service_worker")
+
+            let firefox = try BookmarkExtensionInstall.prepareInstallableExtensionDirectory(for: .firefox)
+            let firefoxManifest = try Data(
+                contentsOf: firefox.appendingPathComponent("manifest.json")
+            )
+            let firefoxJSON = try JSONSerialization.jsonObject(with: firefoxManifest) as? [String: Any]
+            let firefoxBG = firefoxJSON?["background"] as? [String: Any]
+            expect(firefoxBG?["scripts"] as? [String] == ["background.js"], "Firefox 用 background.scripts")
+            expect(firefoxBG?["service_worker"] == nil, "Firefox 去掉 service_worker")
+        } catch {
+            expect(false, "prepareInstallableExtensionDirectory 不应失败: \(error)")
+        }
+    }
+}
+
 func testBookmarkCLIParser() {
     expect(TocodeCommandParser.parse("bookmark") == .success(.bookmark(.status)), "bookmark 默认 status")
     expect(TocodeCommandParser.parse("bookmark list") == .success(.bookmark(.list)), "bookmark list")
     expect(TocodeCommandParser.parse("bookmark get https://a.com") == .success(.bookmark(.get("https://a.com"))), "bookmark get")
     expect(
-        TocodeCommandParser.parse("bookmark add --url https://a.com --title A --folder toolbar")
-            == .success(.bookmark(.add(TocodeBookmarkAddPayload(url: "https://a.com", title: "A", folder: "toolbar")))),
-        "bookmark add"
+        TocodeCommandParser.parse("bookmark add --url https://a.com --title A --folder toolbar --index 2")
+            == .success(.bookmark(.add(TocodeBookmarkAddPayload(
+                url: "https://a.com",
+                title: "A",
+                folder: "toolbar",
+                siblingIndex: 2
+            )))),
+        "bookmark add --index"
     )
     expect(
         TocodeCommandParser.parse("bookmark update --url https://a.com --new-url https://b.com")
@@ -122,9 +239,21 @@ func testBookmarkCLIParser() {
                 url: "https://a.com",
                 title: nil,
                 folder: nil,
+                siblingIndex: nil,
                 newURL: "https://b.com"
             )))),
         "bookmark update --new-url"
+    )
+    expect(
+        TocodeCommandParser.parse("bookmark update --url https://a.com --index 3")
+            == .success(.bookmark(.update(TocodeBookmarkUpdatePayload(
+                url: "https://a.com",
+                title: nil,
+                folder: nil,
+                siblingIndex: 3,
+                newURL: nil
+            )))),
+        "bookmark update --index"
     )
     expect(TocodeCommandParser.parse("bookmark delete --url https://a.com") == .success(.bookmark(.delete("https://a.com"))), "bookmark delete")
     expect(TocodeCommandParser.parse("bookmark pull") == .success(.bookmark(.pull)), "bookmark pull")
@@ -195,6 +324,64 @@ func testBookmarkCLIExecutorCRUDAndPull() async {
     } else {
         expect(false, "有密钥 pull 成功")
     }
+}
+
+/// 与扩展 clampIndex 同语义，防止回归。
+func clampBookmarkSiblingIndex(_ wanted: Int, childCount: Int, forMoveAlreadyChild: Bool) -> Int {
+    let positive = max(0, wanted)
+    if forMoveAlreadyChild {
+        let maxIndex = max(0, childCount - 1)
+        return min(positive, maxIndex)
+    }
+    return min(positive, childCount)
+}
+
+func testBookmarkSiblingIndexClamp() {
+    expect(clampBookmarkSiblingIndex(0, childCount: 0, forMoveAlreadyChild: false) == 0, "空夹 create append")
+    expect(clampBookmarkSiblingIndex(99, childCount: 3, forMoveAlreadyChild: false) == 3, "create 钳到 append")
+    expect(clampBookmarkSiblingIndex(99, childCount: 3, forMoveAlreadyChild: true) == 2, "同父 move 钳到 count-1")
+    expect(clampBookmarkSiblingIndex(-5, childCount: 3, forMoveAlreadyChild: false) == 0, "负 index 归零")
+}
+
+func testBookmarkLayoutIndexAndLegacyDecode() {
+    let nodes: [[String: Any]] = [
+        [
+            "type": "folder",
+            "title": "书签栏",
+            "index": 0,
+            "children": [
+                [
+                    "type": "bookmark",
+                    "id": "1",
+                    "title": "First",
+                    "url": "https://first.com",
+                    "index": 0,
+                    "dateAdded": 2_000.0
+                ],
+                [
+                    "type": "bookmark",
+                    "id": "2",
+                    "title": "Second",
+                    "url": "https://second.com",
+                    "index": 1,
+                    "dateAdded": 3_000.0
+                ]
+            ]
+        ]
+    ]
+    let layout = BookmarkLedgerMerge.layout(fromBrowserNodes: nodes)
+    expect(layout.entries.count == 2, "解析两条书签")
+    expect(layout.entries.first { $0.url == "https://first.com" }?.siblingIndex == 0, "保留 index 0")
+    expect(layout.entries.first { $0.url == "https://second.com" }?.siblingIndex == 1, "保留 index 1")
+
+    let legacyJSON = """
+    {"version":1,"entries":[{"id":"x","url":"https://legacy.com","title":"L","folder":{"kind":"toolbar","segments":[]},"updatedAt":1}],"tombstones":[],"remoteRevision":0,"joinedBrowserKeys":[]}
+    """
+    let data = Data(legacyJSON.utf8)
+    let decoded = try? JSONDecoder().decode(BookmarkLedgerSnapshot.self, from: data)
+    expect(decoded?.entries.count == 1, "旧账本可解码")
+    expect(decoded?.entries.first?.siblingIndex == 0, "缺 siblingIndex 默认 0")
+    expect(decoded?.folders.isEmpty == true, "缺 folders 默认空")
 }
 
 func testBookmarkSyncCryptoRoundTrip() {

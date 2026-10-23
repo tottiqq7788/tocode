@@ -281,7 +281,12 @@ final class TocodeCommandExecutor {
                     return .failure(error)
                 case .success(let folder):
                     do {
-                        let entry = try sync.addCLI(url: payload.url, title: payload.title, folder: folder)
+                        let entry = try sync.addCLI(
+                            url: payload.url,
+                            title: payload.title,
+                            folder: folder,
+                            siblingIndex: payload.siblingIndex
+                        )
                         return BookmarkCLIJSON.encode(BookmarkCLIJSON.entry(entry)).map(TocodeCommandOutput.init)
                     } catch let error as TocodeCommandError {
                         return .failure(error)
@@ -299,6 +304,7 @@ final class TocodeCommandExecutor {
                             url: payload.url,
                             title: payload.title,
                             folder: folder,
+                            siblingIndex: payload.siblingIndex,
                             newURL: payload.newURL
                         )
                         return BookmarkCLIJSON.encode(BookmarkCLIJSON.entry(entry)).map(TocodeCommandOutput.init)
@@ -323,6 +329,8 @@ final class TocodeCommandExecutor {
                 }
             case .pull:
                 return .failure(.operationFailed("bookmark pull 需要通过 CLI 异步执行"))
+            case .log(let lines):
+                return .success(TocodeCommandOutput(sync.activityLog.dumpText(maxLines: lines)))
             }
         }
     }

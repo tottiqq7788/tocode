@@ -9,18 +9,12 @@ enum BindingKeyPrompt {
     }
 
     static func setSecret() -> String? {
-        let secret = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
-        secret.placeholderString = "至少 8 个字符"
-        let confirmation = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
-        confirmation.placeholderString = "再次输入绑定密钥"
-        let stack = NSStackView(views: [
-            labeled("绑定密钥", secret),
-            labeled("确认密钥", confirmation)
+        let secret = PromptTextFields.secure(placeholder: "至少 8 个字符")
+        let confirmation = PromptTextFields.secure(placeholder: "再次输入绑定密钥")
+        let stack = PromptTextFields.accessoryStack([
+            PromptTextFields.labeled("绑定密钥", secret),
+            PromptTextFields.labeled("确认密钥", confirmation)
         ])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 8
-        stack.frame = NSRect(x: 0, y: 0, width: 360, height: 70)
 
         let alert = NSAlert()
         alert.messageText = "设置绑定密钥"
@@ -84,15 +78,5 @@ enum BindingKeyPrompt {
             return .cancel
         }
         return setSecret().map { .set($0) } ?? .cancel
-    }
-
-    private static func labeled(_ title: String, _ field: NSView) -> NSView {
-        let label = NSTextField(labelWithString: title)
-        label.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        let row = NSStackView(views: [label, field])
-        row.orientation = .vertical
-        row.alignment = .leading
-        row.spacing = 2
-        return row
     }
 }

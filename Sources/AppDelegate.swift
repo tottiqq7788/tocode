@@ -68,13 +68,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } catch {
             NSLog("Tocode 书签同步桥启动失败: %@", error.localizedDescription)
         }
-        if bookmarkSync.isRemoteEnabled {
-            Task { await bookmarkSync.syncRemoteNow() }
-        }
 
         let blackout = ScreenBlackoutService(overlay: ScreenBlackoutOverlay())
 
-        // 先启动 IPC，避免微信 Keychain 初始化阻塞命令入口。
+        // 先启动 IPC，避免微信/书签钥匙串初始化阻塞命令入口。
         let executor = TocodeCommandExecutor(
             mouseWheel: wheel,
             shortcuts: service,
@@ -89,6 +86,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ipcServer = server
         } catch {
             NSLog("Tocode IPC server 启动失败: %@", error.localizedDescription)
+        }
+
+        bookmarkSync.refreshRemoteKeyCache()
+        // IPC 就绪后再拉远程；钥匙串读在后台，不卡住主线程。
+        if bookmarkSync.isRemoteEnabled {
+            Task { await bookmarkSync.syncRemoteNow() }
         }
 
         let modelRelay = ModelRelayService()

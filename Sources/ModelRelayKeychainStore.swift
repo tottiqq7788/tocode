@@ -20,6 +20,7 @@ final class KeychainModelRelayUpstreamKeyStore: ModelRelayUpstreamKeyStoring {
         var query = baseQuery(id: id)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
+        query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         if status == errSecItemNotFound {
@@ -92,6 +93,7 @@ final class KeychainModelRelayLocalKeyStore: ModelRelayLocalKeyStoring {
         var query = baseQuery(id: id)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
+        query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         if status == errSecItemNotFound || status == errSecUserCanceled || status == errSecAuthFailed {
