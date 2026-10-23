@@ -59,6 +59,7 @@ final class TocodeCommandExecutor {
     private let codexSync: CodexSyncSettingsStore
     private let finderFollow: FinderFollowSettingsStore
     private var weChat: WeChatAssociationControlling
+    private var bookmarkSync: (any BookmarkSyncCommanding)?
     private let screenBlackout: ScreenBlackoutService
     private let notify: (String, String) -> Void
 
@@ -76,6 +77,7 @@ final class TocodeCommandExecutor {
         codexSync: CodexSyncSettingsStore = CodexSyncSettingsStore(),
         finderFollow: FinderFollowSettingsStore = FinderFollowSettingsStore(),
         weChat: WeChatAssociationControlling,
+        bookmarkSync: (any BookmarkSyncCommanding)? = nil,
         screenBlackout: ScreenBlackoutService? = nil,
         notify: @escaping (String, String) -> Void = { title, body in
             let content = UNMutableNotificationContent()
@@ -104,12 +106,17 @@ final class TocodeCommandExecutor {
         self.codexSync = codexSync
         self.finderFollow = finderFollow
         self.weChat = weChat
+        self.bookmarkSync = bookmarkSync
         self.screenBlackout = screenBlackout ?? ScreenBlackoutService(overlay: ScreenBlackoutOverlay())
         self.notify = notify
     }
 
     func attachWeChat(_ controller: WeChatAssociationControlling) {
         weChat = controller
+    }
+
+    func attachBookmarkSync(_ service: any BookmarkSyncCommanding) {
+        bookmarkSync = service
     }
 
     var remoteBlackoutPresented: Bool { screenBlackout.isPresented }
@@ -134,6 +141,10 @@ final class TocodeCommandExecutor {
             return .failure(.operationFailed("wechat send 需要通过 CLI 异步执行"))
         case .wechat(let subcommand):
             return executeWechat(subcommand)
+        case .bookmark(.pull):
+            return .failure(.operationFailed("bookmark pull 需要通过 CLI 异步执行"))
+        case .bookmark(let subcommand):
+            return executeBookmark(subcommand)
         case .blackout:
             let alreadyPresented = screenBlackout.isPresented
             screenBlackout.activate()
@@ -189,6 +200,9 @@ final class TocodeCommandExecutor {
         if case .wechat(.send(let payload)) = command {
             return await weChat.sendOutbound(payload)
         }
+        if case .bookmark(.pull) = command {
+            return await executeBookmarkPull()
+        }
         return execute(command)
     }
 
@@ -222,8 +236,120 @@ final class TocodeCommandExecutor {
             "微信绑定：\(weChat.isBound ? "已绑定" : "未绑定")",
             projectLine,
             "访达跟随：\(finderFollow.followEnabled ? "开" : "关")",
-            "codex跟随：\(syncEnabled ? "开" : "关")"
+            "codex跟随：\(syncEnabled ? "开" : "关")",
+            "书签：\(bookmarkSync.map { "\($0.snapshot.entries.count) 条" } ?? "未就绪")\(bookmarkSync?.hasRemoteKey == true ? "（已设远程密钥）" : "")"
         ]
+    }
+
+    // MARK: - bookmark
+
+    private func requireBookmarkSync() -> Result<any BookmarkSyncCommanding, TocodeCommandError> {
+        guard let bookmarkSync else {
+            return .failure(.operationFailed("书签同步未就绪"))
+        }
+        return .success(bookmarkSync)
+    }
+
+    private func executeBookmark(_ subcommand: TocodeBookmarkCommand) -> TocodeCommandResult {
+        switch requireBookmarkSync() {
+        case .failure(let error):
+            return .failure(error)
+        case .success(let sync):
+            switch subcommand {
+            case .status:
+                let payload: [String: Any] = [
+                    "entries": sync.snapshot.entries.count,
+                    "tombstones": sync.snapshot.tombstones.count,
+                    "remoteRevision": sync.snapshot.remoteRevision,
+                    "remoteEnabled": sync.isRemoteEnabled,
+                    "hasRemoteKey": sync.hasRemoteKey,
+                    "connectedBrowsers": sync.connectedBrowserKeys,
+                    "joinedBrowserKeys": sync.snapshot.joinedBrowserKeys
+                ]
+                return BookmarkCLIJSON.encode(payload).map(TocodeCommandOutput.init)
+            case .list:
+                let rows = sync.snapshot.entries.map(BookmarkCLIJSON.entry)
+                return BookmarkCLIJSON.encode(rows).map(TocodeCommandOutput.init)
+            case .get(let url):
+                guard let entry = sync.entry(url: url) else {
+                    return .failure(.operationFailed("找不到该书签：\(url)"))
+                }
+                return BookmarkCLIJSON.encode(BookmarkCLIJSON.entry(entry)).map(TocodeCommandOutput.init)
+            case .add(let payload):
+                switch BookmarkCLIFolder.parse(payload.folder) {
+                case .failure(let error):
+                    return .failure(error)
+                case .success(let folder):
+                    do {
+                        let entry = try sync.addCLI(url: payload.url, title: payload.title, folder: folder)
+                        return BookmarkCLIJSON.encode(BookmarkCLIJSON.entry(entry)).map(TocodeCommandOutput.init)
+                    } catch let error as TocodeCommandError {
+                        return .failure(error)
+                    } catch {
+                        return .failure(.operationFailed(error.localizedDescription))
+                    }
+                }
+            case .update(let payload):
+                switch BookmarkCLIFolder.parse(payload.folder) {
+                case .failure(let error):
+                    return .failure(error)
+                case .success(let folder):
+                    do {
+                        let entry = try sync.updateCLI(
+                            url: payload.url,
+                            title: payload.title,
+                            folder: folder,
+                            newURL: payload.newURL
+                        )
+                        return BookmarkCLIJSON.encode(BookmarkCLIJSON.entry(entry)).map(TocodeCommandOutput.init)
+                    } catch let error as TocodeCommandError {
+                        return .failure(error)
+                    } catch {
+                        return .failure(.operationFailed(error.localizedDescription))
+                    }
+                }
+            case .delete(let url):
+                do {
+                    try sync.deleteCLI(url: url)
+                    let canonical = BookmarkURL.canonicalize(url) ?? url
+                    return BookmarkCLIJSON.encode([
+                        "ok": true,
+                        "deleted": canonical
+                    ]).map(TocodeCommandOutput.init)
+                } catch let error as TocodeCommandError {
+                    return .failure(error)
+                } catch {
+                    return .failure(.operationFailed(error.localizedDescription))
+                }
+            case .pull:
+                return .failure(.operationFailed("bookmark pull 需要通过 CLI 异步执行"))
+            }
+        }
+    }
+
+    private func executeBookmarkPull() async -> TocodeCommandResult {
+        switch requireBookmarkSync() {
+        case .failure(let error):
+            return .failure(error)
+        case .success(let sync):
+            switch await sync.pullRemoteForCLI() {
+            case .failure(let error):
+                if let commandError = error as? TocodeCommandError {
+                    return .failure(commandError)
+                }
+                return .failure(.operationFailed(error.localizedDescription))
+            case .success(let snapshot):
+                let payload: [String: Any] = [
+                    "ok": true,
+                    "entries": snapshot.entries.count,
+                    "tombstones": snapshot.tombstones.count,
+                    "remoteRevision": snapshot.remoteRevision,
+                    "remoteEnabled": sync.isRemoteEnabled,
+                    "hasRemoteKey": true
+                ]
+                return BookmarkCLIJSON.encode(payload).map(TocodeCommandOutput.init)
+            }
+        }
     }
 
     // MARK: - root

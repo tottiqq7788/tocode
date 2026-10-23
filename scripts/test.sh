@@ -18,6 +18,7 @@ swiftc Tests/TestRunner.swift \
   Sources/BookmarkSyncKeyStore.swift \
   Sources/BookmarkSyncSettingsStore.swift \
   Sources/BookmarkSyncService.swift \
+  Sources/BookmarkCLI.swift \
   Sources/BookmarkSyncPrompt.swift \
   Sources/BookmarkNativeBridge.swift \
   Sources/BookmarkExtensionInstall.swift \

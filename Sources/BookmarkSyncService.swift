@@ -144,6 +144,99 @@ final class BookmarkSyncService {
         ledger.entries
     }
 
+    func entry(url: String) -> BookmarkEntry? {
+        guard let canonical = BookmarkURL.canonicalize(url) else { return nil }
+        return ledger.entries.first { $0.url == canonical }
+    }
+
+    func addCLI(url: String, title: String?, folder: BookmarkFolderPath?) throws -> BookmarkEntry {
+        guard let canonical = BookmarkURL.canonicalize(url) else {
+            throw TocodeCommandError.invalidArguments("bookmark add --url")
+        }
+        if ledger.tombstones.contains(where: { $0.url == canonical }) {
+            ledger = BookmarkLedgerSnapshot(
+                version: ledger.version,
+                entries: ledger.entries,
+                tombstones: ledger.tombstones.filter { $0.url != canonical },
+                remoteRevision: ledger.remoteRevision,
+                joinedBrowserKeys: ledger.joinedBrowserKeys
+            )
+        }
+        let now = Date().timeIntervalSince1970
+        let resolvedFolder = folder ?? BookmarkFolderPath(kind: .other, segments: [])
+        let trimmedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedTitle = (trimmedTitle?.isEmpty == false) ? trimmedTitle! : canonical
+        try applyBrowserCreate(
+            browserKey: "cli",
+            url: canonical,
+            title: resolvedTitle,
+            folder: resolvedFolder,
+            updatedAt: now
+        )
+        guard let saved = entry(url: canonical) else {
+            throw TocodeCommandError.operationFailed("书签写入后无法读取")
+        }
+        return saved
+    }
+
+    func updateCLI(url: String, title: String?, folder: BookmarkFolderPath?, newURL: String?) throws -> BookmarkEntry {
+        guard entry(url: url) != nil else {
+            throw TocodeCommandError.operationFailed("找不到该书签：\(url)")
+        }
+        let now = Date().timeIntervalSince1970
+        if let newURL, !newURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            try applyBrowserChangeURL(
+                from: url,
+                to: newURL,
+                title: title,
+                folder: folder,
+                updatedAt: now
+            )
+            guard let saved = entry(url: newURL) else {
+                throw TocodeCommandError.operationFailed("书签改址后无法读取")
+            }
+            return saved
+        }
+        try applyBrowserUpdate(url: url, title: title, folder: folder, updatedAt: now)
+        guard let saved = entry(url: url) else {
+            throw TocodeCommandError.operationFailed("书签更新后无法读取")
+        }
+        return saved
+    }
+
+    func deleteCLI(url: String) throws {
+        guard entry(url: url) != nil else {
+            throw TocodeCommandError.operationFailed("找不到该书签：\(url)")
+        }
+        try applyBrowserDelete(url: url)
+    }
+
+    /// CLI pull：有密钥即可拉；远程开启时再推回。
+    func pullRemoteForCLI() async -> Result<BookmarkLedgerSnapshot, Error> {
+        do {
+            guard let secret = try keyStore.loadPlaintext(), !secret.isEmpty else {
+                return .failure(TocodeCommandError.operationFailed(
+                    "未设置远程同步密钥。请先在「工具 → 书签同步 → 远程同步」保存密钥。"
+                ))
+            }
+            let roomID = BookmarkSyncCrypto.roomID(for: secret)
+            let verifier = BookmarkSyncCrypto.verifier(for: secret)
+            if let remote = try await fetchRoom(roomID: roomID, verifier: verifier) {
+                let remoteLedger = try BookmarkSyncCrypto.decrypt(ciphertextBase64: remote.ciphertext, secret: secret)
+                var merged = BookmarkLedgerMerge.mergeRemote(local: ledger, remote: remoteLedger)
+                merged.remoteRevision = remote.revision
+                ledger = merged
+                try persist()
+            }
+            if settings.isRemoteEnabled {
+                try await pushRoom(secret: secret)
+            }
+            return .success(ledger)
+        } catch {
+            return .failure(error)
+        }
+    }
+
     private func persist() throws {
         try ledgerStore.save(ledger)
         onLedgerChanged?()

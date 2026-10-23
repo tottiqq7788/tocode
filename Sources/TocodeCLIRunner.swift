@@ -80,8 +80,12 @@ enum TocodeCLIArgumentPrep {
     }
 
     static func timeout(for arguments: [String]) -> TimeInterval {
-        if arguments.first?.lowercased() == "wechat",
-           arguments.dropFirst().first?.lowercased() == "send" {
+        let verb = arguments.first?.lowercased()
+        let sub = arguments.dropFirst().first?.lowercased()
+        if verb == "wechat", sub == "send" {
+            return sendTimeout
+        }
+        if verb == "bookmark", sub == "pull" || sub == "sync" {
             return sendTimeout
         }
         return defaultTimeout

@@ -51,6 +51,29 @@ enum TocodeWechatCommand: Equatable {
     case send(TocodeWechatSendPayload)
 }
 
+struct TocodeBookmarkAddPayload: Equatable {
+    var url: String
+    var title: String?
+    var folder: String?
+}
+
+struct TocodeBookmarkUpdatePayload: Equatable {
+    var url: String
+    var title: String?
+    var folder: String?
+    var newURL: String?
+}
+
+enum TocodeBookmarkCommand: Equatable {
+    case status
+    case list
+    case get(String)
+    case add(TocodeBookmarkAddPayload)
+    case update(TocodeBookmarkUpdatePayload)
+    case delete(String)
+    case pull
+}
+
 enum TocodeCommand: Equatable {
     case help
     case status
@@ -58,6 +81,7 @@ enum TocodeCommand: Equatable {
     case finder(TocodeFinderCommand)
     case codex(TocodeCodexCommand)
     case wechat(TocodeWechatCommand)
+    case bookmark(TocodeBookmarkCommand)
     case blackout
     case login(TocodeToggle)
     case wheel(TocodeWheelAxis, TocodeToggle)
@@ -164,6 +188,15 @@ enum TocodeCommandParser {
         wechat send [--to <id>] [--text <文字>] [文件...]
                                             向最近会话发送文字、图片或附件
 
+      书签（JSON；须 Tocode 在运行）
+        bookmark status                     条数、远程开关、是否有密钥、修订号
+        bookmark list                       全部书签 JSON 数组
+        bookmark get <url>                  单条书签 JSON
+        bookmark add --url <url> [--title <标题>] [--folder toolbar|other|mobile|<路径>]
+        bookmark update --url <url> [--title <标题>] [--folder ...] [--new-url <url>]
+        bookmark delete --url <url>         删除并写墓碑
+        bookmark pull                       用本机远程同步密钥拉取并合并最新账本
+
       其他
         blackout（别名 .lshp）                工具 → 临时黑屏
         login on|off|toggle                 开机自启
@@ -213,6 +246,8 @@ enum TocodeCommandParser {
             return parseCodex(rest)
         case "wechat":
             return parseWechat(rest)
+        case "bookmark":
+            return parseBookmark(rest)
         case "blackout":
             guard rest.isEmpty else { return .failure(.invalidArguments(firstRaw)) }
             return .success(.blackout)
@@ -325,6 +360,118 @@ enum TocodeCommandParser {
         default:
             return .failure(.unknownCommand("wechat \(sub)"))
         }
+    }
+
+    private static func parseBookmark(_ tokens: [String]) -> Result<TocodeCommand, TocodeCommandError> {
+        guard let sub = tokens.first?.lowercased() else {
+            return .success(.bookmark(.status))
+        }
+        switch sub {
+        case "status":
+            guard tokens.count == 1 else { return .failure(.invalidArguments("bookmark status")) }
+            return .success(.bookmark(.status))
+        case "list":
+            guard tokens.count == 1 else { return .failure(.invalidArguments("bookmark list")) }
+            return .success(.bookmark(.list))
+        case "get":
+            guard tokens.count >= 2 else { return .failure(.missingValue("bookmark get <url>")) }
+            let url = tokens.dropFirst().joined(separator: " ")
+            return .success(.bookmark(.get(url)))
+        case "add":
+            return parseBookmarkAdd(Array(tokens.dropFirst()))
+        case "update":
+            return parseBookmarkUpdate(Array(tokens.dropFirst()))
+        case "delete", "remove", "rm":
+            return parseBookmarkDelete(Array(tokens.dropFirst()))
+        case "pull", "sync":
+            guard tokens.count == 1 else { return .failure(.invalidArguments("bookmark pull")) }
+            return .success(.bookmark(.pull))
+        default:
+            return .failure(.unknownCommand("bookmark \(sub)"))
+        }
+    }
+
+    private static func parseBookmarkAdd(_ tokens: [String]) -> Result<TocodeCommand, TocodeCommandError> {
+        var url: String?
+        var title: String?
+        var folder: String?
+        var index = 0
+        while index < tokens.count {
+            let token = tokens[index]
+            switch token {
+            case "--url":
+                guard index + 1 < tokens.count else { return .failure(.missingValue("bookmark add --url <url>")) }
+                url = tokens[index + 1]
+                index += 2
+            case "--title":
+                guard index + 1 < tokens.count else { return .failure(.missingValue("bookmark add --title <标题>")) }
+                title = tokens[index + 1]
+                index += 2
+            case "--folder":
+                guard index + 1 < tokens.count else { return .failure(.missingValue("bookmark add --folder <folder>")) }
+                folder = tokens[index + 1]
+                index += 2
+            default:
+                return .failure(.invalidArguments("bookmark add \(token)"))
+            }
+        }
+        guard let url, !url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return .failure(.missingValue("bookmark add --url <url>"))
+        }
+        return .success(.bookmark(.add(TocodeBookmarkAddPayload(url: url, title: title, folder: folder))))
+    }
+
+    private static func parseBookmarkUpdate(_ tokens: [String]) -> Result<TocodeCommand, TocodeCommandError> {
+        var url: String?
+        var title: String?
+        var folder: String?
+        var newURL: String?
+        var index = 0
+        while index < tokens.count {
+            let token = tokens[index]
+            switch token {
+            case "--url":
+                guard index + 1 < tokens.count else { return .failure(.missingValue("bookmark update --url <url>")) }
+                url = tokens[index + 1]
+                index += 2
+            case "--title":
+                guard index + 1 < tokens.count else { return .failure(.missingValue("bookmark update --title <标题>")) }
+                title = tokens[index + 1]
+                index += 2
+            case "--folder":
+                guard index + 1 < tokens.count else { return .failure(.missingValue("bookmark update --folder <folder>")) }
+                folder = tokens[index + 1]
+                index += 2
+            case "--new-url":
+                guard index + 1 < tokens.count else { return .failure(.missingValue("bookmark update --new-url <url>")) }
+                newURL = tokens[index + 1]
+                index += 2
+            default:
+                return .failure(.invalidArguments("bookmark update \(token)"))
+            }
+        }
+        guard let url, !url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return .failure(.missingValue("bookmark update --url <url>"))
+        }
+        guard title != nil || folder != nil || newURL != nil else {
+            return .failure(.missingValue("bookmark update 至少提供 --title / --folder / --new-url 之一"))
+        }
+        return .success(.bookmark(.update(TocodeBookmarkUpdatePayload(
+            url: url,
+            title: title,
+            folder: folder,
+            newURL: newURL
+        ))))
+    }
+
+    private static func parseBookmarkDelete(_ tokens: [String]) -> Result<TocodeCommand, TocodeCommandError> {
+        if tokens.count == 1, tokens[0] != "--url" {
+            return .success(.bookmark(.delete(tokens[0])))
+        }
+        guard tokens.count == 2, tokens[0] == "--url" else {
+            return .failure(.missingValue("bookmark delete --url <url>"))
+        }
+        return .success(.bookmark(.delete(tokens[1])))
     }
 
     private static func parseWechatSend(_ tokens: [String]) -> Result<TocodeCommand, TocodeCommandError> {

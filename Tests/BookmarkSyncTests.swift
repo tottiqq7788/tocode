@@ -107,6 +107,96 @@ func testBookmarkLedgerChangeURLCollision() {
     expect(ledger.entries[0].title == "Changed", "较新标题写入已存在条")
 }
 
+func testBookmarkCLIParser() {
+    expect(TocodeCommandParser.parse("bookmark") == .success(.bookmark(.status)), "bookmark 默认 status")
+    expect(TocodeCommandParser.parse("bookmark list") == .success(.bookmark(.list)), "bookmark list")
+    expect(TocodeCommandParser.parse("bookmark get https://a.com") == .success(.bookmark(.get("https://a.com"))), "bookmark get")
+    expect(
+        TocodeCommandParser.parse("bookmark add --url https://a.com --title A --folder toolbar")
+            == .success(.bookmark(.add(TocodeBookmarkAddPayload(url: "https://a.com", title: "A", folder: "toolbar")))),
+        "bookmark add"
+    )
+    expect(
+        TocodeCommandParser.parse("bookmark update --url https://a.com --new-url https://b.com")
+            == .success(.bookmark(.update(TocodeBookmarkUpdatePayload(
+                url: "https://a.com",
+                title: nil,
+                folder: nil,
+                newURL: "https://b.com"
+            )))),
+        "bookmark update --new-url"
+    )
+    expect(TocodeCommandParser.parse("bookmark delete --url https://a.com") == .success(.bookmark(.delete("https://a.com"))), "bookmark delete")
+    expect(TocodeCommandParser.parse("bookmark pull") == .success(.bookmark(.pull)), "bookmark pull")
+    expect(TocodeCommandParser.helpText.contains("bookmark list"), "help 含 bookmark")
+    expect(TocodeCommandParser.parse("bookmark add").isFailure, "bookmark add 缺 url 失败")
+}
+
+@MainActor
+func testBookmarkCLIExecutorCRUDAndPull() async {
+    let bookmarks = MockBookmarkSync()
+    let executor = TocodeCommandExecutor(
+        mouseWheel: MockTocodeWheel(),
+        shortcuts: MockTocodeShortcuts(),
+        weChat: MockTocodeWeChat(),
+        bookmarkSync: bookmarks,
+        notify: { _, _ in }
+    )
+
+    if case .success(let added) = executor.execute("bookmark add --url https://Example.com/ --title Demo --folder toolbar") {
+        expect(added.text.contains("https://example.com"), "add 返回规范化网址")
+        expect(added.text.contains("Demo"), "add 返回标题")
+    } else {
+        expect(false, "add 返回规范化网址")
+    }
+
+    if case .success(let listed) = executor.execute("bookmark list") {
+        expect(listed.text.contains("https://example.com"), "list 含新增项")
+    } else {
+        expect(false, "list 含新增项")
+    }
+
+    if case .success(let updated) = executor.execute("bookmark update --url https://example.com --title Renamed") {
+        expect(updated.text.contains("Renamed"), "update 改标题")
+    } else {
+        expect(false, "update 改标题")
+    }
+
+    if case .success(let deleted) = executor.execute("bookmark delete --url https://example.com") {
+        expect(deleted.text.contains("\"ok\" : true") || deleted.text.contains("\"ok\": true") || deleted.text.contains("\"ok\":true"), "delete 返回 ok")
+    } else {
+        expect(false, "delete 返回 ok")
+    }
+    expect(bookmarks.ledger.entries.isEmpty, "delete 后账本为空")
+    expect(bookmarks.ledger.tombstones.contains { $0.url == "https://example.com" }, "delete 写墓碑")
+
+    bookmarks.remoteKey = false
+    if case .failure(let error) = await executor.executeAsync("bookmark pull") {
+        expect(error.message.contains("远程同步密钥"), "无密钥 pull 失败")
+    } else {
+        expect(false, "无密钥 pull 失败")
+    }
+
+    bookmarks.remoteKey = true
+    bookmarks.ledger = BookmarkLedgerMerge.unionMerge(
+        ledger: .empty,
+        incoming: [
+            BookmarkEntry(
+                url: "https://pulled.com",
+                title: "Pulled",
+                folder: BookmarkFolderPath(kind: .other, segments: []),
+                updatedAt: 1
+            )
+        ],
+        browserKey: "cli"
+    )
+    if case .success(let pulled) = await executor.executeAsync("bookmark pull") {
+        expect(pulled.text.contains("\"entries\"") && pulled.text.contains("1"), "有密钥 pull 成功")
+    } else {
+        expect(false, "有密钥 pull 成功")
+    }
+}
+
 func testBookmarkSyncCryptoRoundTrip() {
     let secret = BookmarkSyncKeyFactory.generate()
     expect(secret.count >= 32, "生成密钥足够长")

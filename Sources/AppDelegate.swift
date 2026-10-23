@@ -105,6 +105,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let weChat = WeChatAssociationService()
         self.weChat = weChat
         executor.attachWeChat(weChat)
+        executor.attachBookmarkSync(bookmarkSync)
         let remote = RemoteControlService(
             store: .live,
             transport: RemoteControlHTTPClient(),
