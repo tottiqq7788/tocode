@@ -21,7 +21,7 @@ enum BookmarkBrowser: String, CaseIterable {
         case .edge:
             return URL(string: "edge://extensions")!
         case .firefox:
-            return URL(string: "about:debugging#/runtime/this-firefox")!
+            return URL(string: "about:addons")!
         }
     }
 
@@ -65,6 +65,101 @@ enum BookmarkExtensionInstall {
             return source
         }
         return nil
+    }
+
+    /// 包内 Mozilla 已签名的 Firefox 扩展（正式版重启后仍保留）。
+    static let firefoxSignedExtensionID = "bookmark-sync@tocode.app"
+
+    static func bundledFirefoxSignedXPI() -> URL? {
+        if let resource = Bundle.main.resourceURL?
+            .appendingPathComponent("Extensions/bookmark-sync-firefox.xpi"),
+           FileManager.default.fileExists(atPath: resource.path) {
+            return resource
+        }
+        let source = URL(fileURLWithPath: #file)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Extensions/firefox/bookmark-sync@tocode.app.xpi")
+        if FileManager.default.fileExists(atPath: source.path) {
+            return source
+        }
+        return nil
+    }
+
+    /// 从 profiles.ini 取 Firefox 正在使用的配置目录。优先 Install 段的 Default。
+    static func firefoxProfileDirectory(profilesIni: String, root: URL) -> URL? {
+        var installDefault: String?
+        var profileDefault: String?
+        var section = ""
+        var pendingPath: String?
+        var pendingRelative = true
+        var pendingIsDefault = false
+        func commitProfile() {
+            guard section == "Profile", let path = pendingPath else { return }
+            let resolved = pendingRelative
+                ? Self.appendRelativePath(path, to: root).path
+                : path
+            if pendingIsDefault || profileDefault == nil {
+                profileDefault = resolved
+            }
+        }
+        for raw in profilesIni.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.hasPrefix("[") && line.hasSuffix("]") {
+                if section == "Profile" {
+                    commitProfile()
+                }
+                section = String(line.dropFirst().dropLast())
+                pendingPath = nil
+                pendingRelative = true
+                pendingIsDefault = false
+                continue
+            }
+            let parts = line.split(separator: "=", maxSplits: 1).map(String.init)
+            guard parts.count == 2 else { continue }
+            let key = parts[0].trimmingCharacters(in: .whitespaces)
+            let value = parts[1].trimmingCharacters(in: .whitespaces)
+            if section.hasPrefix("Install"), key == "Default" {
+                installDefault = value
+            } else if section == "Profile" {
+                if key == "Path" { pendingPath = value }
+                if key == "IsRelative" { pendingRelative = value != "0" }
+                if key == "Default", value == "1" { pendingIsDefault = true }
+            }
+        }
+        if section == "Profile" { commitProfile() }
+        if let installDefault {
+            return appendRelativePath(installDefault, to: root)
+        }
+        if let profileDefault {
+            return URL(fileURLWithPath: profileDefault)
+        }
+        return nil
+    }
+
+    private static func appendRelativePath(_ relative: String, to root: URL) -> URL {
+        relative.split(separator: "/").reduce(root) { url, part in
+            url.appendingPathComponent(String(part))
+        }
+    }
+
+    /// 把包内签名 xpi 写入指定 Firefox 配置，并避免正式版把旁路扩展自动停用。
+    static func installSignedFirefoxExtension(xpi: URL, profile: URL) throws {
+        let fm = FileManager.default
+        let extensions = profile.appendingPathComponent("extensions", isDirectory: true)
+        try fm.createDirectory(at: extensions, withIntermediateDirectories: true)
+        let destination = extensions.appendingPathComponent("\(firefoxSignedExtensionID).xpi")
+        if fm.fileExists(atPath: destination.path) {
+            try fm.removeItem(at: destination)
+        }
+        try fm.copyItem(at: xpi, to: destination)
+        let userJS = profile.appendingPathComponent("user.js")
+        let marker = "extensions.autoDisableScopes"
+        let line = "user_pref(\"extensions.autoDisableScopes\", 0);\n"
+        let existing = (try? String(contentsOf: userJS, encoding: .utf8)) ?? ""
+        if !existing.contains(marker) {
+            try (existing + line).write(to: userJS, atomically: true, encoding: .utf8)
+        }
     }
 
     /// 按浏览器分开的包外可加载副本（Firefox 与 Chromium 的 background 字段不同）。
@@ -182,6 +277,11 @@ enum BookmarkExtensionInstall {
             return
         }
 
+        if browser == .firefox {
+            installBundledFirefoxExtension()
+            return
+        }
+
         let extensionDir: URL
         do {
             extensionDir = try prepareInstallableExtensionDirectory(for: browser)
@@ -198,16 +298,9 @@ enum BookmarkExtensionInstall {
         let alert = NSAlert()
         alert.messageText = "安装 \(browser.title) 扩展"
         var detail: String
-        let loadHint: String
-        if browser == .firefox {
-            loadHint = """
-            目标页是 about:debugging（不是 about:addons）。在「此 Firefox」里点「临时载入附加组件…」，选访达中 bookmark-sync-firefox 目录下的 manifest.json。
-            """
-        } else {
-            loadHint = """
-            请开启「开发者模式」，选择「加载已解压的扩展程序」，指向访达中选中的 bookmark-sync-\(browser.rawValue) 目录。
-            """
-        }
+        let loadHint = """
+        请开启「开发者模式」，选择「加载已解压的扩展程序」，指向访达中选中的 bookmark-sync-\(browser.rawValue) 目录。
+        """
         if opened {
             detail = """
             已登记 Native Messaging 主机，访达已打开扩展目录，并已用 \(browser.title) 打开扩展页。
@@ -226,13 +319,49 @@ enum BookmarkExtensionInstall {
             \(loadHint)
             """
         }
-        if browser == .firefox {
-            detail += "\n正式版 Firefox 不会保留未签名扩展：重启后需再加载一次。未连上时不会假装已在同步。"
-        }
         detail += "\n\n当前未检测到该浏览器扩展在线。"
         alert.informativeText = detail
         alert.addButton(withTitle: "好")
         alert.runModal()
+    }
+
+    /// 未在线时把包内签名 xpi 写入当前 Firefox 配置，不走临时载入。
+    @MainActor
+    private static func installBundledFirefoxExtension() {
+        guard let xpi = bundledFirefoxSignedXPI() else {
+            present(title: "找不到 Firefox 扩展", message: "应用包内没有已签名的 bookmark-sync-firefox.xpi。")
+            return
+        }
+        let support = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Firefox")
+        let iniURL = support.appendingPathComponent("profiles.ini")
+        guard let ini = try? String(contentsOf: iniURL, encoding: .utf8),
+              let profile = firefoxProfileDirectory(profilesIni: ini, root: support) else {
+            present(title: "找不到 Firefox 配置", message: "没有读到 profiles.ini。请先打开一次 Firefox。")
+            return
+        }
+        do {
+            try installSignedFirefoxExtension(xpi: xpi, profile: profile)
+        } catch {
+            present(title: "安装 Firefox 扩展失败", message: error.localizedDescription)
+            return
+        }
+        let running = NSWorkspace.shared.runningApplications.contains {
+            $0.bundleIdentifier == "org.mozilla.firefox"
+        }
+        let restart = running
+            ? "Firefox 正在运行。请完全退出后再打开，签名扩展才会加载；之后重启仍会保留。"
+            : "下次打开 Firefox 即会加载签名扩展，重启后仍会保留。"
+        present(
+            title: "已安装 Firefox 扩展",
+            message: """
+            已登记 Native Messaging 主机，并把包内签名扩展写入当前配置：
+            \(profile.path)
+
+            \(restart)
+            未连上前不会假装已在同步。
+            """
+        )
     }
 
     /// 用对应浏览器打开 chrome:// / edge:// / about: 扩展页。

@@ -63,6 +63,8 @@ cp "$APP/Contents/MacOS/tocode-bookmark-host" build/tocode-bookmark-host
 mkdir -p "$APP/Contents/Resources/Extensions"
 rm -rf "$APP/Contents/Resources/Extensions/bookmark-sync"
 cp -R Extensions/bookmark-sync "$APP/Contents/Resources/Extensions/bookmark-sync"
+cp Extensions/firefox/bookmark-sync@tocode.app.xpi \
+  "$APP/Contents/Resources/Extensions/bookmark-sync-firefox.xpi"
 
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 

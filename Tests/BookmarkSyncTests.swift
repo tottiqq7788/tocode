@@ -202,16 +202,33 @@ func testBookmarkExtensionOpenHelpers() {
     expect(BookmarkBrowser.chrome.extensionPageURL.absoluteString == "chrome://extensions", "Chrome 扩展页")
     expect(BookmarkBrowser.edge.extensionPageURL.absoluteString == "edge://extensions", "Edge 扩展页")
     expect(
-        BookmarkBrowser.firefox.extensionPageURL.absoluteString
-            == "about:debugging#/runtime/this-firefox",
+        BookmarkBrowser.firefox.extensionPageURL.absoluteString == "about:addons",
         "Firefox 扩展页"
     )
     expect(BookmarkBrowser.chrome.applicationNames.first == "Google Chrome", "Chrome 优先应用名")
     expect(BookmarkBrowser.edge.applicationNames == ["Microsoft Edge"], "Edge 应用名")
     expect(BookmarkBrowser.firefox.applicationNames.contains("Firefox"), "Firefox 应用名")
     expect(
-        BookmarkBrowser.firefox.extensionPageURL.absoluteString.hasPrefix("about:debugging"),
-        "Firefox 用 about:debugging 而非 about:addons"
+        BookmarkBrowser.firefox.extensionPageURL.absoluteString == "about:addons",
+        "Firefox 已在线时打开 about:addons"
+    )
+    expect(BookmarkExtensionInstall.bundledFirefoxSignedXPI() != nil, "源码树含已签名 Firefox xpi")
+    let ini = """
+    [Profile0]
+    Name=default-release
+    IsRelative=1
+    Path=Profiles/old.default-release
+    Default=1
+
+    [InstallABC]
+    Default=Profiles/live.default-release
+    Locked=1
+    """
+    let root = URL(fileURLWithPath: "/Users/example/Library/Application Support/Firefox", isDirectory: true)
+    let profile = BookmarkExtensionInstall.firefoxProfileDirectory(profilesIni: ini, root: root)
+    expect(
+        profile?.path.hasSuffix("Profiles/live.default-release") == true,
+        "优先 Install 段正在使用的配置"
     )
 
     expect(
