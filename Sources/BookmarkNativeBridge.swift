@@ -175,6 +175,14 @@ final class BookmarkNativeBridge {
                     send(["type": "error", "message": "not_hello"], to: bridge)
                     return
                 }
+                // 取消旧对账泵，避免 tree 重入后旧批写回。
+                bridge.reconcileGeneration &+= 1
+                bridge.isReconciling = false
+                bridge.needsReconcileAgain = false
+                bridge.pendingBatchID = nil
+                bridge.pendingBatchRemaining = 0
+                bridge.pendingPurgeBatch = false
+                bridge.pendingFolderRemovalKeys.removeAll()
                 let nodes = (object["nodes"] as? [[String: Any]]) ?? []
                 bridge.pendingBeforeURLs = Set(service.entriesForBrowser().map(\.url))
                 try service.ingestBrowserTree(browserKey: key, nodes: nodes)
@@ -197,7 +205,14 @@ final class BookmarkNativeBridge {
                 }
                 bridge.knownFolderLayout = folderLayout
                 bridge.confirmedFolderRemovals.removeAll()
+                bridge.failedFolderRemovals.removeAll()
+                bridge.folderRemovalFailCounts.removeAll()
+                bridge.folderRemovalPaused = false
+                bridge.folderRemovalTimeouts = 0
+                bridge.ensureTimeouts = 0
+                bridge.poisonedURLs.removeAll()
                 bridge.didPurgeEmptyTitleFolders = false
+                bridge.purgeCredible = false
                 bridge.purgeEmptyAttempts = 0
                 bridge.awaitingTreeReady = true
                 send(["type": "tree_ok"], to: bridge)
@@ -270,46 +285,107 @@ final class BookmarkNativeBridge {
                 let url = (object["url"] as? String) ?? ""
                 let message = (object["message"] as? String) ?? ""
                 noteBatchAck(bridge: bridge, object: object)
-                // 越界等不可恢复错误：按账本指纹记入已知，避免死循环重试同一非法 index。
+                // 越界：毒化 URL，禁止写入 known（假对齐）。
                 if message.localizedCaseInsensitiveContains("Index out of bounds"),
-                   let canonical = BookmarkURL.canonicalize(url),
-                   let entry = service.entry(url: canonical) {
-                    bridge.knownLayout[canonical] = BookmarkReconcilePump.fingerprint(
-                        folder: entry.folder,
-                        index: entry.siblingIndex,
-                        title: entry.title
+                   let canonical = BookmarkURL.canonicalize(url) {
+                    bridge.poisonedURLs.insert(canonical)
+                    bridge.knownLayout.removeValue(forKey: canonical)
+                }
+                if op == "remove_folder" || op == "remove_folder_skipped",
+                   let folderDict = object["folder"] as? [String: Any] {
+                    let path = folder(from: folderDict)
+                    bridge.pendingFolderRemovalKeys.remove(path.sortKey)
+                    BookmarkReconcilePump.noteFolderRemovalFailure(
+                        bridge: bridge,
+                        pathKey: path.sortKey,
+                        service: service,
+                        reason: message
                     )
                 }
-                service.activityLog.append("扩展写回失败（\(bridge.browserKey ?? "?") \(op)）：\(url) \(message)")
+                let folderHint: String
+                if let folderDict = object["folder"] as? [String: Any] {
+                    folderHint = " \(folder(from: folderDict).sortKey)"
+                } else {
+                    folderHint = ""
+                }
+                service.activityLog.append(
+                    "扩展写回失败（\(bridge.browserKey ?? "?") \(op)）：\(url)\(folderHint) \(message)"
+                )
             case "apply_result":
                 let op = (object["op"] as? String) ?? "?"
                 let url = (object["url"] as? String) ?? ""
                 noteBatchAck(bridge: bridge, object: object)
                 if op == "empty_folders_purged" {
-                    // 清掉空标题夹后下标已变，强制下一轮按账本重排。
-                    bridge.knownFolderLayout.removeAll()
+                    // 仅可信 purge 回执才开门闩；失败/跳过不得宣称可对账。
+                    bridge.didPurgeEmptyTitleFolders = true
+                    bridge.purgeCredible = true
+                    bridge.pendingPurgeBatch = false
+                    // 空标题夹清掉后书签/账本夹下标需重排；不要清 confirmedFolderRemovals，
+                    // 也不要依赖 known 才能继续下发墓碑删夹。
                     bridge.knownLayout.removeAll()
+                    let tombstoneKeys = Set(service.folderTombstonesForBrowser().map(\.pathKey))
+                    bridge.knownFolderLayout = bridge.knownFolderLayout.filter { key, _ in
+                        tombstoneKeys.contains(key)
+                    }
                 } else if op == "folder_ensured",
                           let folderDict = object["folder"] as? [String: Any] {
                     let path = folder(from: folderDict)
-                    let index = (object["index"] as? Int)
-                        ?? service.foldersForBrowser().first(where: { $0.pathKey == path.sortKey })?.siblingIndex
-                        ?? 0
-                    bridge.knownFolderLayout[path.sortKey] = String(index)
-                    bridge.confirmedFolderRemovals.remove(path.sortKey)
+                    let measuredIndex = object["index"] as? Int
+                    let intentIndex = service.foldersForBrowser()
+                        .first(where: { $0.pathKey == path.sortKey })?.siblingIndex
+                    if let measuredIndex, let intentIndex, measuredIndex == intentIndex {
+                        bridge.knownFolderLayout[path.sortKey] = String(measuredIndex)
+                        bridge.confirmedFolderRemovals.remove(path.sortKey)
+                    }
+                    // 实测与意图不符：保持 divergent，下次再 ensure。
                 } else if op == "folder_removed",
                           let folderDict = object["folder"] as? [String: Any] {
                     let path = folder(from: folderDict)
-                    bridge.knownFolderLayout.removeValue(forKey: path.sortKey)
-                    bridge.confirmedFolderRemovals.insert(path.sortKey)
+                    let removedCount = (object["removed"] as? Int) ?? 0
+                    let missing = (object["missing"] as? Bool) ?? false
+                    let evacuatedMoved = (object["evacuatedMoved"] as? Int) ?? 0
+                    let evacuatedDeduped = (object["evacuatedDeduped"] as? Int) ?? 0
+                    // 明确删掉或本就不存在才确认；避免无字段时误确认。
+                    if removedCount > 0 || missing {
+                        bridge.knownFolderLayout.removeValue(forKey: path.sortKey)
+                        bridge.confirmedFolderRemovals.insert(path.sortKey)
+                        bridge.pendingFolderRemovalKeys.remove(path.sortKey)
+                        bridge.folderRemovalFailCounts.removeValue(forKey: path.sortKey)
+                    } else {
+                        BookmarkReconcilePump.noteFolderRemovalFailure(
+                            bridge: bridge,
+                            pathKey: path.sortKey,
+                            service: service,
+                            reason: "removed=0"
+                        )
+                    }
+                    service.activityLog.append(
+                        "扩展写回结果（\(bridge.browserKey ?? "?")）：folder_removed \(path.sortKey) removed=\(removedCount) missing=\(missing) moved=\(evacuatedMoved) deduped=\(evacuatedDeduped)"
+                    )
+                    break
                 } else if let canonical = BookmarkURL.canonicalize(url),
                           op == "created" || op == "updated" || op == "exists",
-                          let entry = service.entry(url: canonical) {
-                    bridge.knownLayout[canonical] = BookmarkReconcilePump.fingerprint(
+                          let entry = service.entry(url: canonical),
+                          !bridge.poisonedURLs.contains(canonical) {
+                    let intent = BookmarkReconcilePump.fingerprint(
                         folder: entry.folder,
                         index: entry.siblingIndex,
                         title: entry.title
                     )
+                    // 仅当扩展回传实测与账本意图一致时写入 known。
+                    if let measuredFolderDict = object["folder"] as? [String: Any],
+                       let measuredIndex = object["index"] as? Int {
+                        let measuredTitle = (object["title"] as? String) ?? entry.title
+                        let measured = BookmarkReconcilePump.fingerprint(
+                            folder: folder(from: measuredFolderDict),
+                            index: measuredIndex,
+                            title: measuredTitle
+                        )
+                        if measured == intent {
+                            bridge.knownLayout[canonical] = intent
+                        }
+                    }
+                    // 无实测字段（旧扩展）：不 stamp，保持 divergent。
                 }
                 service.activityLog.append(
                     "扩展写回结果（\(bridge.browserKey ?? "?")）：\(op) \(url)"

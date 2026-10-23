@@ -9319,6 +9319,14 @@ struct TestRunnerMain {
         testBookmarkAddUpsertsFolderRecord()
         testBookmarkFolderCLICommands()
         testBookmarkApplyDryRunAndWrite()
+        testMergeRemoteDoesNotCoverNewerFolderCreate()
+        testUpsertFolderBumpsPastTombstoneTime()
+        testFolderRemovalCandidatesIgnoreEmptyKnown()
+        testMergeRemoteRemoteFolderBeatsLocalTombstone()
+        testMergeRemoteURLEntryBeatsTombstone()
+        testCanonicalizeSiblingIndexBumpsUpdatedAt()
+        testTrustedAlignFingerprintAndPoisonGate()
+        testFolderRemovalCircuitBreakThreshold()
 
         if failures == 0 {
             print("\nALL TESTS PASSED")

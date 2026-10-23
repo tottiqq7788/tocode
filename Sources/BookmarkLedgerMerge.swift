@@ -26,8 +26,17 @@ enum BookmarkLedgerMerge {
 
             if !alreadyJoined {
                 tombstones.removeValue(forKey: url)
-            } else if tombstones[url] != nil {
-                continue
+            } else if let stone = tombstones[url] {
+                // 已加入浏览器并集：墓碑硬挡残留副本。
+                // 远程 merge（browserKey == nil）：对称 LWW 复活。
+                if browserKey != nil {
+                    continue
+                }
+                if candidate.updatedAt >= stone.deletedAt {
+                    tombstones.removeValue(forKey: url)
+                } else {
+                    continue
+                }
             }
 
             candidate.folder = normalizeFolderPath(candidate.folder)
@@ -52,7 +61,13 @@ enum BookmarkLedgerMerge {
             var normalized = record
             normalized.path = normalizeFolderPath(record.path)
             let key = normalized.pathKey
-            if folderTombstones[key] != nil { continue }
+            if let stone = folderTombstones[key] {
+                if normalized.updatedAt >= stone.deletedAt {
+                    folderTombstones.removeValue(forKey: key)
+                } else {
+                    continue
+                }
+            }
             if let existing = byFolder[key] {
                 byFolder[key] = preferFolder(existing, normalized)
             } else {
@@ -63,7 +78,17 @@ enum BookmarkLedgerMerge {
             var normalized = folder
             normalized.path = normalizeFolderPath(folder.path)
             let key = normalized.pathKey
-            if folderTombstones[key] != nil { continue }
+            if let stone = folderTombstones[key] {
+                // 已加入浏览器：硬挡；远程（browserKey==nil）：对称 LWW。
+                if browserKey != nil {
+                    continue
+                }
+                if normalized.updatedAt >= stone.deletedAt {
+                    folderTombstones.removeValue(forKey: key)
+                } else {
+                    continue
+                }
+            }
             if let existing = byFolder[key] {
                 byFolder[key] = preferFolder(existing, normalized)
             } else {
@@ -128,9 +153,16 @@ enum BookmarkLedgerMerge {
             for (newIndex, item) in children.enumerated() {
                 switch item.child {
                 case .bookmark(let i):
-                    entries[i].siblingIndex = newIndex
+                    if entries[i].siblingIndex != newIndex {
+                        entries[i].siblingIndex = newIndex
+                        // 改序抬时间，避免 409/pull 用同戳旧序盖回。
+                        entries[i].updatedAt = max(entries[i].updatedAt, item.updatedAt) + 0.001
+                    }
                 case .folder(let i):
-                    folders[i].siblingIndex = newIndex
+                    if folders[i].siblingIndex != newIndex {
+                        folders[i].siblingIndex = newIndex
+                        folders[i].updatedAt = max(folders[i].updatedAt, item.updatedAt) + 0.001
+                    }
                 }
             }
         }
@@ -272,17 +304,30 @@ enum BookmarkLedgerMerge {
         local: BookmarkLedgerSnapshot,
         remote: BookmarkLedgerSnapshot
     ) -> BookmarkLedgerSnapshot {
+        let localFoldersByKey = Dictionary(uniqueKeysWithValues: local.folders.map { ($0.pathKey, $0) })
         // 先并夹墓碑，再 union，避免远程空夹复活已删路径。
+        // 若本地已有更新的夹记录（create 晚于墓碑），丢弃该墓碑，避免 pull 盖掉刚建的空夹。
         var folderTombstones = Dictionary(
             uniqueKeysWithValues: local.folderTombstones.map { ($0.pathKey, $0) }
         )
         for stone in remote.folderTombstones {
+            if let localFolder = localFoldersByKey[stone.pathKey],
+               localFolder.updatedAt >= stone.deletedAt {
+                folderTombstones.removeValue(forKey: stone.pathKey)
+                continue
+            }
             if let existing = folderTombstones[stone.pathKey] {
                 if stone.deletedAt > existing.deletedAt {
                     folderTombstones[stone.pathKey] = stone
                 }
             } else {
                 folderTombstones[stone.pathKey] = stone
+            }
+        }
+        for (key, stone) in folderTombstones {
+            if let localFolder = localFoldersByKey[key],
+               localFolder.updatedAt >= stone.deletedAt {
+                folderTombstones.removeValue(forKey: key)
             }
         }
         var seeded = local
@@ -294,6 +339,16 @@ enum BookmarkLedgerMerge {
             incomingFolders: remote.folders,
             browserKey: nil
         )
+        // union 之后再保一次：本地仍持有的较新夹记录不得被墓碑滤掉。
+        var foldersByKey = Dictionary(uniqueKeysWithValues: merged.folders.map { ($0.pathKey, $0) })
+        for (key, localFolder) in localFoldersByKey {
+            if let stone = folderTombstones[key], localFolder.updatedAt >= stone.deletedAt {
+                folderTombstones.removeValue(forKey: key)
+                if foldersByKey[key] == nil {
+                    foldersByKey[key] = localFolder
+                }
+            }
+        }
         var tombstones = Dictionary(uniqueKeysWithValues: merged.tombstones.map { ($0.url, $0) })
         for stone in remote.tombstones {
             if let existing = tombstones[stone.url] {
@@ -304,13 +359,42 @@ enum BookmarkLedgerMerge {
                 tombstones[stone.url] = stone
             }
         }
-        let entries = merged.entries.filter { tombstones[$0.url] == nil }
+        // URL 对称 LWW：较新 entry 打掉墓碑。
+        var keptEntries: [BookmarkEntry] = []
+        for entry in merged.entries {
+            if let stone = tombstones[entry.url] {
+                if entry.updatedAt >= stone.deletedAt {
+                    tombstones.removeValue(forKey: entry.url)
+                    keptEntries.append(entry)
+                }
+            } else {
+                keptEntries.append(entry)
+            }
+        }
+        // 远端夹若已打掉墓碑，确保 foldersByKey 持有（含仅在 remote 的 recreate）。
+        for folder in remote.folders {
+            let key = folder.pathKey
+            if let stone = folderTombstones[key], folder.updatedAt >= stone.deletedAt {
+                folderTombstones.removeValue(forKey: key)
+            }
+            if folderTombstones[key] == nil {
+                if let existing = foldersByKey[key] {
+                    foldersByKey[key] = preferFolder(existing, folder)
+                } else {
+                    foldersByKey[key] = folder
+                }
+            }
+        }
+        let canonical = canonicalizeSiblingIndices(
+            entries: keptEntries,
+            folders: Array(foldersByKey.values)
+        )
         var joined = Set(local.joinedBrowserKeys)
         remote.joinedBrowserKeys.forEach { joined.insert($0) }
         return BookmarkLedgerSnapshot(
             version: max(local.version, remote.version),
-            entries: entries,
-            folders: merged.folders,
+            entries: canonical.entries.sorted { $0.url < $1.url },
+            folders: canonical.folders.sorted { $0.pathKey < $1.pathKey },
             tombstones: tombstones.values.sorted { $0.url < $1.url },
             folderTombstones: folderTombstones.values.sorted { $0.pathKey < $1.pathKey },
             remoteRevision: max(local.remoteRevision, remote.remoteRevision),
@@ -346,18 +430,21 @@ enum BookmarkLedgerMerge {
         }
         for (i, folderPath) in chain.enumerated() {
             let key = folderPath.sortKey
+            // 重建时间必须严格新于旧墓碑，避免紧随其后的 remote merge 用同秒墓碑盖掉。
+            let priorTombstoneAt = folderTombstones[key]?.deletedAt
             folderTombstones.removeValue(forKey: key)
+            let bump = priorTombstoneAt.map { max(updatedAt, $0 + 0.001) } ?? updatedAt
             let indexForThis: Int?
             if i == 0 { indexForThis = siblingIndex } else { indexForThis = nil }
             if var existing = byFolder[key] {
                 if let indexForThis { existing.siblingIndex = indexForThis }
-                existing.updatedAt = max(existing.updatedAt, updatedAt)
+                existing.updatedAt = max(existing.updatedAt, bump)
                 byFolder[key] = existing
             } else {
                 byFolder[key] = BookmarkFolderRecord(
                     path: folderPath,
                     siblingIndex: indexForThis ?? 0,
-                    updatedAt: updatedAt
+                    updatedAt: bump
                 )
             }
         }

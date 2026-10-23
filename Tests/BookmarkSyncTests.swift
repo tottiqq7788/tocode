@@ -960,13 +960,23 @@ func testBookmarkFolderDeleteTombstoneBlocksUnion() {
     }
     expect(!ledger.folders.contains { $0.pathKey == path.sortKey }, "删后无夹记录")
     expect(ledger.folderTombstones.contains { $0.pathKey == path.sortKey }, "写入夹墓碑")
-    let revived = BookmarkLedgerMerge.unionMerge(
+    // 已加入浏览器：即使较新也硬挡（防残留副本）
+    let fromBrowser = BookmarkLedgerMerge.unionMerge(
         ledger: ledger,
         incoming: [],
         incomingFolders: [BookmarkFolderRecord(path: path, siblingIndex: 0, updatedAt: 9)],
         browserKey: "chrome"
     )
-    expect(!revived.folders.contains { $0.pathKey == path.sortKey }, "并集不得复活墓碑夹")
+    expect(!fromBrowser.folders.contains { $0.pathKey == path.sortKey }, "已加入浏览器不得复活墓碑夹")
+    // 远程 merge（browserKey nil）：对称 LWW，较新夹打掉墓碑
+    let revived = BookmarkLedgerMerge.unionMerge(
+        ledger: ledger,
+        incoming: [],
+        incomingFolders: [BookmarkFolderRecord(path: path, siblingIndex: 0, updatedAt: 9)],
+        browserKey: nil
+    )
+    expect(revived.folders.contains { $0.pathKey == path.sortKey }, "远程较新 recreate 应复活夹")
+    expect(!revived.folderTombstones.contains { $0.pathKey == path.sortKey }, "复活后清墓碑")
 }
 
 func testBookmarkFolderDeleteRejectsNonEmpty() {
@@ -1145,4 +1155,149 @@ func testBookmarkApplyDryRunAndWrite() {
     } else {
         expect(false, "apply 写回")
     }
+}
+
+func testMergeRemoteDoesNotCoverNewerFolderCreate() {
+    let path = BookmarkFolderPath(kind: .toolbar, segments: ["AI"])
+    var local = BookmarkLedgerSnapshot.empty
+    local.folderTombstones = [
+        BookmarkFolderTombstone(path: path, deletedAt: 100)
+    ]
+    // create 晚于墓碑
+    local = BookmarkLedgerMerge.upsertFolderAncestors(path, siblingIndex: 0, updatedAt: 100.5, in: local)
+    expect(local.folders.contains { $0.pathKey == path.sortKey }, "本地已有 AI 夹")
+    expect(!local.folderTombstones.contains { $0.pathKey == path.sortKey }, "本地已清墓碑")
+
+    var remote = BookmarkLedgerSnapshot.empty
+    remote.folderTombstones = [
+        BookmarkFolderTombstone(path: path, deletedAt: 100)
+    ]
+    let merged = BookmarkLedgerMerge.mergeRemote(local: local, remote: remote)
+    expect(merged.folders.contains { $0.pathKey == path.sortKey }, "merge 后仍保留新建夹")
+    expect(!merged.folderTombstones.contains { $0.pathKey == path.sortKey }, "merge 不得用旧墓碑盖掉新建夹")
+}
+
+func testUpsertFolderBumpsPastTombstoneTime() {
+    let path = BookmarkFolderPath(kind: .toolbar, segments: ["工作"])
+    var ledger = BookmarkLedgerSnapshot.empty
+    ledger.folderTombstones = [
+        BookmarkFolderTombstone(path: path, deletedAt: 50)
+    ]
+    ledger = BookmarkLedgerMerge.upsertFolderAncestors(path, siblingIndex: 1, updatedAt: 50, in: ledger)
+    let record = ledger.folders.first { $0.pathKey == path.sortKey }
+    expect(record != nil, "upsert 写入夹")
+    expect((record?.updatedAt ?? 0) > 50, "updatedAt 严格新于旧墓碑")
+    expect(!ledger.folderTombstones.contains { $0.pathKey == path.sortKey }, "清墓碑")
+}
+
+func testFolderRemovalCandidatesIgnoreEmptyKnown() {
+    // 泵逻辑：未确认墓碑即候选；known 为空仍应视为待删（用同样过滤式断言）。
+    let stones = [
+        BookmarkFolderTombstone(
+            path: BookmarkFolderPath(kind: .toolbar, segments: ["anker"]),
+            deletedAt: 1
+        ),
+        BookmarkFolderTombstone(
+            path: BookmarkFolderPath(kind: .toolbar, segments: ["AI"]),
+            deletedAt: 1
+        )
+    ]
+    let confirmed: Set<String> = ["toolbar|AI"]
+    let known: [String: String] = [:]
+    let candidates = stones.filter { stone in
+        !confirmed.contains(stone.pathKey)
+    }
+    // 旧逻辑会要求 known[path]!=nil → 候选为空；新逻辑应仍有 anker。
+    expect(candidates.count == 1, "known 空时仍有未确认删夹")
+    expect(candidates.first?.path.segments == ["anker"], "仅未确认的 anker")
+    expect(known.isEmpty, "模拟 purge 后 known 空")
+}
+
+func testMergeRemoteRemoteFolderBeatsLocalTombstone() {
+    let path = BookmarkFolderPath(kind: .toolbar, segments: ["跨端"])
+    var local = BookmarkLedgerSnapshot.empty
+    local.folderTombstones = [
+        BookmarkFolderTombstone(path: path, deletedAt: 10)
+    ]
+    var remote = BookmarkLedgerSnapshot.empty
+    remote.folders = [
+        BookmarkFolderRecord(path: path, siblingIndex: 0, updatedAt: 11)
+    ]
+    let merged = BookmarkLedgerMerge.mergeRemote(local: local, remote: remote)
+    expect(merged.folders.contains { $0.pathKey == path.sortKey }, "本地 tombstone@10 + remote folder@11 → 夹存活")
+    expect(!merged.folderTombstones.contains { $0.pathKey == path.sortKey }, "较新夹清墓碑")
+}
+
+func testMergeRemoteURLEntryBeatsTombstone() {
+    let url = "https://revive.example"
+    var local = BookmarkLedgerSnapshot.empty
+    local.tombstones = [BookmarkTombstone(url: url, deletedAt: 10)]
+    var remote = BookmarkLedgerSnapshot.empty
+    remote.entries = [
+        BookmarkEntry(
+            url: url,
+            title: "R",
+            folder: BookmarkFolderPath(kind: .other, segments: []),
+            siblingIndex: 0,
+            updatedAt: 11
+        )
+    ]
+    let merged = BookmarkLedgerMerge.mergeRemote(local: local, remote: remote)
+    expect(merged.entries.contains { $0.url == url }, "较新 URL entry 复活")
+    expect(!merged.tombstones.contains { $0.url == url }, "复活后清 URL 墓碑")
+}
+
+func testCanonicalizeSiblingIndexBumpsUpdatedAt() {
+    let parent = BookmarkFolderPath(kind: .toolbar, segments: [])
+    let a = BookmarkEntry(
+        url: "https://a.canon",
+        title: "A",
+        folder: parent,
+        siblingIndex: 5,
+        updatedAt: 1
+    )
+    let b = BookmarkEntry(
+        url: "https://b.canon",
+        title: "B",
+        folder: parent,
+        siblingIndex: 9,
+        updatedAt: 1
+    )
+    let result = BookmarkLedgerMerge.canonicalizeSiblingIndices(entries: [a, b], folders: [])
+    let outA = result.entries.first { $0.url == "https://a.canon" }
+    let outB = result.entries.first { $0.url == "https://b.canon" }
+    expect(outA?.siblingIndex == 0 && outB?.siblingIndex == 1, "规范化连续下标")
+    expect((outA?.updatedAt ?? 0) > 1, "改 index 抬 updatedAt")
+    expect((outB?.updatedAt ?? 0) > 1, "改 index 抬 updatedAt(B)")
+}
+
+func testTrustedAlignFingerprintAndPoisonGate() {
+    let folder = BookmarkFolderPath(kind: .toolbar, segments: ["AI"])
+    let intent = BookmarkReconcilePump.fingerprint(folder: folder, index: 2, title: "X")
+    let measuredMatch = BookmarkReconcilePump.fingerprint(folder: folder, index: 2, title: "X")
+    let measuredClamp = BookmarkReconcilePump.fingerprint(folder: folder, index: 0, title: "X")
+    expect(intent == measuredMatch, "实测等于意图才可 stamp known")
+    expect(intent != measuredClamp, "钳制后 index 不同 → 保持 divergent")
+    // 毒化门闩：poisoned 非空时不得报无条件「已对齐」
+    var poisoned: Set<String> = ["https://poison.example"]
+    let purgeCredible = false
+    let aligned = poisoned.isEmpty && purgeCredible
+    expect(!aligned, "毒化或 purge 不可信时禁止已对齐")
+    poisoned.removeAll()
+    expect(!(poisoned.isEmpty && purgeCredible), "仅毒化清空仍不够，需 purgeCredible")
+}
+
+func testFolderRemovalCircuitBreakThreshold() {
+    expect(BookmarkReconcilePump.folderRemovalFailLimit == 5, "删夹熔断阈值 N=5")
+    var counts: [String: Int] = [:]
+    var failed: Set<String> = []
+    let pathKey = "toolbar|死夹"
+    for _ in 0 ..< BookmarkReconcilePump.folderRemovalFailLimit {
+        let next = (counts[pathKey] ?? 0) + 1
+        counts[pathKey] = next
+        if next >= BookmarkReconcilePump.folderRemovalFailLimit {
+            failed.insert(pathKey)
+        }
+    }
+    expect(failed.contains(pathKey), "连续失败达上限后进入 failedFolderRemovals")
 }

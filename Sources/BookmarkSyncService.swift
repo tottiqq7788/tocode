@@ -9,6 +9,9 @@ final class BookmarkSyncService {
     private let backupService: BookmarkBackupService
     private var ledger: BookmarkLedgerSnapshot
     private var pushWork: Task<Void, Never>?
+    /// 远程 sync 单飞：合并前重读最新 ledger，串行化 create/prune 与 syncRemoteNow。
+    private var remoteSyncWork: Task<Void, Never>?
+    private var remoteSyncQueued = false
     private var connectedBrowsers: Set<String> = []
     let activityLog: BookmarkSyncActivityLog
 
@@ -230,11 +233,32 @@ final class BookmarkSyncService {
 
     func syncRemoteNow() async {
         guard settings.isRemoteEnabled else { return }
+        if remoteSyncWork != nil {
+            remoteSyncQueued = true
+            await remoteSyncWork?.value
+            return
+        }
+        let work = Task { @MainActor [weak self] in
+            guard let self else { return }
+            repeat {
+                self.remoteSyncQueued = false
+                await self.performRemoteSync()
+            } while self.remoteSyncQueued
+        }
+        remoteSyncWork = work
+        await work.value
+        remoteSyncWork = nil
+    }
+
+    @MainActor
+    private func performRemoteSync() async {
+        guard settings.isRemoteEnabled else { return }
         guard let secret = await loadSecretOffMain(), !secret.isEmpty else { return }
         activityLog.append("开始远程同步…")
         do {
             let roomID = BookmarkSyncCrypto.roomID(for: secret)
             let verifier = BookmarkSyncCrypto.verifier(for: secret)
+            // 合并前以当前内存账本为准（单飞期间本地写入已串行可见）。
             if let remote = try await roomClient.fetch(roomID: roomID, verifier: verifier) {
                 let remoteLedger = try BookmarkSyncCrypto.decrypt(ciphertextBase64: remote.ciphertext, secret: secret)
                 let before = ledger.entries.count

@@ -1,5 +1,6 @@
 const HOST = "com.tocode.app.bookmark_sync";
 const RECONCILE_ALARM = "tocode-bookmark-reconcile";
+const RECONNECT_ALARM = "tocode-bookmark-reconnect";
 
 let port = null;
 let applyingBatch = null;
@@ -10,7 +11,8 @@ let pendingLedger = null;
 let hostChain = Promise.resolve();
 let connecting = false;
 let reconnectAttempt = 0;
-let reconnectTimer = null;
+/** disconnect 后递增；过期 apply 回执丢弃。 */
+let connectionEpoch = 0;
 
 function detectBrowser() {
   const ua = (typeof navigator !== "undefined" && navigator.userAgent) || "";
@@ -31,39 +33,52 @@ function isToolbarTitle(title) {
   );
 }
 
+/// 与主机 mapRoot 对齐：精确表 + 窄 contains，禁止裸 includes("other")。
 function isOtherTitle(title) {
-  const t = (title || "").toLowerCase();
-  return t.includes("other") || t.includes("其他") || t.includes("未整理") || t.includes("unfiled");
+  const raw = title || "";
+  const lower = raw.toLowerCase();
+  const exact = ["其他书签", "other bookmarks", "其他收藏夹", "other favorites"];
+  if (exact.some((x) => lower === x || raw === x)) return true;
+  if (raw.includes("其他书签")) return true;
+  if (lower.includes("unfiled") || lower.includes("未整理")) return true;
+  return false;
 }
 
 function isMobileTitle(title) {
-  const t = (title || "").toLowerCase();
-  return t.includes("mobile") || t.includes("移动");
+  const raw = title || "";
+  const lower = raw.toLowerCase();
+  const exact = ["移动设备书签", "mobile bookmarks", "移动收藏夹"];
+  if (exact.some((x) => lower === x || raw === x)) return true;
+  if (lower.includes("mobile")) return true;
+  return false;
 }
 
 function scheduleReconnect() {
-  if (reconnectTimer) return;
-  const delay = Math.min(30000, 1000 * Math.pow(2, Math.min(reconnectAttempt, 5)));
   reconnectAttempt += 1;
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null;
-    connect();
-  }, delay);
+  const delayMinutes = Math.min(0.5, Math.max(0.05, (Math.pow(2, Math.min(reconnectAttempt, 5)) * 1000) / 60000));
+  try {
+    chrome.alarms.create(RECONNECT_ALARM, { delayInMinutes: delayMinutes });
+  } catch (error) {
+    console.warn("reconnect alarm failed", error);
+  }
 }
 
 function connect() {
   if (connecting) return;
   connecting = true;
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-  }
+  try {
+    chrome.alarms.clear(RECONNECT_ALARM);
+  } catch (_) {}
   if (port) {
     try {
       port.disconnect();
     } catch (_) {}
     port = null;
   }
+  // 丢弃上一连接未完成的 hostChain。
+  connectionEpoch += 1;
+  const epoch = connectionEpoch;
+  hostChain = Promise.resolve();
   try {
     port = chrome.runtime.connectNative(HOST);
   } catch (error) {
@@ -73,18 +88,24 @@ function connect() {
     return;
   }
   port.onMessage.addListener((message) => {
-    hostChain = hostChain.then(() => onHostMessage(message)).catch((error) => {
+    hostChain = hostChain.then(() => {
+      if (epoch !== connectionEpoch) return;
+      return onHostMessage(message, epoch);
+    }).catch((error) => {
       console.warn("host message failed", error);
     });
   });
   port.onDisconnect.addListener(() => {
     const err = chrome.runtime.lastError;
     if (err) console.warn("native disconnect", err.message);
-    port = null;
-    treePushed = false;
-    pendingLedger = null;
-    connecting = false;
-    scheduleReconnect();
+    if (epoch === connectionEpoch) {
+      connectionEpoch += 1;
+      port = null;
+      treePushed = false;
+      pendingLedger = null;
+      connecting = false;
+      scheduleReconnect();
+    }
   });
   treePushed = false;
   pendingLedger = null;
@@ -106,7 +127,8 @@ function connect() {
   connecting = false;
 }
 
-function send(message) {
+function send(message, epoch) {
+  if (typeof epoch === "number" && epoch !== connectionEpoch) return;
   if (!port) return;
   try {
     port.postMessage(message);
@@ -116,8 +138,12 @@ function send(message) {
 }
 
 async function pushFullTree() {
+  if (!port) {
+    connect();
+    return;
+  }
   const tree = await chrome.bookmarks.getTree();
-  send({ type: "tree", nodes: serializeNodes(tree) });
+  send({ type: "tree", nodes: serializeNodes(tree) }, connectionEpoch);
 }
 
 function serializeNodes(nodes) {
@@ -249,14 +275,16 @@ chrome.bookmarks.onRemoved.addListener((_id, removeInfo) => {
   pushFullTree();
 });
 
-async function onHostMessage(message) {
+async function onHostMessage(message, epoch) {
   if (!message || !message.type) return;
+  if (epoch !== connectionEpoch) return;
+  const reply = (payload) => send(payload, epoch);
   if (message.type === "tree_ok") {
     treePushed = true;
     // 不再回放积压的整本 ledger：改由主机逐条 upsert 补缺。
     pendingLedger = null;
     // 回告主机：下行通道可用，可以开始补缺。
-    send({ type: "tree_ready" });
+    reply({ type: "tree_ready" });
     return;
   }
   if (message.type === "ledger") {
@@ -281,7 +309,7 @@ async function onHostMessage(message) {
   }
   if (message.type === "purge_empty_folders") {
     if (!treePushed) {
-      send({
+      reply({
         type: "apply_error",
         op: "purge_empty_folders_skipped",
         batch: message.batch || null,
@@ -293,7 +321,7 @@ async function onHostMessage(message) {
     applyingBatch = message.batch || "purge_empty_folders";
     try {
       const removed = await purgeEmptyTitleFoldersUnderRoots();
-      send({
+      reply({
         type: "apply_result",
         op: "empty_folders_purged",
         batch: message.batch || null,
@@ -301,7 +329,7 @@ async function onHostMessage(message) {
         removed
       });
     } catch (error) {
-      send({
+      reply({
         type: "apply_error",
         op: "purge_empty_folders",
         batch: message.batch || null,
@@ -315,7 +343,7 @@ async function onHostMessage(message) {
   }
   if (message.type === "ensure_folder") {
     if (!treePushed) {
-      send({
+      reply({
         type: "apply_error",
         op: "ensure_folder_skipped",
         batch: message.batch || null,
@@ -327,20 +355,26 @@ async function onHostMessage(message) {
     applyingBatch = message.batch || "ensure_folder";
     try {
       await ensureFolder(message.folder, message.index);
-      send({
+      const measured = await measureFolderLayout(message.folder);
+      reply({
         type: "apply_result",
         op: "folder_ensured",
         batch: message.batch || null,
         url: "",
         folder: message.folder || null,
-        index: typeof message.index === "number" ? message.index : 0
+        index: measured && typeof measured.index === "number"
+          ? measured.index
+          : typeof message.index === "number"
+            ? message.index
+            : 0
       });
     } catch (error) {
-      send({
+      reply({
         type: "apply_error",
         op: "ensure_folder",
         batch: message.batch || null,
         url: "",
+        folder: message.folder || null,
         message: String(error)
       });
     } finally {
@@ -350,11 +384,12 @@ async function onHostMessage(message) {
   }
   if (message.type === "remove_folder") {
     if (!treePushed) {
-      send({
+      reply({
         type: "apply_error",
         op: "remove_folder_skipped",
         batch: message.batch || null,
         url: "",
+        folder: message.folder || null,
         message: "tree_not_ready"
       });
       return;
@@ -362,17 +397,19 @@ async function onHostMessage(message) {
     applyingBatch = message.batch || "remove_folder";
     try {
       const result = await removeFolder(message.folder, !!message.recursive);
-      send({
+      reply({
         type: "apply_result",
         op: "folder_removed",
         batch: message.batch || null,
         url: "",
         folder: message.folder || null,
         removed: result.removed,
-        missing: !!result.missing
+        missing: !!result.missing,
+        evacuatedMoved: (result.evacuated && result.evacuated.moved) || 0,
+        evacuatedDeduped: (result.evacuated && result.evacuated.deduped) || 0
       });
     } catch (error) {
-      send({
+      reply({
         type: "apply_error",
         op: "remove_folder",
         batch: message.batch || null,
@@ -387,7 +424,7 @@ async function onHostMessage(message) {
   }
   if (message.type === "upsert") {
     if (!treePushed) {
-      send({
+      reply({
         type: "apply_error",
         op: "upsert_skipped",
         batch: message.batch || null,
@@ -399,14 +436,17 @@ async function onHostMessage(message) {
     applyingBatch = message.batch || "upsert";
     try {
       const result = await upsertEntry(message.entry);
-      send({
+      reply({
         type: "apply_result",
-        op: result,
+        op: result.op,
         batch: message.batch || null,
-        url: (message.entry && message.entry.url) || ""
+        url: (message.entry && message.entry.url) || "",
+        folder: result.folder || (message.entry && message.entry.folder) || null,
+        index: typeof result.index === "number" ? result.index : 0,
+        title: result.title || (message.entry && message.entry.title) || ""
       });
     } catch (error) {
-      send({
+      reply({
         type: "apply_error",
         op: "upsert",
         batch: message.batch || null,
@@ -420,7 +460,7 @@ async function onHostMessage(message) {
   }
   if (message.type === "remove") {
     if (!treePushed) {
-      send({
+      reply({
         type: "apply_error",
         op: "remove_skipped",
         batch: message.batch || null,
@@ -432,7 +472,7 @@ async function onHostMessage(message) {
     applyingBatch = message.batch || "remove";
     try {
       await removeByURL(message.url);
-      send({
+      reply({
         type: "apply_result",
         op: "removed",
         batch: message.batch || null,
@@ -465,10 +505,45 @@ function clampIndex(wanted, childCount, forMoveAlreadyChild) {
   return Math.min(positive, childCount);
 }
 
+async function measureBookmarkLayout(bookmarkId, fallbackFolder, fallbackTitle) {
+  try {
+    const [node] = await chrome.bookmarks.get(bookmarkId);
+    if (!node || !node.url) {
+      return {
+        folder: fallbackFolder || null,
+        index: 0,
+        title: fallbackTitle || ""
+      };
+    }
+    const titles = await pathTitlesFor(node.parentId);
+    return {
+      folder: folderFromPath(titles),
+      index: typeof node.index === "number" ? node.index : 0,
+      title: node.title || fallbackTitle || node.url
+    };
+  } catch (_) {
+    return {
+      folder: fallbackFolder || null,
+      index: 0,
+      title: fallbackTitle || ""
+    };
+  }
+}
+
+async function measureFolderLayout(folder) {
+  const node = await findFolderNode(folder);
+  if (!node) return null;
+  return { index: typeof node.index === "number" ? node.index : 0 };
+}
+
 async function upsertEntry(entry) {
-  if (!entry || !entry.url) return "ignored";
+  if (!entry || !entry.url) {
+    return { op: "ignored", folder: null, index: 0, title: "" };
+  }
   const url = canonicalize(entry.url);
-  if (!url) return "ignored";
+  if (!url) {
+    return { op: "ignored", folder: entry.folder || null, index: 0, title: entry.title || "" };
+  }
   const wantedIndex =
     typeof entry.siblingIndex === "number"
       ? entry.siblingIndex
@@ -488,35 +563,46 @@ async function upsertEntry(entry) {
     } catch (_) {}
   }
   const siblings = await chrome.bookmarks.getChildren(parentId);
+  let nodeId = current && current.id;
+  let op = "exists";
   if (!current) {
     const index = clampIndex(wantedIndex, siblings.length, false);
-    await chrome.bookmarks.create({
+    const created = await chrome.bookmarks.create({
       parentId,
       title: entry.title || url,
       url,
       index
     });
-    return "created";
+    nodeId = created.id;
+    op = "created";
+  } else {
+    let changed = false;
+    const changes = {};
+    if ((entry.title || url) !== (current.title || "")) {
+      changes.title = entry.title || url;
+    }
+    if (Object.keys(changes).length) {
+      await chrome.bookmarks.update(current.id, changes);
+      changed = true;
+    }
+    const sameParent = current.parentId === parentId;
+    const needsMove =
+      !sameParent ||
+      (typeof current.index === "number" && current.index !== wantedIndex);
+    if (needsMove) {
+      const index = clampIndex(wantedIndex, siblings.length, sameParent);
+      await chrome.bookmarks.move(current.id, { parentId, index });
+      changed = true;
+    }
+    op = changed ? "updated" : "exists";
   }
-  let changed = false;
-  const changes = {};
-  if ((entry.title || url) !== (current.title || "")) {
-    changes.title = entry.title || url;
-  }
-  if (Object.keys(changes).length) {
-    await chrome.bookmarks.update(current.id, changes);
-    changed = true;
-  }
-  const sameParent = current.parentId === parentId;
-  const needsMove =
-    !sameParent ||
-    (typeof current.index === "number" && current.index !== wantedIndex);
-  if (needsMove) {
-    const index = clampIndex(wantedIndex, siblings.length, sameParent);
-    await chrome.bookmarks.move(current.id, { parentId, index });
-    changed = true;
-  }
-  return changed ? "updated" : "exists";
+  const measured = await measureBookmarkLayout(nodeId, entry.folder, entry.title || url);
+  return {
+    op,
+    folder: measured.folder,
+    index: measured.index,
+    title: measured.title
+  };
 }
 
 async function removeByURL(raw) {
@@ -591,11 +677,14 @@ function resolveRootBase(children, kind) {
   if (kind === "toolbar") {
     base = children.find((c) => isToolbarTitle(c.title)) || children[0];
   } else if (kind === "mobile") {
-    base =
-      children.find((c) => isMobileTitle(c.title)) ||
-      children.find((c) => isOtherTitle(c.title)) ||
-      children[1] ||
-      children[0];
+    const mobile = children.find((c) => isMobileTitle(c.title));
+    if (mobile) {
+      base = mobile;
+    } else {
+      const other = children.find((c) => isOtherTitle(c.title));
+      base = other || children[1] || children[0];
+      console.warn("mobile root missing; fallback to", base && base.title);
+    }
   } else if (kind === "named") {
     base = children.find((c) => isOtherTitle(c.title)) || children[1] || children[0];
   } else {
@@ -672,16 +761,135 @@ function nodeHasBookmarkDescendant(node) {
   return false;
 }
 
-/// 删除空夹。recursive：删整棵空夹树；夹下有书签则抛错。
+function collectBookmarkNodes(node, out = []) {
+  if (!node) return out;
+  if (node.url) {
+    out.push(node);
+    return out;
+  }
+  for (const child of node.children || []) {
+    collectBookmarkNodes(child, out);
+  }
+  return out;
+}
+
+function collectIdsInSubtree(node, out = new Set()) {
+  if (!node || !node.id) return out;
+  out.add(node.id);
+  for (const child of node.children || []) {
+    collectIdsInSubtree(child, out);
+  }
+  return out;
+}
+
+/// 删夹前疏散残留书签：树外已有同 URL 则删本副本；同树内同 URL 只留一份迁出，其余 remove。
+async function evacuateBookmarksFromSubtree(detailed) {
+  const subtreeIds = collectIdsInSubtree(detailed);
+  const bookmarks = collectBookmarkNodes(detailed);
+  if (!bookmarks.length) return { moved: 0, deduped: 0 };
+
+  const tree = await chrome.bookmarks.getTree();
+  const all = flattenBookmarks(tree);
+  const root = tree[0];
+  const children = (root.children || []).filter((c) => !c.url);
+  const otherBase = resolveRootBase(children, "other");
+  if (!otherBase) {
+    throw new Error("no_other_root_for_evacuate");
+  }
+
+  // 同树内同 URL：只保留第一份待迁出，其余直接删。
+  const seenInSubtree = new Set();
+  const toEvacuate = [];
+  let deduped = 0;
+  for (const item of bookmarks) {
+    const key = canonicalize(item.url) || `raw:${item.id}`;
+    if (seenInSubtree.has(key)) {
+      try {
+        await chrome.bookmarks.remove(item.id);
+        deduped += 1;
+      } catch (error) {
+        throw new Error(`evacuate_dedupe_failed:${String(error)}`);
+      }
+      continue;
+    }
+    seenInSubtree.add(key);
+    toEvacuate.push(item);
+  }
+
+  let moved = 0;
+  for (const item of toEvacuate) {
+    const key = canonicalize(item.url);
+    if (!key) {
+      try {
+        await chrome.bookmarks.move(item.id, { parentId: otherBase.id });
+        moved += 1;
+      } catch (moveErr) {
+        try {
+          await chrome.bookmarks.create({
+            parentId: otherBase.id,
+            title: item.title || item.url || "bookmark",
+            url: item.url
+          });
+          await chrome.bookmarks.remove(item.id);
+          moved += 1;
+        } catch (error) {
+          throw new Error(`evacuate_move_failed:${String(error || moveErr)}`);
+        }
+      }
+      continue;
+    }
+    const outside = all.find(
+      (b) =>
+        b.id !== item.id &&
+        !subtreeIds.has(b.id) &&
+        canonicalize(b.url) === key
+    );
+    if (outside) {
+      try {
+        await chrome.bookmarks.remove(item.id);
+        deduped += 1;
+      } catch (error) {
+        throw new Error(`evacuate_outside_dedupe_failed:${String(error)}`);
+      }
+      continue;
+    }
+    try {
+      await chrome.bookmarks.move(item.id, { parentId: otherBase.id });
+      moved += 1;
+    } catch (moveErr) {
+      try {
+        await chrome.bookmarks.create({
+          parentId: otherBase.id,
+          title: item.title || key,
+          url: item.url
+        });
+        await chrome.bookmarks.remove(item.id);
+        moved += 1;
+      } catch (error) {
+        throw new Error(`evacuate_move_failed:${String(error || moveErr)}`);
+      }
+    }
+  }
+  return { moved, deduped };
+}
+
+/// 删除夹。recursive：先疏散残留书签再 removeTree；非 recursive 仅删空叶夹。
 async function removeFolder(folder, recursive) {
   const node = await findFolderNode(folder);
   if (!node) {
     return { removed: 0, missing: true };
   }
-  // 需要 children 才能判断是否空
-  const detailed = (await chrome.bookmarks.getSubTree(node.id))[0];
+  let detailed = (await chrome.bookmarks.getSubTree(node.id))[0];
+  let evacuated = { moved: 0, deduped: 0 };
   if (nodeHasBookmarkDescendant(detailed)) {
-    throw new Error("folder_not_empty");
+    if (!recursive) {
+      throw new Error("folder_not_empty");
+    }
+    evacuated = await evacuateBookmarksFromSubtree(detailed);
+    detailed = (await chrome.bookmarks.getSubTree(node.id))[0];
+    if (nodeHasBookmarkDescendant(detailed)) {
+      throw new Error("folder_not_empty");
+    }
   }
   if (!recursive) {
     const kids = (detailed.children || []).filter((c) => !c.url);
@@ -689,10 +897,10 @@ async function removeFolder(folder, recursive) {
       throw new Error("folder_has_child_folders");
     }
     await chrome.bookmarks.remove(node.id);
-    return { removed: 1, missing: false };
+    return { removed: 1, missing: false, evacuated };
   }
   await chrome.bookmarks.removeTree(node.id);
-  return { removed: 1, missing: false };
+  return { removed: 1, missing: false, evacuated };
 }
 
 /// 删除 toolbar/other/mobile 下会打乱 siblingIndex 的占位：空标题夹与分隔线（不同步）。
@@ -737,7 +945,14 @@ async function purgeEmptyTitleFolders(parentId) {
 
 chrome.alarms.create(RECONCILE_ALARM, { periodInMinutes: 5 });
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === RECONCILE_ALARM) pushFullTree();
+  if (alarm.name === RECONNECT_ALARM) {
+    if (!port) connect();
+    return;
+  }
+  if (alarm.name === RECONCILE_ALARM) {
+    if (!port) connect();
+    else pushFullTree();
+  }
 });
 
 connect();
