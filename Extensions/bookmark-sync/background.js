@@ -33,7 +33,7 @@ function isToolbarTitle(title) {
 
 function isOtherTitle(title) {
   const t = (title || "").toLowerCase();
-  return t.includes("other") || t.includes("其他") || t.includes("未整理");
+  return t.includes("other") || t.includes("其他") || t.includes("未整理") || t.includes("unfiled");
 }
 
 function isMobileTitle(title) {
@@ -279,6 +279,40 @@ async function onHostMessage(message) {
     }
     return;
   }
+  if (message.type === "purge_empty_folders") {
+    if (!treePushed) {
+      send({
+        type: "apply_error",
+        op: "purge_empty_folders_skipped",
+        batch: message.batch || null,
+        url: "",
+        message: "tree_not_ready"
+      });
+      return;
+    }
+    applyingBatch = message.batch || "purge_empty_folders";
+    try {
+      const removed = await purgeEmptyTitleFoldersUnderRoots();
+      send({
+        type: "apply_result",
+        op: "empty_folders_purged",
+        batch: message.batch || null,
+        url: "",
+        removed
+      });
+    } catch (error) {
+      send({
+        type: "apply_error",
+        op: "purge_empty_folders",
+        batch: message.batch || null,
+        url: "",
+        message: String(error)
+      });
+    } finally {
+      applyingBatch = null;
+    }
+    return;
+  }
   if (message.type === "ensure_folder") {
     if (!treePushed) {
       send({
@@ -298,7 +332,8 @@ async function onHostMessage(message) {
         op: "folder_ensured",
         batch: message.batch || null,
         url: "",
-        folder: message.folder || null
+        folder: message.folder || null,
+        index: typeof message.index === "number" ? message.index : 0
       });
     } catch (error) {
       send({
@@ -562,6 +597,46 @@ async function ensureFolder(folder, siblingIndex) {
     parentId = next.id;
   }
   return parentId;
+}
+
+/// 删除 toolbar/other/mobile 下会打乱 siblingIndex 的占位：空标题夹与分隔线（不同步）。
+async function purgeEmptyTitleFoldersUnderRoots() {
+  const tree = await chrome.bookmarks.getTree();
+  const root = tree[0];
+  const bases = (root.children || []).filter(
+    (c) => !c.url && (isToolbarTitle(c.title) || isOtherTitle(c.title) || isMobileTitle(c.title))
+  );
+  let removed = 0;
+  for (const base of bases) {
+    removed += await purgeEmptyTitleFolders(base.id);
+  }
+  return removed;
+}
+
+async function purgeEmptyTitleFolders(parentId) {
+  let removed = 0;
+  const nodes = await chrome.bookmarks.getChildren(parentId);
+  for (const node of nodes) {
+    if (node.url) continue;
+    // Firefox 分隔线 type=separator，无标题；占位会让绝对下标与账本错位。
+    if (node.type === "separator") {
+      try {
+        await chrome.bookmarks.remove(node.id);
+        removed += 1;
+      } catch (_) {}
+      continue;
+    }
+    const title = (node.title || "").trim();
+    if (!title) {
+      try {
+        await chrome.bookmarks.removeTree(node.id);
+        removed += 1;
+      } catch (_) {}
+      continue;
+    }
+    removed += await purgeEmptyTitleFolders(node.id);
+  }
+  return removed;
 }
 
 chrome.alarms.create(RECONCILE_ALARM, { periodInMinutes: 5 });

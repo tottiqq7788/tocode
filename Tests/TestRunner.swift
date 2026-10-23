@@ -9300,6 +9300,11 @@ struct TestRunnerMain {
         await testBookmarkCLIExecutorCRUDAndPull()
         testBookmarkSiblingIndexClamp()
         testBookmarkLayoutIndexAndLegacyDecode()
+        testBookmarkToolbarRootSegmentsPreserved()
+        testBookmarkToolbarUnionABYExample()
+        testBookmarkToolbarAliasNormalizedFromOther()
+        testBookmarkNamedSupersededByRootedPath()
+        testBookmarkSiblingIndexCanonicalizeOnCollision()
         testBookmarkSyncCryptoRoundTrip()
 
         if failures == 0 {

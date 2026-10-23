@@ -154,7 +154,9 @@ enum BookmarkLedgerMerge {
     ) -> BookmarkLedgerSnapshot {
         var byURL: [String: BookmarkEntry] = [:]
         for entry in ledger.entries {
-            byURL[entry.url] = entry
+            var normalized = entry
+            normalized.folder = normalizeFolderPath(entry.folder)
+            byURL[normalized.url] = normalized
         }
 
         var tombstones = Dictionary(uniqueKeysWithValues: ledger.tombstones.map { ($0.url, $0) })
@@ -171,8 +173,11 @@ enum BookmarkLedgerMerge {
                 continue
             }
 
+            candidate.folder = normalizeFolderPath(candidate.folder)
             if let existing = byURL[url] {
-                byURL[url] = prefer(existing, candidate)
+                var left = existing
+                left.folder = normalizeFolderPath(left.folder)
+                byURL[url] = prefer(left, candidate)
             } else {
                 if candidate.id.isEmpty {
                     candidate.id = UUID().uuidString
@@ -181,15 +186,32 @@ enum BookmarkLedgerMerge {
             }
         }
 
-        var byFolder = Dictionary(uniqueKeysWithValues: ledger.folders.map { ($0.pathKey, $0) })
-        for folder in incomingFolders {
-            let key = folder.pathKey
+        var byFolder: [String: BookmarkFolderRecord] = [:]
+        for record in ledger.folders {
+            var normalized = record
+            normalized.path = normalizeFolderPath(record.path)
+            let key = normalized.pathKey
             if let existing = byFolder[key] {
-                byFolder[key] = preferFolder(existing, folder)
+                byFolder[key] = preferFolder(existing, normalized)
             } else {
-                byFolder[key] = folder
+                byFolder[key] = normalized
             }
         }
+        for folder in incomingFolders {
+            var normalized = folder
+            normalized.path = normalizeFolderPath(folder.path)
+            let key = normalized.pathKey
+            if let existing = byFolder[key] {
+                byFolder[key] = preferFolder(existing, normalized)
+            } else {
+                byFolder[key] = normalized
+            }
+        }
+        let folders = dropSupersededNamedFolders(Array(byFolder.values))
+        let canonical = canonicalizeSiblingIndices(
+            entries: Array(byURL.values),
+            folders: folders
+        )
 
         var joined = ledger.joinedBrowserKeys
         if let browserKey, !joined.contains(browserKey) {
@@ -198,12 +220,63 @@ enum BookmarkLedgerMerge {
 
         return BookmarkLedgerSnapshot(
             version: ledger.version,
-            entries: byURL.values.sorted { $0.url < $1.url },
-            folders: byFolder.values.sorted { $0.pathKey < $1.pathKey },
+            entries: canonical.entries.sorted { $0.url < $1.url },
+            folders: canonical.folders.sorted { $0.pathKey < $1.pathKey },
             tombstones: tombstones.values.sorted { $0.url < $1.url },
             remoteRevision: ledger.remoteRevision,
             joinedBrowserKeys: joined
         )
+    }
+
+    /// 每个父路径下的直接子书签与子夹：按 siblingIndex → 较新 updatedAt → 稳定键排序后写成 0..n-1。
+    static func canonicalizeSiblingIndices(
+        entries: [BookmarkEntry],
+        folders: [BookmarkFolderRecord]
+    ) -> (entries: [BookmarkEntry], folders: [BookmarkFolderRecord]) {
+        enum Child {
+            case bookmark(Int)
+            case folder(Int)
+        }
+
+        var entries = entries
+        var folders = folders
+        var groups: [String: [(index: Int, updatedAt: Double, key: String, child: Child)]] = [:]
+
+        for (i, entry) in entries.enumerated() {
+            let parentKey = entry.folder.sortKey
+            groups[parentKey, default: []].append(
+                (entry.siblingIndex, entry.updatedAt, "b:" + entry.url, .bookmark(i))
+            )
+        }
+        for (i, folder) in folders.enumerated() {
+            guard let parent = parentPath(of: folder.path) else { continue }
+            groups[parent.sortKey, default: []].append(
+                (folder.siblingIndex, folder.updatedAt, "f:" + folder.pathKey, .folder(i))
+            )
+        }
+
+        for (_, var children) in groups {
+            children.sort {
+                if $0.index != $1.index { return $0.index < $1.index }
+                if $0.updatedAt != $1.updatedAt { return $0.updatedAt > $1.updatedAt }
+                return $0.key < $1.key
+            }
+            for (newIndex, item) in children.enumerated() {
+                switch item.child {
+                case .bookmark(let i):
+                    entries[i].siblingIndex = newIndex
+                case .folder(let i):
+                    folders[i].siblingIndex = newIndex
+                }
+            }
+        }
+        return (entries, folders)
+    }
+
+    /// 子夹的父路径；根级（无 segments）无父。
+    static func parentPath(of path: BookmarkFolderPath) -> BookmarkFolderPath? {
+        guard !path.segments.isEmpty else { return nil }
+        return BookmarkFolderPath(kind: path.kind, segments: Array(path.segments.dropLast()))
     }
 
     /// 加入完成后的删除：写入墓碑并去掉条目。
@@ -348,40 +421,79 @@ enum BookmarkLedgerMerge {
     }
 
     /// 纯 LWW：较新 updatedAt 胜出 title / folder / siblingIndex。
+    /// named 与同路径段的 toolbar/other/mobile 并存时，路径取 rooted（旧账本迁移）。
     static func prefer(_ a: BookmarkEntry, _ b: BookmarkEntry) -> BookmarkEntry {
-        if b.updatedAt >= a.updatedAt {
-            var winner = b
-            winner.id = a.id
-            winner.url = a.url
-            return winner
+        let newer = b.updatedAt >= a.updatedAt ? b : a
+        var winner = newer
+        winner.id = a.id
+        winner.url = a.url
+        if let rooted = rootedPathPreferring(a.folder, b.folder) {
+            winner.folder = rooted
         }
-        return a
+        return winner
     }
 
     static func preferFolder(_ a: BookmarkFolderRecord, _ b: BookmarkFolderRecord) -> BookmarkFolderRecord {
         b.updatedAt >= a.updatedAt ? b : a
     }
 
+    /// named 与 rooted 同段时取 rooted；否则不干预。
+    static func rootedPathPreferring(_ a: BookmarkFolderPath, _ b: BookmarkFolderPath) -> BookmarkFolderPath? {
+        let rooted: Set<BookmarkFolderKind> = [.toolbar, .other, .mobile]
+        if a.kind == .named, rooted.contains(b.kind), a.segments == b.segments { return b }
+        if b.kind == .named, rooted.contains(a.kind), a.segments == b.segments { return a }
+        return nil
+    }
+
+    /// 丢掉已被 toolbar/other/mobile 同段路径替代的 named 文件夹记录。
+    static func dropSupersededNamedFolders(_ folders: [BookmarkFolderRecord]) -> [BookmarkFolderRecord] {
+        let rootedSegKeys = Set(
+            folders
+                .filter { $0.path.kind == .toolbar || $0.path.kind == .other || $0.path.kind == .mobile }
+                .map { $0.path.segments.joined(separator: "\u{1f}") }
+        )
+        return folders.filter { folder in
+            guard folder.path.kind == .named else { return true }
+            let key = folder.path.segments.joined(separator: "\u{1f}")
+            return !rootedSegKeys.contains(key)
+        }
+    }
+
     /// 从浏览器原始树节点解析布局（扩展上报格式）。
+    /// 书签栏 / 其他书签 / 移动设备书签的子夹保留该根并追加路径段。
     static func layout(fromBrowserNodes nodes: [[String: Any]], now: Double = Date().timeIntervalSince1970) -> BookmarkTreeLayout {
         var entries: [BookmarkEntry] = []
         var folders: [BookmarkFolderRecord] = []
 
-        func walk(_ node: [String: Any], folder: BookmarkFolderPath) {
+        func walk(_ node: [String: Any], folder: BookmarkFolderPath, underResolvedRoot: Bool) {
             let type = node["type"] as? String ?? ""
             let siblingIndex = intValue(node["index"]) ?? 0
             if type == "folder" {
                 let title = (node["title"] as? String) ?? ""
-                let kind = folderKind(forRootTitle: title, current: folder)
+                let segment = title.isEmpty ? [] : [title]
                 let next: BookmarkFolderPath
-                if folder.kind == .named || (kind == .named && !folder.segments.isEmpty) {
-                    next = BookmarkFolderPath(kind: .named, segments: folder.segments + (title.isEmpty ? [] : [title]))
-                } else if kind != .named {
-                    next = BookmarkFolderPath(kind: kind, segments: [])
+                let nextResolved: Bool
+                if !underResolvedRoot {
+                    // 浏览器虚拟根（空标题 / Bookmarks）只作容器，子节点仍未进入真实根。
+                    if isVirtualBookmarkRootTitle(title) {
+                        for child in (node["children"] as? [[String: Any]]) ?? [] {
+                            walk(child, folder: folder, underResolvedRoot: false)
+                        }
+                        return
+                    }
+                    let kind = mapRoot(title)
+                    if kind == .named {
+                        next = BookmarkFolderPath(kind: .named, segments: segment)
+                    } else {
+                        next = BookmarkFolderPath(kind: kind, segments: [])
+                    }
+                    nextResolved = true
                 } else {
-                    next = BookmarkFolderPath(kind: .named, segments: title.isEmpty ? [] : [title])
+                    // 已进入 toolbar/other/mobile/named：子夹保留该根并追加段。
+                    next = BookmarkFolderPath(kind: folder.kind, segments: folder.segments + segment)
+                    nextResolved = true
                 }
-                // 根级 toolbar/other/mobile 本身不记为 named 记录；具名夹与其子夹记入。
+                // 根级 toolbar/other/mobile 本身不记；具名夹与各根下的子夹记入。
                 if next.kind == .named || !next.segments.isEmpty {
                     let updated = (node["dateAdded"] as? Double).map { $0 / 1000.0 } ?? now
                     folders.append(
@@ -389,7 +501,7 @@ enum BookmarkLedgerMerge {
                     )
                 }
                 for child in (node["children"] as? [[String: Any]]) ?? [] {
-                    walk(child, folder: next)
+                    walk(child, folder: next, underResolvedRoot: nextResolved)
                 }
                 return
             }
@@ -412,7 +524,7 @@ enum BookmarkLedgerMerge {
             )
         }
         for node in nodes {
-            walk(node, folder: BookmarkFolderPath(kind: .other, segments: []))
+            walk(node, folder: BookmarkFolderPath(kind: .other, segments: []), underResolvedRoot: false)
         }
         return BookmarkTreeLayout(entries: entries, folders: folders)
     }
@@ -429,29 +541,48 @@ enum BookmarkLedgerMerge {
         return nil
     }
 
-    private static func folderKind(forRootTitle title: String, current: BookmarkFolderPath) -> BookmarkFolderKind {
-        if current.kind != .other || !current.segments.isEmpty {
-            return current.kind == .other && current.segments.isEmpty ? mapRoot(title) : .named
+    private static func isVirtualBookmarkRootTitle(_ title: String) -> Bool {
+        let lower = title.lowercased()
+        return title.isEmpty || lower == "bookmarks" || title == "书签" || title == "收藏夹"
+    }
+
+    /// 浏览器对书签栏根的各种标题（含 Firefox「书签工具栏」）。
+    static func isToolbarAliasTitle(_ title: String) -> Bool {
+        let lower = title.lowercased()
+        if ["书签栏", "书签工具栏", "bookmarks bar", "bookmarks toolbar", "收藏夹栏", "favourites bar", "favorites bar"]
+            .contains(where: { lower == $0 || title == $0 }) {
+            return true
         }
-        return mapRoot(title)
+        return lower.contains("toolbar")
+            || title.contains("书签栏")
+            || title.contains("书签工具栏")
+            || title.contains("收藏夹栏")
+    }
+
+    /// 把误记为 other/named 且首段为书签栏别名的路径收成 toolbar + 余下段。
+    static func normalizeFolderPath(_ path: BookmarkFolderPath) -> BookmarkFolderPath {
+        guard path.kind == .other || path.kind == .named,
+              let first = path.segments.first,
+              isToolbarAliasTitle(first) else {
+            return path
+        }
+        return BookmarkFolderPath(kind: .toolbar, segments: Array(path.segments.dropFirst()))
     }
 
     private static func mapRoot(_ title: String) -> BookmarkFolderKind {
-        let lower = title.lowercased()
-        if ["书签栏", "bookmarks bar", "bookmarks toolbar", "收藏夹栏", "favourites bar", "favorites bar"].contains(where: { lower == $0 || title == $0 })
-            || lower.contains("toolbar") || title.contains("书签栏") || title.contains("收藏夹栏") {
+        if isToolbarAliasTitle(title) {
             return .toolbar
         }
+        let lower = title.lowercased()
         if ["其他书签", "other bookmarks", "其他收藏夹", "other favorites"].contains(where: { lower == $0 || title == $0 })
-            || title.contains("其他书签") {
+            || title.contains("其他书签")
+            || lower.contains("unfiled")
+            || lower.contains("未整理") {
             return .other
         }
         if ["移动设备书签", "mobile bookmarks", "移动收藏夹"].contains(where: { lower == $0 || title == $0 })
             || lower.contains("mobile") {
             return .mobile
-        }
-        if title.isEmpty || lower == "bookmarks" || title == "书签" || title == "收藏夹" {
-            return .other
         }
         return .named
     }

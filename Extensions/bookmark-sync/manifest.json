@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Tocode 书签同步",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "将本机书签变更交给 Tocode 同步。",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAoVDyLosvWfsZTgWSytUqAKSHS2475Mcw93RTMi1rui6BjbdkhmdnEX2lWfXtGujKGbiva0HR9CY4XLFNLod6gmj1pT31PHCZRUsz8D4vYY0E8VCABEsKY3LCYNKzLWFzNRks0zSAWlbYFrBYm+ksuOL+uDhWYL0GaMCKuplBMTBExMO4R6OG/znnCAp9KmAG99bnq/VMXpU5ZVLBgNzswrIqoeb/dfc62nBIpgmPpxF2EUrK0ZzfVKapQzm67baDIRbhufDjntuPb9UnhMnApZhXMBWfXH8UCGeZAINfv1SdNGcGTQprCgoYeA6/GuiOMHIsPpT9bF8z6QXdJl2tuwIDAQAB",
   "permissions": [

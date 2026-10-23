@@ -191,7 +191,13 @@ final class BookmarkNativeBridge {
                     }
                 }
                 bridge.knownLayout = layoutMap
-                bridge.knownFolderKeys = Set(layout.folders.map(\.pathKey))
+                var folderLayout: [String: String] = [:]
+                for folder in layout.folders {
+                    folderLayout[folder.pathKey] = String(folder.siblingIndex)
+                }
+                bridge.knownFolderLayout = folderLayout
+                bridge.didPurgeEmptyTitleFolders = false
+                bridge.purgeEmptyAttempts = 0
                 bridge.awaitingTreeReady = true
                 send(["type": "tree_ok"], to: bridge)
                 // 等扩展回 tree_ready；旧版扩展不会回，2 秒后仍做布局对账。
@@ -278,10 +284,17 @@ final class BookmarkNativeBridge {
                 let op = (object["op"] as? String) ?? "?"
                 let url = (object["url"] as? String) ?? ""
                 noteBatchAck(bridge: bridge, object: object)
-                if op == "folder_ensured",
-                   let folderDict = object["folder"] as? [String: Any] {
+                if op == "empty_folders_purged" {
+                    // 清掉空标题夹后下标已变，强制下一轮按账本重排。
+                    bridge.knownFolderLayout.removeAll()
+                    bridge.knownLayout.removeAll()
+                } else if op == "folder_ensured",
+                          let folderDict = object["folder"] as? [String: Any] {
                     let path = folder(from: folderDict)
-                    bridge.knownFolderKeys.insert(path.sortKey)
+                    let index = (object["index"] as? Int)
+                        ?? service.foldersForBrowser().first(where: { $0.pathKey == path.sortKey })?.siblingIndex
+                        ?? 0
+                    bridge.knownFolderLayout[path.sortKey] = String(index)
                 } else if let canonical = BookmarkURL.canonicalize(url),
                           op == "created" || op == "updated" || op == "exists",
                           let entry = service.entry(url: canonical) {
@@ -374,18 +387,59 @@ final class BookmarkNativeBridge {
             let fp = Self.fingerprint(folder: entry.folder, index: entry.siblingIndex, title: entry.title)
             return bridge.knownLayout[entry.url] != fp
         }
-        let missingFolders = service.foldersForBrowser().filter { !bridge.knownFolderKeys.contains($0.pathKey) }
+        let divergentFolders = service.foldersForBrowser()
+            .filter { folder in
+                bridge.knownFolderLayout[folder.pathKey] != String(folder.siblingIndex)
+            }
+            .sorted {
+                if $0.path.segments.count != $1.path.segments.count {
+                    return $0.path.segments.count < $1.path.segments.count
+                }
+                if $0.siblingIndex != $1.siblingIndex {
+                    return $0.siblingIndex < $1.siblingIndex
+                }
+                return $0.pathKey < $1.pathKey
+            }
         let target = bridge.browserKey ?? "未命名连接"
-        if divergent.isEmpty && missingFolders.isEmpty {
+        if !bridge.didPurgeEmptyTitleFolders {
+            let batch = UUID().uuidString
+            bridge.pendingBatchID = batch
+            bridge.pendingBatchRemaining = 1
+            service.activityLog.append("布局对账 \(target)：清理空标题占位夹与分隔线。")
+            send(["type": "purge_empty_folders", "batch": batch], to: bridge)
+            let deadline = Date().addingTimeInterval(8)
+            while bridge.pendingBatchRemaining > 0, Date() < deadline {
+                if bridge.reconcileGeneration != generation { break }
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+            let acked = bridge.pendingBatchRemaining == 0
+            if bridge.pendingBatchID == batch {
+                bridge.pendingBatchID = nil
+                bridge.pendingBatchRemaining = 0
+            }
+            if acked {
+                bridge.didPurgeEmptyTitleFolders = true
+            } else {
+                bridge.purgeEmptyAttempts += 1
+                service.activityLog.append(
+                    "布局对账 \(target)：清理占位未回执（\(bridge.purgeEmptyAttempts)/3），请重新加载扩展。"
+                )
+                if bridge.purgeEmptyAttempts >= 3 {
+                    bridge.didPurgeEmptyTitleFolders = true
+                }
+            }
+            return false
+        }
+        if divergent.isEmpty && divergentFolders.isEmpty {
             service.activityLog.append("布局对账 \(target)：已对齐。")
             return true
         }
-        // 每批：最多 10 空夹 + 30 书签，避免空夹饥饿。
-        let folderBatch = Array(missingFolders.prefix(10))
+        // 每批：最多 10 夹 + 30 书签；夹含缺失与错位。
+        let folderBatch = Array(divergentFolders.prefix(10))
         let batchEntries = Array(divergent.prefix(30))
-        let remain = (divergent.count - batchEntries.count) + (missingFolders.count - folderBatch.count)
+        let remain = (divergent.count - batchEntries.count) + (divergentFolders.count - folderBatch.count)
         service.activityLog.append(
-            "布局对账 \(target)：纠偏 \(divergent.count) 条、空夹 \(missingFolders.count) 个，本批书签 \(batchEntries.count)、空夹 \(folderBatch.count)\(remain > 0 ? "，剩余待下次" : "")。"
+            "布局对账 \(target)：纠偏 \(divergent.count) 条、夹 \(divergentFolders.count) 个，本批书签 \(batchEntries.count)、夹 \(folderBatch.count)\(remain > 0 ? "，剩余待下次" : "")。"
         )
         let batch = UUID().uuidString
         let expect = folderBatch.count + batchEntries.count
@@ -515,7 +569,11 @@ private final class BridgeConnection {
     var browserKey: String?
     /// url → folder|index|title 指纹；仅在 apply_result 成功后更新。
     var knownLayout: [String: String] = [:]
-    var knownFolderKeys: Set<String> = []
+    /// pathKey → siblingIndex 字符串；缺失或与账本不符则再 ensure_folder。
+    var knownFolderLayout: [String: String] = [:]
+    /// 每个 tree 周期在收到清理回执后才标完成。
+    var didPurgeEmptyTitleFolders = false
+    var purgeEmptyAttempts = 0
     var awaitingTreeReady = false
     var pendingBeforeURLs: Set<String> = []
     var isReconciling = false

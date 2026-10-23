@@ -65,7 +65,8 @@ func testBookmarkLedgerUnionAndDedupe() {
         browserKey: "chrome:Default"
     )
     expect(ledger.entries[0].folder.kind == .other, "较新 other 胜出")
-    expect(ledger.entries[0].siblingIndex == 5, "较新 siblingIndex 胜出")
+    // 合并后同级规范化为连续下标；该父下仅一条时为 0。
+    expect(ledger.entries[0].siblingIndex == 0, "同级规范化后下标连续")
     expect(ledger.entries[0].title == "A3", "较新标题胜出")
 
     ledger = BookmarkLedgerMerge.unionMerge(
@@ -382,6 +383,253 @@ func testBookmarkLayoutIndexAndLegacyDecode() {
     expect(decoded?.entries.count == 1, "旧账本可解码")
     expect(decoded?.entries.first?.siblingIndex == 0, "缺 siblingIndex 默认 0")
     expect(decoded?.folders.isEmpty == true, "缺 folders 默认空")
+}
+
+func testBookmarkToolbarRootSegmentsPreserved() {
+    // 模拟 Chrome getTree：外层虚拟根再挂书签栏 / 其他书签。
+    let nodes: [[String: Any]] = [
+        [
+            "type": "folder",
+            "title": "",
+            "index": 0,
+            "children": [
+                [
+                    "type": "folder",
+                    "title": "书签栏",
+                    "index": 0,
+                    "dateAdded": 1_000.0,
+                    "children": [
+                        [
+                            "type": "folder",
+                            "title": "totti",
+                            "index": 1,
+                            "dateAdded": 2_000.0,
+                            "children": [
+                                [
+                                    "type": "bookmark",
+                                    "id": "tb",
+                                    "title": "Bar",
+                                    "url": "https://bar.example/totti",
+                                    "index": 0,
+                                    "dateAdded": 3_000.0
+                                ]
+                            ]
+                        ]
+                    ]
+                ],
+                [
+                    "type": "folder",
+                    "title": "其他书签",
+                    "index": 1,
+                    "dateAdded": 1_000.0,
+                    "children": [
+                        [
+                            "type": "folder",
+                            "title": "totti",
+                            "index": 0,
+                            "dateAdded": 4_000.0,
+                            "children": [
+                                [
+                                    "type": "bookmark",
+                                    "id": "ot",
+                                    "title": "Other",
+                                    "url": "https://other.example/totti",
+                                    "index": 0,
+                                    "dateAdded": 5_000.0
+                                ]
+                            ]
+                        ]
+                    ]
+                ]
+            ]
+        ]
+    ]
+    let layout = BookmarkLedgerMerge.layout(fromBrowserNodes: nodes)
+    let bar = layout.entries.first { $0.url == "https://bar.example/totti" }
+    let other = layout.entries.first { $0.url == "https://other.example/totti" }
+    expect(bar?.folder.kind == .toolbar && bar?.folder.segments == ["totti"], "书签栏子夹保留 toolbar 根")
+    expect(other?.folder.kind == .other && other?.folder.segments == ["totti"], "其他书签子夹保留 other 根")
+    expect(bar?.folder.sortKey != other?.folder.sortKey, "同名夹不同根路径不同")
+    let folderKeys = Set(layout.folders.map(\.pathKey))
+    expect(folderKeys.contains("toolbar|totti"), "记录 toolbar/totti 空夹路径")
+    expect(folderKeys.contains("other|totti"), "记录 other/totti 空夹路径")
+    expect(!folderKeys.contains("named|totti"), "不再把根下子夹收成 named")
+}
+
+func testBookmarkToolbarUnionABYExample() {
+    // Edge 书签栏 A、B；Chrome 书签栏 A、C、D；Firefox 书签栏 B、C、Y，且 D 在其他书签较新。
+    let toolbar = BookmarkFolderPath(kind: .toolbar, segments: [])
+    let other = BookmarkFolderPath(kind: .other, segments: [])
+    var ledger = BookmarkLedgerSnapshot.empty
+    ledger = BookmarkLedgerMerge.unionMerge(
+        ledger: ledger,
+        incoming: [
+            BookmarkEntry(url: "https://a.example", title: "A", folder: toolbar, siblingIndex: 0, updatedAt: 1),
+            BookmarkEntry(url: "https://b.example", title: "B", folder: toolbar, siblingIndex: 1, updatedAt: 1)
+        ],
+        browserKey: "edge:Default"
+    )
+    ledger = BookmarkLedgerMerge.unionMerge(
+        ledger: ledger,
+        incoming: [
+            BookmarkEntry(url: "https://a.example", title: "A", folder: toolbar, siblingIndex: 0, updatedAt: 1),
+            BookmarkEntry(url: "https://c.example", title: "C", folder: toolbar, siblingIndex: 1, updatedAt: 1),
+            BookmarkEntry(url: "https://d.example", title: "D", folder: toolbar, siblingIndex: 2, updatedAt: 1)
+        ],
+        browserKey: "chrome:Default"
+    )
+    ledger = BookmarkLedgerMerge.unionMerge(
+        ledger: ledger,
+        incoming: [
+            BookmarkEntry(url: "https://b.example", title: "B", folder: toolbar, siblingIndex: 0, updatedAt: 1),
+            BookmarkEntry(url: "https://c.example", title: "C", folder: toolbar, siblingIndex: 1, updatedAt: 1),
+            BookmarkEntry(url: "https://y.example", title: "Y", folder: toolbar, siblingIndex: 2, updatedAt: 1),
+            BookmarkEntry(url: "https://d.example", title: "D", folder: other, siblingIndex: 0, updatedAt: 9)
+        ],
+        browserKey: "firefox:Default"
+    )
+    let byURL = Dictionary(uniqueKeysWithValues: ledger.entries.map { ($0.url, $0) })
+    expect(byURL["https://a.example"]?.folder.kind == .toolbar, "A 留在书签栏")
+    expect(byURL["https://b.example"]?.folder.kind == .toolbar, "B 留在书签栏")
+    expect(byURL["https://c.example"]?.folder.kind == .toolbar, "C 留在书签栏")
+    expect(byURL["https://y.example"]?.folder.kind == .toolbar, "Y 留在书签栏")
+    expect(byURL["https://d.example"]?.folder.kind == .other, "较新的 D 离开书签栏")
+    expect(Set(byURL.keys) == Set([
+        "https://a.example", "https://b.example", "https://c.example", "https://d.example", "https://y.example"
+    ]), "并集保留全部网址")
+}
+
+func testBookmarkToolbarAliasNormalizedFromOther() {
+    let nodes: [[String: Any]] = [
+        [
+            "type": "folder",
+            "title": "书签工具栏",
+            "index": 0,
+            "dateAdded": 1_000.0,
+            "children": [
+                [
+                    "type": "folder",
+                    "title": "个人",
+                    "index": 0,
+                    "dateAdded": 2_000.0,
+                    "children": [
+                        [
+                            "type": "bookmark",
+                            "id": "p",
+                            "title": "P",
+                            "url": "https://personal.example",
+                            "index": 0,
+                            "dateAdded": 3_000.0
+                        ]
+                    ]
+                ]
+            ]
+        ]
+    ]
+    let layout = BookmarkLedgerMerge.layout(fromBrowserNodes: nodes)
+    let entry = layout.entries.first { $0.url == "https://personal.example" }
+    expect(entry?.folder.kind == .toolbar && entry?.folder.segments == ["个人"], "Firefox 书签工具栏根识别为 toolbar")
+
+    let misfiled = BookmarkFolderPath(kind: .other, segments: ["书签工具栏", "官网"])
+    let normalized = BookmarkLedgerMerge.normalizeFolderPath(misfiled)
+    expect(normalized.kind == .toolbar && normalized.segments == ["官网"], "other/书签工具栏/… 归一到 toolbar")
+
+    var ledger = BookmarkLedgerMerge.unionMerge(
+        ledger: .empty,
+        incoming: [
+            BookmarkEntry(
+                url: "https://site.example",
+                title: "S",
+                folder: misfiled,
+                siblingIndex: 0,
+                updatedAt: 1
+            )
+        ],
+        incomingFolders: [
+            BookmarkFolderRecord(path: misfiled, siblingIndex: 0, updatedAt: 1)
+        ],
+        browserKey: "firefox:Default"
+    )
+    expect(ledger.entries[0].folder.kind == .toolbar && ledger.entries[0].folder.segments == ["官网"], "合并时归一路径")
+    expect(ledger.folders.contains { $0.path.kind == .toolbar && $0.path.segments == ["官网"] }, "夹记录归一")
+}
+
+func testBookmarkNamedSupersededByRootedPath() {
+    let named = BookmarkFolderPath(kind: .named, segments: ["totti"])
+    let toolbar = BookmarkFolderPath(kind: .toolbar, segments: ["totti"])
+    var ledger = BookmarkLedgerMerge.unionMerge(
+        ledger: .empty,
+        incoming: [
+            BookmarkEntry(url: "https://x.example", title: "X", folder: named, siblingIndex: 0, updatedAt: 5)
+        ],
+        incomingFolders: [
+            BookmarkFolderRecord(path: named, siblingIndex: 0, updatedAt: 5)
+        ],
+        browserKey: "chrome:Default"
+    )
+    ledger = BookmarkLedgerMerge.unionMerge(
+        ledger: ledger,
+        incoming: [
+            BookmarkEntry(url: "https://x.example", title: "X", folder: toolbar, siblingIndex: 1, updatedAt: 3)
+        ],
+        incomingFolders: [
+            BookmarkFolderRecord(path: toolbar, siblingIndex: 1, updatedAt: 3)
+        ],
+        browserKey: "chrome:Default"
+    )
+    expect(ledger.entries[0].folder.kind == .toolbar, "named 同段让位于 toolbar 路径")
+    expect(ledger.entries[0].title == "X", "较新标题仍保留")
+    expect(ledger.folders.contains { $0.path.kind == .toolbar && $0.path.segments == ["totti"] }, "保留 toolbar 夹记录")
+    expect(!ledger.folders.contains { $0.path.kind == .named && $0.path.segments == ["totti"] }, "丢掉已被替代的 named 夹记录")
+}
+
+func testBookmarkSiblingIndexCanonicalizeOnCollision() {
+    let toolbarRoot = BookmarkFolderPath(kind: .toolbar, segments: [])
+    let ledger = BookmarkLedgerMerge.unionMerge(
+        ledger: .empty,
+        incoming: [
+            BookmarkEntry(
+                url: "https://a.example",
+                title: "A",
+                folder: toolbarRoot,
+                siblingIndex: 0,
+                updatedAt: 1
+            ),
+            BookmarkEntry(
+                url: "https://b.example",
+                title: "B",
+                folder: toolbarRoot,
+                siblingIndex: 5,
+                updatedAt: 2
+            )
+        ],
+        incomingFolders: [
+            BookmarkFolderRecord(
+                path: BookmarkFolderPath(kind: .toolbar, segments: ["娱乐"]),
+                siblingIndex: 5,
+                updatedAt: 3
+            ),
+            BookmarkFolderRecord(
+                path: BookmarkFolderPath(kind: .toolbar, segments: ["文档"]),
+                siblingIndex: 5,
+                updatedAt: 1
+            )
+        ],
+        browserKey: "edge:Default"
+    )
+    let folderRecords = ledger.folders.filter { $0.path.kind == .toolbar && $0.path.segments.count == 1 }
+    let folderIndices = folderRecords.map(\.siblingIndex)
+    expect(Set(folderIndices).count == folderIndices.count, "同级夹 siblingIndex 唯一")
+    // 书签与夹同属 toolbar 根：全部子项一起 0..n-1
+    let allIndices = (
+        ledger.entries.filter { $0.folder == toolbarRoot }.map(\.siblingIndex)
+            + folderIndices
+    ).sorted()
+    expect(allIndices == Array(0 ..< allIndices.count), "书签栏根下书签与夹统一连续编号")
+    // 较新的「娱乐」应排在同号冲突的「文档」之前，因而下标更小
+    let yu = ledger.folders.first { $0.path.segments == ["娱乐"] }?.siblingIndex
+    let doc = ledger.folders.first { $0.path.segments == ["文档"] }?.siblingIndex
+    expect(yu != nil && doc != nil && yu! < doc!, "同号冲突时较新夹顺序更靠前")
 }
 
 func testBookmarkSyncCryptoRoundTrip() {
