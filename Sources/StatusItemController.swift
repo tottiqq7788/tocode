@@ -677,74 +677,15 @@ final class StatusItemController: NSObject {
 
         let bookmarkItem = toolsMenu.addItem(withTitle: "书签同步", action: nil, keyEquivalent: "")
         bookmarkItem.image = NSImage(systemSymbolName: "bookmark", accessibilityDescription: nil)
-        let bookmarkMenu = NSMenu()
-        bookmarkMenu.autoenablesItems = false
-        let syncLogItem = bookmarkMenu.addItem(
-            withTitle: "同步日志",
-            action: #selector(openBookmarkSyncLog),
-            keyEquivalent: ""
+        bookmarkItem.submenu = BookmarkSyncMenuBuilder.makeSubmenu(
+            target: self,
+            bookmarkSync: bookmarkSync,
+            openLog: #selector(openBookmarkSyncLog),
+            configureRemote: #selector(configureBookmarkRemoteSync),
+            restoreBackup: #selector(restoreBookmarkBackup(_:)),
+            backupNow: #selector(runBookmarkBackupNow),
+            installExtension: #selector(installBookmarkExtension(_:))
         )
-        syncLogItem.target = self
-        syncLogItem.image = NSImage(systemSymbolName: "text.alignleft", accessibilityDescription: nil)
-
-        let remoteSyncItem = bookmarkMenu.addItem(
-            withTitle: "远程同步",
-            action: #selector(configureBookmarkRemoteSync),
-            keyEquivalent: ""
-        )
-        remoteSyncItem.target = self
-        ShortcutMenuAppearance.apply(to: remoteSyncItem, enabled: bookmarkSync.isRemoteEnabled)
-        remoteSyncItem.image = NSImage(systemSymbolName: "icloud", accessibilityDescription: nil)
-
-        let backupItem = bookmarkMenu.addItem(withTitle: "备份", action: nil, keyEquivalent: "")
-        backupItem.image = NSImage(systemSymbolName: "externaldrive", accessibilityDescription: nil)
-        let backupMenu = NSMenu()
-        backupMenu.autoenablesItems = false
-        let backupList = bookmarkSync.backupListPayload()
-        if backupList.isEmpty {
-            let emptyItem = backupMenu.addItem(withTitle: "暂无日备", action: nil, keyEquivalent: "")
-            emptyItem.isEnabled = false
-        } else {
-            for slot in backupList.reversed() {
-                let day = slot["day"] as? String ?? "?"
-                let entries = slot["entries"] as? Int ?? 0
-                let item = backupMenu.addItem(
-                    withTitle: "还原 \(day)（\(entries) 条）",
-                    action: #selector(restoreBookmarkBackup(_:)),
-                    keyEquivalent: ""
-                )
-                item.target = self
-                item.representedObject = day
-            }
-        }
-        backupMenu.addItem(NSMenuItem.separator())
-        let backupNowItem = backupMenu.addItem(
-            withTitle: "立即备份",
-            action: #selector(runBookmarkBackupNow),
-            keyEquivalent: ""
-        )
-        backupNowItem.target = self
-        backupNowItem.image = NSImage(systemSymbolName: "arrow.down.doc", accessibilityDescription: nil)
-        backupItem.submenu = backupMenu
-
-        let installItem = bookmarkMenu.addItem(withTitle: "拓展安装", action: nil, keyEquivalent: "")
-        installItem.image = NSImage(systemSymbolName: "puzzlepiece.extension", accessibilityDescription: nil)
-        let installMenu = NSMenu()
-        installMenu.autoenablesItems = false
-        for browser in BookmarkBrowser.allCases {
-            let item = installMenu.addItem(
-                withTitle: browser.title,
-                action: #selector(installBookmarkExtension(_:)),
-                keyEquivalent: ""
-            )
-            item.target = self
-            item.representedObject = browser.rawValue
-            let connected = bookmarkSync.connectedBrowserKeys.contains { $0.hasPrefix("\(browser.rawValue):") }
-            ShortcutMenuAppearance.apply(to: item, enabled: connected)
-        }
-        installItem.submenu = installMenu
-        bookmarkItem.submenu = bookmarkMenu
-
         let blackoutItem = toolsMenu.addItem(
             withTitle: "临时黑屏",
             action: #selector(activateScreenBlackout),

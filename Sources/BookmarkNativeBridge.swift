@@ -10,7 +10,7 @@ final class BookmarkNativeBridge {
     private let queue = DispatchQueue(label: "com.tocode.bookmark.bridge")
     private let lock = NSLock()
     private var listener: NWListener?
-    private var connections: [ObjectIdentifier: BridgeConnection] = [:]
+    private var connections: [ObjectIdentifier: BookmarkBridgeConnection] = [:]
     private weak var service: BookmarkSyncService?
 
     init(path: String = BookmarkNativeBridge.defaultSocketPath()) {
@@ -83,7 +83,7 @@ final class BookmarkNativeBridge {
     }
 
     private func accept(_ connection: NWConnection) {
-        let bridge = BridgeConnection(connection: connection)
+        let bridge = BookmarkBridgeConnection(connection: connection)
         lock.lock()
         connections[ObjectIdentifier(bridge)] = bridge
         lock.unlock()
@@ -100,7 +100,7 @@ final class BookmarkNativeBridge {
         receive(on: bridge)
     }
 
-    private func remove(_ bridge: BridgeConnection) {
+    private func remove(_ bridge: BookmarkBridgeConnection) {
         lock.lock()
         connections.removeValue(forKey: ObjectIdentifier(bridge))
         lock.unlock()
@@ -112,7 +112,7 @@ final class BookmarkNativeBridge {
         bridge.connection.cancel()
     }
 
-    private func receive(on bridge: BridgeConnection) {
+    private func receive(on bridge: BookmarkBridgeConnection) {
         bridge.connection.receive(minimumIncompleteLength: 1, maximumLength: 1_048_576) {
             [weak self] data, _, isComplete, error in
             guard let self else { return }
@@ -132,7 +132,7 @@ final class BookmarkNativeBridge {
         }
     }
 
-    private func drain(_ bridge: BridgeConnection) {
+    private func drain(_ bridge: BookmarkBridgeConnection) {
         while true {
             guard bridge.buffer.count >= 4 else { return }
             let length = bridge.buffer.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
@@ -143,7 +143,7 @@ final class BookmarkNativeBridge {
         }
     }
 
-    private func handle(payload: Data, from bridge: BridgeConnection) {
+    private func handle(payload: Data, from bridge: BookmarkBridgeConnection) {
         guard let object = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
               let type = object["type"] as? String else {
             send(["type": "error", "message": "bad_json"], to: bridge)
@@ -155,7 +155,7 @@ final class BookmarkNativeBridge {
     }
 
     @MainActor
-    private func dispatch(type: String, object: [String: Any], bridge: BridgeConnection) async {
+    private func dispatch(type: String, object: [String: Any], bridge: BookmarkBridgeConnection) async {
         guard let service else {
             send(["type": "error", "message": "service_unavailable"], to: bridge)
             return
@@ -183,7 +183,7 @@ final class BookmarkNativeBridge {
                 var layoutMap: [String: String] = [:]
                 for entry in layout.entries.sorted(by: { $0.siblingIndex < $1.siblingIndex }) {
                     if layoutMap[entry.url] == nil {
-                        layoutMap[entry.url] = Self.fingerprint(
+                        layoutMap[entry.url] = BookmarkReconcilePump.fingerprint(
                             folder: entry.folder,
                             index: entry.siblingIndex,
                             title: entry.title
@@ -273,7 +273,7 @@ final class BookmarkNativeBridge {
                 if message.localizedCaseInsensitiveContains("Index out of bounds"),
                    let canonical = BookmarkURL.canonicalize(url),
                    let entry = service.entry(url: canonical) {
-                    bridge.knownLayout[canonical] = Self.fingerprint(
+                    bridge.knownLayout[canonical] = BookmarkReconcilePump.fingerprint(
                         folder: entry.folder,
                         index: entry.siblingIndex,
                         title: entry.title
@@ -298,7 +298,7 @@ final class BookmarkNativeBridge {
                 } else if let canonical = BookmarkURL.canonicalize(url),
                           op == "created" || op == "updated" || op == "exists",
                           let entry = service.entry(url: canonical) {
-                    bridge.knownLayout[canonical] = Self.fingerprint(
+                    bridge.knownLayout[canonical] = BookmarkReconcilePump.fingerprint(
                         folder: entry.folder,
                         index: entry.siblingIndex,
                         title: entry.title
@@ -328,7 +328,7 @@ final class BookmarkNativeBridge {
     }
 
     @MainActor
-    private func finishTreeReady(bridge: BridgeConnection, service: BookmarkSyncService) {
+    private func finishTreeReady(bridge: BookmarkBridgeConnection, service: BookmarkSyncService) {
         // 其它连接靠各自串行对账对齐；不再广播 newlyJoined，避免对账风暴。
         bridge.pendingBeforeURLs = []
         requestReconcile(bridge: bridge, service: service)
@@ -336,7 +336,7 @@ final class BookmarkNativeBridge {
 
     /// 请求对账：已在跑则只标 dirty，由串行泵消化。
     @MainActor
-    private func requestReconcile(bridge: BridgeConnection, service: BookmarkSyncService) {
+    private func requestReconcile(bridge: BookmarkBridgeConnection, service: BookmarkSyncService) {
         if bridge.isReconciling {
             bridge.needsReconcileAgain = true
             return
@@ -351,132 +351,22 @@ final class BookmarkNativeBridge {
     }
 
     @MainActor
-    private func runReconcilePump(bridge: BridgeConnection, service: BookmarkSyncService, generation: UInt64) async {
-        defer {
-            if bridge.reconcileGeneration == generation {
-                bridge.isReconciling = false
-                if bridge.needsReconcileAgain {
-                    bridge.needsReconcileAgain = false
-                    requestReconcile(bridge: bridge, service: service)
-                }
+    private func runReconcilePump(bridge: BookmarkBridgeConnection, service: BookmarkSyncService, generation: UInt64) async {
+        await BookmarkReconcilePump.run(
+            bridge: bridge,
+            service: service,
+            generation: generation,
+            send: { [weak self] object, target in
+                self?.send(object, to: target)
+            },
+            requestAgain: { [weak self] in
+                self?.requestReconcile(bridge: bridge, service: service)
             }
-        }
-        while bridge.reconcileGeneration == generation {
-            let done = await sendOneReconcileBatch(bridge: bridge, service: service, generation: generation)
-            if done { break }
-            // 短歇再续，避免打满 native 通道。
-            try? await Task.sleep(nanoseconds: 400_000_000)
-            if bridge.reconcileGeneration != generation { break }
-        }
-    }
-
-    /// 发一批并等待回执/超时。返回 true 表示已对齐、泵可结束。
-    @MainActor
-    private func sendOneReconcileBatch(
-        bridge: BridgeConnection,
-        service: BookmarkSyncService,
-        generation: UInt64
-    ) async -> Bool {
-        let wanted = service.entriesForBrowser().sorted {
-            if $0.folder.sortKey != $1.folder.sortKey {
-                return $0.folder.sortKey < $1.folder.sortKey
-            }
-            return $0.siblingIndex < $1.siblingIndex
-        }
-        let divergent = wanted.filter { entry in
-            let fp = Self.fingerprint(folder: entry.folder, index: entry.siblingIndex, title: entry.title)
-            return bridge.knownLayout[entry.url] != fp
-        }
-        let divergentFolders = service.foldersForBrowser()
-            .filter { folder in
-                bridge.knownFolderLayout[folder.pathKey] != String(folder.siblingIndex)
-            }
-            .sorted {
-                if $0.path.segments.count != $1.path.segments.count {
-                    return $0.path.segments.count < $1.path.segments.count
-                }
-                if $0.siblingIndex != $1.siblingIndex {
-                    return $0.siblingIndex < $1.siblingIndex
-                }
-                return $0.pathKey < $1.pathKey
-            }
-        let target = bridge.browserKey ?? "未命名连接"
-        if !bridge.didPurgeEmptyTitleFolders {
-            let batch = UUID().uuidString
-            bridge.pendingBatchID = batch
-            bridge.pendingBatchRemaining = 1
-            service.activityLog.append("布局对账 \(target)：清理空标题占位夹与分隔线。")
-            send(["type": "purge_empty_folders", "batch": batch], to: bridge)
-            let deadline = Date().addingTimeInterval(8)
-            while bridge.pendingBatchRemaining > 0, Date() < deadline {
-                if bridge.reconcileGeneration != generation { break }
-                try? await Task.sleep(nanoseconds: 50_000_000)
-            }
-            let acked = bridge.pendingBatchRemaining == 0
-            if bridge.pendingBatchID == batch {
-                bridge.pendingBatchID = nil
-                bridge.pendingBatchRemaining = 0
-            }
-            if acked {
-                bridge.didPurgeEmptyTitleFolders = true
-            } else {
-                bridge.purgeEmptyAttempts += 1
-                service.activityLog.append(
-                    "布局对账 \(target)：清理占位未回执（\(bridge.purgeEmptyAttempts)/3），请重新加载扩展。"
-                )
-                if bridge.purgeEmptyAttempts >= 3 {
-                    bridge.didPurgeEmptyTitleFolders = true
-                }
-            }
-            return false
-        }
-        if divergent.isEmpty && divergentFolders.isEmpty {
-            service.activityLog.append("布局对账 \(target)：已对齐。")
-            return true
-        }
-        // 每批：最多 10 夹 + 30 书签；夹含缺失与错位。
-        let folderBatch = Array(divergentFolders.prefix(10))
-        let batchEntries = Array(divergent.prefix(30))
-        let remain = (divergent.count - batchEntries.count) + (divergentFolders.count - folderBatch.count)
-        service.activityLog.append(
-            "布局对账 \(target)：纠偏 \(divergent.count) 条、夹 \(divergentFolders.count) 个，本批书签 \(batchEntries.count)、夹 \(folderBatch.count)\(remain > 0 ? "，剩余待下次" : "")。"
         )
-        let batch = UUID().uuidString
-        let expect = folderBatch.count + batchEntries.count
-        bridge.pendingBatchID = batch
-        bridge.pendingBatchRemaining = expect
-        for folder in folderBatch {
-            send(
-                [
-                    "type": "ensure_folder",
-                    "batch": batch,
-                    "folder": [
-                        "kind": folder.path.kind.rawValue,
-                        "segments": folder.path.segments
-                    ],
-                    "index": folder.siblingIndex
-                ],
-                to: bridge
-            )
-        }
-        for entry in batchEntries {
-            send(["type": "upsert", "batch": batch, "entry": Self.entryPayload(entry)], to: bridge)
-        }
-        if expect == 0 { return remain == 0 }
-        let deadline = Date().addingTimeInterval(8)
-        while bridge.pendingBatchRemaining > 0, Date() < deadline {
-            if bridge.reconcileGeneration != generation { break }
-            try? await Task.sleep(nanoseconds: 50_000_000)
-        }
-        if bridge.pendingBatchID == batch {
-            bridge.pendingBatchID = nil
-            bridge.pendingBatchRemaining = 0
-        }
-        return false
     }
 
     @MainActor
-    private func noteBatchAck(bridge: BridgeConnection, object: [String: Any]) {
+    private func noteBatchAck(bridge: BookmarkBridgeConnection, object: [String: Any]) {
         guard let batch = object["batch"] as? String,
               batch == bridge.pendingBatchID,
               bridge.pendingBatchRemaining > 0 else { return }
@@ -496,14 +386,14 @@ final class BookmarkNativeBridge {
     }
 
     @MainActor
-    private func broadcastUpsert(_ entry: BookmarkEntry, excluding excluded: BridgeConnection? = nil) {
+    private func broadcastUpsert(_ entry: BookmarkEntry, excluding excluded: BookmarkBridgeConnection? = nil) {
         guard let service else { return }
         lock.lock()
         let values = Array(connections.values)
         lock.unlock()
         let batch = UUID().uuidString
-        let payload = Self.entryPayload(entry)
-        let fp = Self.fingerprint(folder: entry.folder, index: entry.siblingIndex, title: entry.title)
+        let payload = BookmarkReconcilePump.entryPayload(entry)
+        let fp = BookmarkReconcilePump.fingerprint(folder: entry.folder, index: entry.siblingIndex, title: entry.title)
         for bridge in values where bridge !== excluded {
             let target = bridge.browserKey ?? "未命名连接"
             if bridge.knownLayout[entry.url] == fp { continue }
@@ -530,26 +420,7 @@ final class BookmarkNativeBridge {
         }
     }
 
-    private static func fingerprint(folder: BookmarkFolderPath, index: Int, title: String) -> String {
-        "\(folder.sortKey)|\(index)|\(title)"
-    }
-
-    private static func entryPayload(_ entry: BookmarkEntry) -> [String: Any] {
-        [
-            "id": entry.id,
-            "url": entry.url,
-            "title": entry.title,
-            "folder": [
-                "kind": entry.folder.kind.rawValue,
-                "segments": entry.folder.segments
-            ],
-            "siblingIndex": entry.siblingIndex,
-            "index": entry.siblingIndex,
-            "updatedAt": entry.updatedAt
-        ]
-    }
-
-    private func send(_ object: [String: Any], to bridge: BridgeConnection) {
+    private func send(_ object: [String: Any], to bridge: BookmarkBridgeConnection) {
         guard let data = try? JSONSerialization.data(withJSONObject: object) else { return }
         var length = UInt32(data.count).littleEndian
         var packet = Data(bytes: &length, count: 4)
@@ -560,29 +431,5 @@ final class BookmarkNativeBridge {
                 self.remove(bridge)
             }
         })
-    }
-}
-
-private final class BridgeConnection {
-    let connection: NWConnection
-    var buffer = Data()
-    var browserKey: String?
-    /// url → folder|index|title 指纹；仅在 apply_result 成功后更新。
-    var knownLayout: [String: String] = [:]
-    /// pathKey → siblingIndex 字符串；缺失或与账本不符则再 ensure_folder。
-    var knownFolderLayout: [String: String] = [:]
-    /// 每个 tree 周期在收到清理回执后才标完成。
-    var didPurgeEmptyTitleFolders = false
-    var purgeEmptyAttempts = 0
-    var awaitingTreeReady = false
-    var pendingBeforeURLs: Set<String> = []
-    var isReconciling = false
-    var needsReconcileAgain = false
-    var reconcileGeneration: UInt64 = 0
-    var pendingBatchID: String?
-    var pendingBatchRemaining = 0
-
-    init(connection: NWConnection) {
-        self.connection = connection
     }
 }

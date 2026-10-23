@@ -3,6 +3,14 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 mkdir -p build
+# Bookmark* 源文件用 glob，避免拆分后漏编；排除独立可执行入口。
+BOOKMARK_SOURCES=()
+for f in Sources/Bookmark*.swift; do
+  case "$(basename "$f")" in
+    BookmarkNativeHostMain.swift) ;;
+    *) BOOKMARK_SOURCES+=("$f") ;;
+  esac
+done
 swiftc Tests/TestRunner.swift \
   Tests/WeChatTestSupport.swift \
   Tests/TocodeCommandTestSupport.swift \
@@ -11,22 +19,8 @@ swiftc Tests/TestRunner.swift \
   Tests/ModelRelayCallMetricsTestSupport.swift \
   Tests/ModelRelayTests.swift \
   Tests/BookmarkSyncTests.swift \
-  Sources/BookmarkURL.swift \
-  Sources/BookmarkLedger.swift \
-  Sources/BookmarkLedgerStore.swift \
-  Sources/BookmarkBackupPack.swift \
-  Sources/BookmarkBackupStore.swift \
-  Sources/BookmarkSyncCrypto.swift \
-  Sources/BookmarkSyncKeyStore.swift \
-  Sources/BookmarkSyncSettingsStore.swift \
-  Sources/BookmarkSyncService.swift \
-  Sources/BookmarkSyncActivityLog.swift \
-  Sources/BookmarkSyncLogWindow.swift \
-  Sources/BookmarkCLI.swift \
+  "${BOOKMARK_SOURCES[@]}" \
   Sources/PromptTextFields.swift \
-  Sources/BookmarkSyncPrompt.swift \
-  Sources/BookmarkNativeBridge.swift \
-  Sources/BookmarkExtensionInstall.swift \
   Sources/FileSystemService.swift \
   Sources/ClipboardService.swift \
   Sources/RootPathStore.swift \
