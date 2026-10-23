@@ -58,8 +58,6 @@ final class TocodeCommandExecutor {
     private let codex: CodexProjectService
     private let codexSync: CodexSyncSettingsStore
     private let finderFollow: FinderFollowSettingsStore
-    private let codexModels: CodexModelSwitching
-    private let codexRestarter: CodexApplicationRestarting
     private var weChat: WeChatAssociationControlling
     private let screenBlackout: ScreenBlackoutService
     private let notify: (String, String) -> Void
@@ -77,8 +75,6 @@ final class TocodeCommandExecutor {
         codex: CodexProjectService = CodexProjectService(),
         codexSync: CodexSyncSettingsStore = CodexSyncSettingsStore(),
         finderFollow: FinderFollowSettingsStore = FinderFollowSettingsStore(),
-        codexModels: CodexModelSwitching,
-        codexRestarter: CodexApplicationRestarting = CodexApplicationRestarter(),
         weChat: WeChatAssociationControlling,
         screenBlackout: ScreenBlackoutService? = nil,
         notify: @escaping (String, String) -> Void = { title, body in
@@ -107,8 +103,6 @@ final class TocodeCommandExecutor {
         self.codex = codex
         self.codexSync = codexSync
         self.finderFollow = finderFollow
-        self.codexModels = codexModels
-        self.codexRestarter = codexRestarter
         self.weChat = weChat
         self.screenBlackout = screenBlackout ?? ScreenBlackoutService(overlay: ScreenBlackoutOverlay())
         self.notify = notify
@@ -216,12 +210,6 @@ final class TocodeCommandExecutor {
         if let project = codex.resolveProject() {
             projectLine = "Codex 项目：\(project.name)（\(project.rootPath)）"
         }
-        let modelLine: String
-        if let state = try? codexModels.currentState() {
-            modelLine = "Codex 模型：\(CodexModelCatalog.displayName(for: state.liveModelID))\(state.isConsistent ? "" : "（配置不一致）")"
-        } else {
-            modelLine = "Codex 模型：不可用"
-        }
         return [
             "根目录：\(root)",
             "开机自启：\(launchAtLogin.isEnabled ? "开" : "关")",
@@ -234,8 +222,7 @@ final class TocodeCommandExecutor {
             "微信绑定：\(weChat.isBound ? "已绑定" : "未绑定")",
             projectLine,
             "访达跟随：\(finderFollow.followEnabled ? "开" : "关")",
-            "codex跟随：\(syncEnabled ? "开" : "关")",
-            modelLine
+            "codex跟随：\(syncEnabled ? "开" : "关")"
         ]
     }
 
@@ -337,49 +324,6 @@ final class TocodeCommandExecutor {
                 codexSync.syncEnabled = target
                 return .success(())
             }
-        case .model:
-            do {
-                let state = try codexModels.currentState()
-                return .success(TocodeCommandOutput(lines: [
-                    "模型：\(CodexModelCatalog.displayName(for: state.liveModelID))",
-                    "ID：\(state.liveModelID)",
-                    "一致性：\(state.isConsistent ? "一致" : "不一致")"
-                ]))
-            } catch {
-                return .failure(.codexUnavailable(error.localizedDescription))
-            }
-        case .modelList:
-            let semaphore = DispatchSemaphore(value: 0)
-            var modelsResult: Result<[CodexModelDescriptor], Error>?
-            codexModels.fetchModels { result in
-                modelsResult = result
-                semaphore.signal()
-            }
-            let waited = semaphore.wait(timeout: .now() + 20)
-            guard waited == .success, let modelsResult else {
-                return .failure(.codexUnavailable("模型目录请求超时"))
-            }
-            switch modelsResult {
-            case .failure(let error):
-                return .failure(.codexUnavailable(error.localizedDescription))
-            case .success(let models):
-                let lines = models.map { "\($0.id)\t\($0.displayName)" }
-                return .success(TocodeCommandOutput(lines: lines.isEmpty ? ["无可用模型"] : lines))
-            }
-        case .modelSet(let id):
-            do {
-                try codexModels.switchModel(to: id)
-            } catch {
-                return .failure(.codexModelSwitchFailed(error.localizedDescription))
-            }
-            notify(
-                "Codex 模型已切换",
-                "\(CodexModelCatalog.displayName(for: id))；2 秒后将强制重启 Codex。"
-            )
-            codexRestarter.forceRestart(after: 2) { _ in }
-            return .success(TocodeCommandOutput(
-                "✅ 已切换模型 \(id)；2 秒后强制重启 Codex"
-            ))
         }
     }
 

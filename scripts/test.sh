@@ -20,10 +20,7 @@ swiftc Tests/TestRunner.swift \
   Sources/HermesFollowSettingsStore.swift \
   Sources/HermesProjectService.swift \
   Sources/DirectoryRootResolver.swift \
-  Sources/ExtendedSettingsStore.swift \
-  Sources/CodexModelSwitchService.swift \
   Sources/AnkerCredentialService.swift \
-  Sources/CodexApplicationRestarter.swift \
   Sources/FinderVisibilityService.swift \
   Sources/FinderSelectionService.swift \
   Sources/ShortcutSettingsStore.swift \

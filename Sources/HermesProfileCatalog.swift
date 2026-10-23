@@ -73,6 +73,9 @@ enum HermesProfileCatalog {
         URL(fileURLWithPath: (home(userHome: userHome, profile: profile) as NSString).appendingPathComponent(".env"))
     }
 
+    static let modelValuePattern = #"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,199}$"#
+    static let providerValuePattern = #"^[a-z0-9][a-z0-9_-]{0,63}$"#
+
     /// 只读这个档案 config.yaml 里 model.default。读不到、写了不止一处、或内容不像模型名时返回空。不返回密钥。
     static func configuredModel(userHome: String, profile: String, read: (String) -> String = { path in
         (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
@@ -81,7 +84,114 @@ enum HermesProfileCatalog {
         return modelName(in: read(path))
     }
 
+    static func configuredProvider(userHome: String, profile: String, read: (String) -> String = { path in
+        (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+    }) -> String {
+        let path = (home(userHome: userHome, profile: profile) as NSString).appendingPathComponent("config.yaml")
+        return providerName(in: read(path))
+    }
+
     static func modelName(in yaml: String) -> String {
+        modelField(named: "default", in: yaml, pattern: modelValuePattern)
+    }
+
+    static func providerName(in yaml: String) -> String {
+        modelField(named: "provider", in: yaml, pattern: providerValuePattern)
+    }
+
+    /// 只改 model.default 与 model.provider；换 provider 时去掉自定义 base_url，让 Hermes 用该 provider 默认地址。不碰密钥行。
+    static func setConfiguredModel(
+        userHome: String,
+        profile: String,
+        model: String,
+        provider: String,
+        read: (String) -> String = { path in
+            (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+        },
+        write: (String, String) throws -> Void = { path, text in
+            try text.write(toFile: path, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+        }
+    ) throws {
+        let trimmedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedProvider = provider.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedModel.range(of: modelValuePattern, options: .regularExpression) != nil else {
+            throw PhoneHermesModelConfigError.invalidModel
+        }
+        guard trimmedProvider.range(of: providerValuePattern, options: .regularExpression) != nil else {
+            throw PhoneHermesModelConfigError.invalidProvider
+        }
+        let path = (home(userHome: userHome, profile: profile) as NSString).appendingPathComponent("config.yaml")
+        let raw = read(path)
+        guard !raw.isEmpty else { throw PhoneHermesModelConfigError.missingConfig }
+        let updated = try applyingModel(model: trimmedModel, provider: trimmedProvider, to: raw)
+        try write(path, updated)
+    }
+
+    static func applyingModel(model: String, provider: String, to yaml: String) throws -> String {
+        var lines = yaml.components(separatedBy: "\n")
+        let starts = lines.indices.filter { lines[$0].range(of: #"^model\s*:"#, options: .regularExpression) != nil }
+        guard starts.count == 1, let start = starts.first,
+              lines[start].range(of: #"^model:\s*(?:#.*)?$"#, options: .regularExpression) != nil else {
+            throw PhoneHermesModelConfigError.ambiguousModelBlock
+        }
+        let end = ((start + 1)..<lines.count).first { line in
+            let text = lines[line]
+            return !text.isEmpty && !text.hasPrefix(" ") && !text.hasPrefix("\t") && !text.hasPrefix("#")
+        } ?? lines.count
+        var defaultAt: Int?
+        var providerAt: Int?
+        var baseURLAt: Int?
+        for index in (start + 1)..<end {
+            let line = lines[index]
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
+            if line.range(of: #"^  default:"#, options: .regularExpression) != nil {
+                if defaultAt != nil { throw PhoneHermesModelConfigError.ambiguousModelBlock }
+                defaultAt = index
+            } else if line.range(of: #"^  provider:"#, options: .regularExpression) != nil {
+                if providerAt != nil { throw PhoneHermesModelConfigError.ambiguousModelBlock }
+                providerAt = index
+            } else if line.range(of: #"^  base_url:"#, options: .regularExpression) != nil {
+                baseURLAt = index
+            }
+        }
+        let previousProvider = providerAt.flatMap { fieldValue(in: lines[$0]) } ?? ""
+        if let defaultAt {
+            lines[defaultAt] = "  default: \(model)"
+        } else {
+            lines.insert("  default: \(model)", at: start + 1)
+        }
+        // Re-scan after possible insert.
+        let starts2 = lines.indices.filter { lines[$0].range(of: #"^model\s*:"#, options: .regularExpression) != nil }
+        guard let start2 = starts2.first else { throw PhoneHermesModelConfigError.ambiguousModelBlock }
+        let end2 = ((start2 + 1)..<lines.count).first { line in
+            let text = lines[line]
+            return !text.isEmpty && !text.hasPrefix(" ") && !text.hasPrefix("\t") && !text.hasPrefix("#")
+        } ?? lines.count
+        defaultAt = nil
+        providerAt = nil
+        baseURLAt = nil
+        for index in (start2 + 1)..<end2 {
+            let line = lines[index]
+            if line.range(of: #"^  default:"#, options: .regularExpression) != nil { defaultAt = index }
+            else if line.range(of: #"^  provider:"#, options: .regularExpression) != nil { providerAt = index }
+            else if line.range(of: #"^  base_url:"#, options: .regularExpression) != nil { baseURLAt = index }
+        }
+        if let providerAt {
+            lines[providerAt] = "  provider: \(provider)"
+        } else {
+            let insertAt = (defaultAt ?? start2) + 1
+            lines.insert("  provider: \(provider)", at: insertAt)
+            if let base = baseURLAt, base >= insertAt { baseURLAt = base + 1 }
+        }
+        if previousProvider != provider, let baseURLAt {
+            lines.remove(at: baseURLAt)
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private static func modelField(named name: String, in yaml: String, pattern: String) -> String {
         let lines = yaml.components(separatedBy: "\n")
         let starts = lines.indices.filter { lines[$0].range(of: #"^model\s*:"#, options: .regularExpression) != nil }
         guard starts.count == 1, let start = starts.first,
@@ -95,12 +205,19 @@ enum HermesProfileCatalog {
             let line = lines[index]
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
-            guard line.range(of: #"^  default:"#, options: .regularExpression) != nil else { continue }
+            guard line.range(of: "^  \(name):", options: .regularExpression) != nil else { continue }
             if found != nil { return "" }
             found = index
         }
-        guard let found, let colon = lines[found].firstIndex(of: ":") else { return "" }
-        var value = lines[found][lines[found].index(after: colon)...].trimmingCharacters(in: .whitespaces)
+        guard let found else { return "" }
+        let value = fieldValue(in: lines[found])
+        guard value.range(of: pattern, options: .regularExpression) != nil else { return "" }
+        return value
+    }
+
+    private static func fieldValue(in line: String) -> String {
+        guard let colon = line.firstIndex(of: ":") else { return "" }
+        var value = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
         if value.hasPrefix("\"") || value.hasPrefix("'") {
             let mark = value.first!
             guard value.count >= 2, value.hasSuffix(String(mark)) else { return "" }
@@ -108,7 +225,13 @@ enum HermesProfileCatalog {
         } else if let comment = value.range(of: " #") {
             value = String(value[..<comment.lowerBound]).trimmingCharacters(in: .whitespaces)
         }
-        guard value.range(of: #"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,199}$"#, options: .regularExpression) != nil else { return "" }
         return value
     }
+}
+
+enum PhoneHermesModelConfigError: Error {
+    case invalidModel
+    case invalidProvider
+    case missingConfig
+    case ambiguousModelBlock
 }

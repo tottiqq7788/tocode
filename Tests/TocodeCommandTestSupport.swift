@@ -95,26 +95,6 @@ final class MockTocodeWeChat: WeChatAssociationControlling {
     }
 }
 
-final class MockTocodeCodexModels: CodexModelSwitching {
-    var state: Result<CodexModelState, Error> = .success(
-        CodexModelState(liveModelID: "v_model/gpt", providerModelID: "v_model/gpt", providerID: "anker", providerName: "Anker")
-    )
-    var fetchResult: Result<[CodexModelDescriptor], Error> = .success([
-        CodexModelDescriptor(id: "v_model/gpt", displayName: "GPT-5.6 Sol", source: .general, compatibility: .verified)
-    ])
-    var switchError: Error?
-    var switchedIDs: [String] = []
-
-    func currentState() throws -> CodexModelState { try state.get() }
-    func fetchModels(completion: @escaping (Result<[CodexModelDescriptor], Error>) -> Void) {
-        completion(fetchResult)
-    }
-    func switchModel(to modelID: String) throws {
-        if let switchError { throw switchError }
-        switchedIDs.append(modelID)
-    }
-}
-
 final class MockTocodeScreenBlackout: ScreenBlackoutOverlaying {
     var presented = false
     var activateCount = 0

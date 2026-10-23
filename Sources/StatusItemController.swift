@@ -4,7 +4,7 @@ import UserNotifications
 
 /// 菜单栏图标控制器：左键弹目录树，按住 totti 时左键弹桌面窗口菜单，右键弹功能菜单。
 @MainActor
-final class StatusItemController: NSObject, NSMenuDelegate {
+final class StatusItemController: NSObject {
     private let statusItem: NSStatusItem
     private let terminalWindows: DirectoryTerminalWindowStore
     private let terminalFrontWindow: DirectoryTerminalFrontWindowReading
@@ -32,9 +32,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private let hermesFollow: HermesFollowSettingsStore
     private let hermesProjects: HermesProjectService
     private let hermesGateway: HermesGatewayControlling
-    private let codexModels: CodexModelSwitching
-    private let codexRestarter: CodexApplicationRestarting
-    private let extendedSettings: ExtendedSettingsStore
     private let screenBlackout: ScreenBlackoutService
     private let commandExecutor: TocodeCommandExecutor
     private let desktopCatalog: DesktopWindowCataloging
@@ -42,12 +39,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private let modelRelay: ModelRelayService
     private let automationRunner: ModelAutomationRunner
     private let actionDispatcher = KeyboardMappingActionDispatcher()
-    private var activeModelMenu: NSMenu?
-    private var activeModelParentItem: NSMenuItem?
-    private var currentModelID: String?
-    private var modelDescriptors: [String: CodexModelDescriptor] = [:]
-    private var modelLoadGeneration = UUID()
-    private var isSwitchingModel = false
     private var isCreatingModelRelayProvider = false
     private var relayBusyProviderIDs: Set<UUID> = []
     private var modifierPollingTimer: Timer?
@@ -55,8 +46,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private weak var liveTimerMenu: NSMenu?
     private weak var liveModelRelayStatusItem: NSMenuItem?
     private var liveTimerMenuItems: [UUID: NSMenuItem] = [:]
-    private weak var liveModelMenuItem: NSMenuItem?
-    private static let codexModelItemID = "tocode.extended.codexModel"
     private static let portableSettingsType =
         UTType(tag: "tocode", tagClass: .filenameExtension, conformingTo: .json) ?? .json
 
@@ -79,9 +68,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         hermesFollow: HermesFollowSettingsStore = HermesFollowSettingsStore(),
         hermesProjects: HermesProjectService = HermesProjectService(),
         hermesGateway: HermesGatewayControlling,
-        codexModels: CodexModelSwitching = CodexModelSwitchService(),
-        codexRestarter: CodexApplicationRestarting = CodexApplicationRestarter(),
-        extendedSettings: ExtendedSettingsStore = ExtendedSettingsStore(),
         screenBlackout: ScreenBlackoutService? = nil,
         modelRelay: ModelRelayService,
         commandExecutor: TocodeCommandExecutor,
@@ -106,9 +92,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         self.hermesFollow = hermesFollow
         self.hermesProjects = hermesProjects
         self.hermesGateway = hermesGateway
-        self.codexModels = codexModels
-        self.codexRestarter = codexRestarter
-        self.extendedSettings = extendedSettings
         self.screenBlackout = screenBlackout ?? ScreenBlackoutService(overlay: ScreenBlackoutOverlay())
         self.modelRelay = modelRelay
         self.automationRunner = ModelAutomationRunner(
@@ -494,7 +477,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         modifierPollingTimer = nil
     }
 
-    /// 右键：功能菜单。访达 / 输入 / 工具 / AK / 微信 / 设置。
+    /// 右键：功能菜单。访达 / 输入 / 工具 / 微信 / 设置。
     private func showActionMenu() {
         let menu = NSMenu()
         menu.autoenablesItems = false
@@ -708,35 +691,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         // 独立顶层「模型」：本地 OpenAI-compatible 中转站，始终显示。
         menu.addItem(makeModelRelayMenuItem())
 
-        // AK 下直接列出 Codex 模型（AK 门控）。
-        activeModelMenu = nil
-        activeModelParentItem = nil
-        currentModelID = nil
-        liveModelMenuItem = nil
-        if extendedSettings.akEnabled {
-            let akItem = menu.addItem(
-                withTitle: ExtendedSettingsStore.topLevelFolderTitle,
-                action: nil,
-                keyEquivalent: ""
-            )
-            akItem.image = NSImage(systemSymbolName: "sparkles", accessibilityDescription: nil)
-            akItem.representedObject = Self.codexModelItemID
-            let akMenu = NSMenu()
-            akMenu.autoenablesItems = false
-            akMenu.delegate = self
-            addModelStatusItem("悬停后实时加载", to: akMenu)
-            akItem.submenu = akMenu
-            activeModelMenu = akMenu
-            activeModelParentItem = akItem
-            liveModelMenuItem = akItem
-            if let state = try? codexModels.currentState() {
-                currentModelID = state.liveModelID
-                if !state.isConsistent {
-                    akItem.toolTip = "Codex 实时配置与 CC Switch Provider 模板当前不一致"
-                }
-            }
-        }
-
         let remoteItem = menu.addItem(withTitle: "应用", action: nil, keyEquivalent: "")
         remoteItem.image = NSImage(systemSymbolName: "iphone", accessibilityDescription: nil)
         let remoteMenu = NSMenu()
@@ -845,21 +799,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             accessibilityDescription: TocodePortableSettings.importTitle
         )
         configItem.submenu = configMenu
-        let extendedItem = settings.addItem(
-            withTitle: ExtendedSettingsStore.folderTitle,
-            action: nil,
-            keyEquivalent: ""
-        )
-        extendedItem.image = NSImage(systemSymbolName: "ellipsis.circle", accessibilityDescription: nil)
-        let extendedMenu = NSMenu()
-        extendedMenu.autoenablesItems = false
-        addShortcutToggle(
-            to: extendedMenu,
-            title: ExtendedSettingsStore.akTitle,
-            enabled: extendedSettings.akEnabled,
-            action: #selector(toggleExtendedSettingAK(_:))
-        )
-        extendedItem.submenu = extendedMenu
         let manual = settings.addItem(
             withTitle: UserManual.menuTitle,
             action: #selector(showUserManual),
@@ -880,7 +819,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
         }
         stopTimerMenuRefresh()
-        liveModelMenuItem = nil
         liveModelRelayStatusItem = nil
         liveTimerMenu = nil
         liveTimerMenuItems.removeAll()
@@ -938,11 +876,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     @objc private func toggleTerminalFollow(_ sender: NSMenuItem) {
         terminalFollow.followEnabled = !terminalFollow.followEnabled
         ShortcutMenuAppearance.apply(to: sender, enabled: terminalFollow.followEnabled)
-    }
-
-    @objc private func toggleExtendedSettingAK(_ sender: NSMenuItem) {
-        extendedSettings.akEnabled = !extendedSettings.akEnabled
-        ShortcutMenuAppearance.apply(to: sender, enabled: extendedSettings.akEnabled)
     }
 
     private func makeModelRelayMenuItem() -> NSMenuItem {
@@ -1283,165 +1216,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         (sender.representedObject as? String).flatMap(UUID.init(uuidString:))
     }
 
-    func menuWillOpen(_ menu: NSMenu) {
-        guard menu === activeModelMenu else { return }
-        loadCodexModels(into: menu)
-    }
-
-    private func loadCodexModels(into menu: NSMenu) {
-        guard !isSwitchingModel else {
-            menu.removeAllItems()
-            addModelStatusItem("正在切换模型…", to: menu)
-            return
-        }
-
-        menu.removeAllItems()
-        addModelStatusItem("正在从 Anker 加载…", to: menu)
-        let generation = UUID()
-        modelLoadGeneration = generation
-
-        if let state = try? codexModels.currentState() {
-            currentModelID = state.liveModelID
-            activeModelParentItem?.toolTip = state.isConsistent
-                ? nil
-                : "Codex 实时配置与 CC Switch Provider 模板当前不一致"
-        }
-
-        codexModels.fetchModels { [weak self, weak menu] result in
-            DispatchQueue.main.async {
-                guard let self,
-                      let menu,
-                      menu === self.activeModelMenu,
-                      generation == self.modelLoadGeneration else {
-                    return
-                }
-                switch result {
-                case .success(let models):
-                    self.renderCodexModels(models, in: menu)
-                case .failure(let error):
-                    self.renderModelLoadFailure(error, in: menu)
-                }
-            }
-        }
-    }
-
-    private func renderCodexModels(_ models: [CodexModelDescriptor], in menu: NSMenu) {
-        menu.removeAllItems()
-        modelDescriptors = Dictionary(uniqueKeysWithValues: models.map { ($0.id, $0) })
-        let grouped = Dictionary(grouping: models, by: \.source)
-
-        for source in CodexModelSource.allCases {
-            guard let sourceModels = grouped[source], !sourceModels.isEmpty else { continue }
-            if !menu.items.isEmpty {
-                menu.addItem(.separator())
-            }
-            let header = menu.addItem(withTitle: source.rawValue, action: nil, keyEquivalent: "")
-            header.isEnabled = false
-
-            for model in sourceModels {
-                let item = menu.addItem(
-                    withTitle: model.displayName,
-                    action: #selector(selectCodexModel(_:)),
-                    keyEquivalent: ""
-                )
-                item.target = self
-                item.representedObject = model.id
-                item.toolTip = model.id
-
-                if model.id == currentModelID {
-                    item.state = .on
-                    item.isEnabled = false
-                    item.toolTip = "\(model.id)\n当前模型"
-                    continue
-                }
-                switch model.compatibility {
-                case .verified:
-                    item.isEnabled = true
-                case .unverified:
-                    item.isEnabled = true
-                    item.image = NSImage(
-                        systemSymbolName: "exclamationmark.triangle",
-                        accessibilityDescription: "未验证"
-                    )
-                    item.toolTip = "\(model.id)\n尚未验证 Codex /responses 与工具调用兼容性"
-                case .unsupported(let reason):
-                    item.isEnabled = false
-                    item.image = NSImage(
-                        systemSymbolName: "nosign",
-                        accessibilityDescription: "不可作为主模型"
-                    )
-                    item.toolTip = "\(model.id)\n\(reason)"
-                }
-            }
-        }
-    }
-
-    private func renderModelLoadFailure(_ error: Error, in menu: NSMenu) {
-        menu.removeAllItems()
-        addModelStatusItem(error.localizedDescription, to: menu)
-        let retry = menu.addItem(
-            withTitle: "重试",
-            action: #selector(retryCodexModelLoad),
-            keyEquivalent: ""
-        )
-        retry.target = self
-        retry.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: nil)
-    }
-
-    private func addModelStatusItem(_ title: String, to menu: NSMenu) {
-        let item = menu.addItem(withTitle: title, action: nil, keyEquivalent: "")
-        item.isEnabled = false
-    }
-
-    @objc private func retryCodexModelLoad() {
-        guard let menu = activeModelMenu else { return }
-        loadCodexModels(into: menu)
-    }
-
-    @objc private func selectCodexModel(_ sender: NSMenuItem) {
-        guard !isSwitchingModel,
-              let modelID = sender.representedObject as? String,
-              let descriptor = modelDescriptors[modelID],
-              modelID != currentModelID else {
-            return
-        }
-
-        if descriptor.compatibility == .unverified {
-            let alert = NSAlert()
-            alert.alertStyle = .warning
-            alert.messageText = "该模型尚未验证"
-            alert.informativeText = "\(descriptor.displayName) 可能不兼容 Codex /responses、工具调用或模型 metadata。仍要切换并在 2 秒后强制重启 Codex吗？"
-            alert.addButton(withTitle: "继续切换")
-            alert.addButton(withTitle: "取消")
-            guard alert.runModal() == .alertFirstButtonReturn else { return }
-        }
-
-        isSwitchingModel = true
-        activeModelMenu?.items.forEach { $0.isEnabled = false }
-        DispatchQueue.global(qos: .userInitiated).async { [codexModels] in
-            let result = Result { try codexModels.switchModel(to: modelID) }
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                switch result {
-                case .success:
-                    self.currentModelID = modelID
-                    self.notifyCodexModelSwitchScheduled(descriptor.displayName)
-                    self.codexRestarter.forceRestart(after: 2) { restartResult in
-                        DispatchQueue.main.async {
-                            self.isSwitchingModel = false
-                            if case .failure(let error) = restartResult {
-                                self.notifyCodexModelFailure(error.localizedDescription)
-                            }
-                        }
-                    }
-                case .failure(let error):
-                    self.isSwitchingModel = false
-                    self.notifyCodexModelFailure(error.localizedDescription)
-                }
-            }
-        }
-    }
-
     /// 按当前访达权威切换隐藏文件显示；失败则保持原状。
     @objc private func toggleLaunchAtLogin(_ sender: NSMenuItem) {
         let result = launchAtLogin.setEnabled(!launchAtLogin.isEnabled)
@@ -1487,7 +1261,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "覆盖可分享配置？"
-        alert.informativeText = "将整段替换键盘映射、触控板轻点、快捷键开关与滚轮设置，且不可自动撤销。根目录、开机自启、微信、密钥与拓展设置不受影响。"
+        alert.informativeText = "将整段替换键盘映射、触控板轻点、快捷键开关与滚轮设置，且不可自动撤销。根目录、开机自启、微信与密钥不受影响。"
         alert.addButton(withTitle: "覆盖")
         alert.addButton(withTitle: "取消")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
@@ -2071,31 +1845,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         UNUserNotificationCenter.current().add(request) { _ in }
     }
 
-    private func notifyCodexModelSwitchScheduled(_ displayName: String) {
-        let content = UNMutableNotificationContent()
-        content.title = "Codex 模型已切换"
-        content.body = "\(displayName)；2 秒后将强制重启 Codex。"
-        content.sound = .default
-        let request = UNNotificationRequest(
-            identifier: "tocode.codex-model.\(UUID().uuidString)",
-            content: content,
-            trigger: nil
-        )
-        UNUserNotificationCenter.current().add(request) { _ in }
-    }
-
-    private func notifyCodexModelFailure(_ message: String) {
-        let content = UNMutableNotificationContent()
-        content.title = "Codex 模型切换失败"
-        content.body = message
-        content.sound = .default
-        let request = UNNotificationRequest(
-            identifier: "tocode.codex-model.failure.\(UUID().uuidString)",
-            content: content,
-            trigger: nil
-        )
-        UNUserNotificationCenter.current().add(request) { _ in }
-    }
 }
 
 /// 桌面夹这一行可点击。带 submenu 的菜单项本身不会触发 action，所以用行视图接收点击，悬停仍展开窗口。

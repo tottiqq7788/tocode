@@ -20,6 +20,70 @@ struct PhoneHermesTurn: Equatable {
     var id: Int = 0
 }
 
+struct PhoneHermesModelChoice: Equatable {
+    var id: String
+    var name: String
+    var models: [String]
+}
+
+struct PhoneHermesModelOptions: Equatable {
+    var model: String
+    var provider: String
+    var providers: [PhoneHermesModelChoice]
+
+    /// 只保留 provider 标识、显示名与模型名。丢掉 capabilities 等字段，也不带回密钥。
+    static func parse(_ json: [String: Any]) -> PhoneHermesModelOptions {
+        let model = sanitizedModel(json["model"] as? String ?? "")
+        let provider = sanitizedProvider(json["provider"] as? String ?? "")
+        let rows = json["providers"] as? [[String: Any]] ?? []
+        let providers: [PhoneHermesModelChoice] = rows.compactMap { row in
+            let id = sanitizedProvider(row["slug"] as? String ?? "")
+            guard !id.isEmpty else { return nil }
+            let name = (row["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let models = (row["models"] as? [Any] ?? []).compactMap { item -> String? in
+                guard let raw = item as? String else { return nil }
+                let value = sanitizedModel(raw)
+                return value.isEmpty ? nil : value
+            }
+            guard !models.isEmpty else { return nil }
+            return PhoneHermesModelChoice(id: id, name: name.isEmpty ? id : name, models: models)
+        }
+        return PhoneHermesModelOptions(model: model, provider: provider, providers: providers)
+    }
+
+    func contains(model: String, provider: String) -> Bool {
+        providers.contains { choice in
+            choice.id == provider && choice.models.contains(model)
+        }
+    }
+
+    func body() -> [String: Any] {
+        [
+            "model": model,
+            "provider": provider,
+            "providers": providers.map {
+                ["id": $0.id, "name": $0.name, "models": $0.models] as [String: Any]
+            }
+        ]
+    }
+
+    private static func sanitizedModel(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.range(of: HermesProfileCatalog.modelValuePattern, options: .regularExpression) != nil else {
+            return ""
+        }
+        return trimmed
+    }
+
+    private static func sanitizedProvider(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.range(of: HermesProfileCatalog.providerValuePattern, options: .regularExpression) != nil else {
+            return ""
+        }
+        return trimmed
+    }
+}
+
 struct PhoneHermesRow: Equatable {
     var id: Int
     var role: String
@@ -71,6 +135,7 @@ protocol PhoneHermesRuntime: AnyObject {
     func messagePage(sessionID: String, profile: String, offset: Int, limit: Int) async throws -> PhoneHermesMessagePage
     func chat(sessionID: String, text: String, directory: String) async throws -> String
     func chat(sessionID: String, text: String, directory: String, profile: String) async throws -> String
+    func modelOptions(profile: String) async throws -> PhoneHermesModelOptions
 }
 
 extension PhoneHermesRuntime {
@@ -114,6 +179,10 @@ extension PhoneHermesRuntime {
 
     func chat(sessionID: String, text: String, directory: String, profile: String) async throws -> String {
         try await chat(sessionID: sessionID, text: text, directory: directory)
+    }
+
+    func modelOptions(profile: String) async throws -> PhoneHermesModelOptions {
+        PhoneHermesModelOptions(model: "", provider: "", providers: [])
     }
 }
 
@@ -553,18 +622,53 @@ enum PhoneHermesDirectory {
 
 /// 手机发起、还没结束的 Hermes 回合。退出对话页也不会清掉，会话列表和再次进入都靠它。
 final class PhoneHermesActivity: @unchecked Sendable {
+    /// 刚结束后，相同文字在这个窗口内不再开新回合。
+    static let duplicateWindow: TimeInterval = 2
+
     private let lock = NSLock()
     private var running: Set<String> = []
+    private var lastFinished: [String: (text: String, at: Date)] = [:]
+    /// 单测可改成固定时间。
+    var now: () -> Date = { Date() }
 
-    func mark(profile: String, sessionID: String) {
+    /// 同一会话正在跑，或刚结束的极短时间内文字相同，返回「这轮对话还在进行」。
+    func begin(profile: String, sessionID: String, text: String) -> String? {
         lock.lock()
-        running.insert(Self.key(profile, sessionID))
+        defer { lock.unlock() }
+        let key = Self.key(profile, sessionID)
+        if running.contains(key) {
+            return "这轮对话还在进行"
+        }
+        if let last = lastFinished[key],
+           last.text == text,
+           now().timeIntervalSince(last.at) < Self.duplicateWindow {
+            return "这轮对话还在进行"
+        }
+        running.insert(key)
+        return nil
+    }
+
+    func finish(profile: String, sessionID: String, text: String) {
+        lock.lock()
+        let key = Self.key(profile, sessionID)
+        running.remove(key)
+        lastFinished[key] = (text, now())
+        lock.unlock()
+    }
+
+    func abort(profile: String, sessionID: String) {
+        lock.lock()
+        running.remove(Self.key(profile, sessionID))
         lock.unlock()
     }
 
     func clear(profile: String, sessionID: String) {
+        abort(profile: profile, sessionID: sessionID)
+    }
+
+    func mark(profile: String, sessionID: String) {
         lock.lock()
-        running.remove(Self.key(profile, sessionID))
+        running.insert(Self.key(profile, sessionID))
         lock.unlock()
     }
 
@@ -755,6 +859,56 @@ enum PhoneHermesApp {
         case "projects":
             guard snapshot.installed else { return .failure(missingHermes) }
             return .success("", body: ["projects": projectRows(database: projectsDatabase(active))])
+        case "models":
+            guard snapshot.installed else { return .failure(missingHermes) }
+            guard snapshot.running else { return .failure(hermesClosed) }
+            do {
+                let options = try await runtime.modelOptions(profile: active)
+                if options.providers.isEmpty {
+                    return .failure("这个档案暂时没有可用模型")
+                }
+                return .success("", body: options.body())
+            } catch {
+                return .failure("还不能读取这个档案的模型列表")
+            }
+        case "model_select":
+            guard snapshot.installed else { return .failure(missingHermes) }
+            guard snapshot.running else { return .failure(hermesClosed) }
+            let chosenModel = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let chosenProvider = title.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard chosenModel.range(of: HermesProfileCatalog.modelValuePattern, options: .regularExpression) != nil else {
+                return .failure("模型名无效")
+            }
+            guard chosenProvider.range(of: HermesProfileCatalog.providerValuePattern, options: .regularExpression) != nil else {
+                return .failure("厂家名无效")
+            }
+            do {
+                let options = try await runtime.modelOptions(profile: active)
+                guard options.contains(model: chosenModel, provider: chosenProvider) else {
+                    return .failure("这个模型当前不可用")
+                }
+                try HermesProfileCatalog.setConfiguredModel(
+                    userHome: home,
+                    profile: active,
+                    model: chosenModel,
+                    provider: chosenProvider
+                )
+                return .success("之后新建的对话会用这个模型", body: [
+                    "model": chosenModel,
+                    "provider": chosenProvider,
+                    "profile": active
+                ])
+            } catch PhoneHermesModelConfigError.invalidModel {
+                return .failure("模型名无效")
+            } catch PhoneHermesModelConfigError.invalidProvider {
+                return .failure("厂家名无效")
+            } catch PhoneHermesModelConfigError.missingConfig {
+                return .failure("这个档案还没有配置文件")
+            } catch PhoneHermesModelConfigError.ambiguousModelBlock {
+                return .failure("这个档案的模型配置无法安全改写")
+            } catch {
+                return .failure("还不能改写这个档案的模型")
+            }
         case "project_create":
             guard snapshot.installed else { return .failure(missingHermes) }
             let name = title.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -889,7 +1043,9 @@ enum PhoneHermesApp {
                 guard isDirectory(project.rootPath) else { return .failure(missingProjectFolder) }
                 let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !trimmed.isEmpty else { return .failure("请输入内容") }
-                activity.mark(profile: profile, sessionID: sessionID)
+                if let blocked = activity.begin(profile: profile, sessionID: sessionID, text: trimmed) {
+                    return .failure(blocked)
+                }
                 let answer: String
                 do {
                     answer = try await runtime.chat(
@@ -898,9 +1054,9 @@ enum PhoneHermesApp {
                         directory: project.rootPath,
                         profile: profile
                     )
-                    activity.clear(profile: profile, sessionID: sessionID)
+                    activity.finish(profile: profile, sessionID: sessionID, text: trimmed)
                 } catch {
-                    activity.clear(profile: profile, sessionID: sessionID)
+                    activity.abort(profile: profile, sessionID: sessionID)
                     throw error
                 }
                 let named = try? await runtime.session(sessionID: sessionID, profile: profile)
@@ -1088,7 +1244,8 @@ enum PhoneHermesApp {
             "profile": active,
             "profiles": names,
             "projects": projectRows(database: database(active)),
-            "model": HermesProfileCatalog.configuredModel(userHome: home, profile: active)
+            "model": HermesProfileCatalog.configuredModel(userHome: home, profile: active),
+            "provider": HermesProfileCatalog.configuredProvider(userHome: home, profile: active)
         ]
     }
 
@@ -1098,7 +1255,8 @@ enum PhoneHermesApp {
             "hermes_running": snapshot.running,
             "profile": profile,
             "profiles": names,
-            "model": snapshot.installed ? HermesProfileCatalog.configuredModel(userHome: home, profile: profile) : ""
+            "model": snapshot.installed ? HermesProfileCatalog.configuredModel(userHome: home, profile: profile) : "",
+            "provider": snapshot.installed ? HermesProfileCatalog.configuredProvider(userHome: home, profile: profile) : ""
         ]
     }
 

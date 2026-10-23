@@ -1366,7 +1366,7 @@ func testModelRelayPortRollback() async {
     failedStartupService.stop()
 }
 
-func testModelRelayManualAndLegacyAKContract() {
+func testModelRelayManualWithoutAK() {
     let manual = UserManual.pages.map { $0.title + "\n" + $0.body }.joined(separator: "\n")
     expect(manual.contains("顶层「模型」"), "说明书标明独立顶层模型中转站")
     expect(manual.contains("「状态」「端口」「厂家」「密钥」「自动化」"), "说明书标明五项菜单文案")
@@ -1375,9 +1375,9 @@ func testModelRelayManualAndLegacyAKContract() {
     expect(manual.contains("直接打开与新增相同的编辑弹窗"), "说明书写明厂家点击直达编辑弹窗")
     expect(manual.contains("不提供人工别名"), "说明书明确无模型别名配置")
     expect(!manual.contains("模型别名"), "说明书不再出现模型别名入口")
-    expect(manual.contains("顶层「AK」下的 Codex 模型列表"), "说明书写明模型直接列在 AK 下")
-    expect(!manual.contains("AK → 模型"), "说明书不再把模型包在 AK 子夹")
-    expect(ExtendedSettingsStore.topLevelFolderTitle == "AK", "既有 AK 顶层夹名称保持不变")
+    expect(manual.contains("Ancode"), "说明书指向 Ancode 承担 Codex 模型切换")
+    expect(!manual.contains("顶层「AK」下的 Codex 模型列表"), "说明书不再写 AK 下 Codex 列表")
+    expect(!manual.contains("AK → 模型"), "说明书不再写 AK → 模型")
 }
 
 func testModelRelayCallMetricsStore() {

@@ -34,9 +34,6 @@ enum TocodeFinderCommand: Equatable {
 enum TocodeCodexCommand: Equatable {
     case status
     case sync(TocodeToggle)
-    case model
-    case modelList
-    case modelSet(String)
 }
 
 struct TocodeWechatSendPayload: Equatable {
@@ -95,7 +92,6 @@ enum TocodeCommandError: Error, Equatable, LocalizedError {
     case rootSelectionCancelled
     case finderSelectionFailed(String)
     case codexUnavailable(String)
-    case codexModelSwitchFailed(String)
     case operationFailed(String)
 
     var message: String {
@@ -122,8 +118,6 @@ enum TocodeCommandError: Error, Equatable, LocalizedError {
             return "访达初始化失败：\(message)"
         case .codexUnavailable(let message):
             return "Codex 不可用：\(message)"
-        case .codexModelSwitchFailed(let message):
-            return "Codex 模型切换失败：\(message)"
         case .operationFailed(let message):
             return message
         }
@@ -162,9 +156,6 @@ enum TocodeCommandParser {
       Codex
         codex status                        当前项目名 + 根目录
         codex sync on|off|toggle            codex跟随开关
-        codex model                         当前模型与一致性
-        codex model list                    实时拉取 Anker 模型列表
-        codex model set <id>                切换模型并强制重启 Codex
 
       微信
         wechat status                       是否已绑定
@@ -310,26 +301,8 @@ enum TocodeCommandParser {
                 return .failure(.invalidToggle(tokens.count > 1 ? tokens[1] : ""))
             }
             return .success(.codex(.sync(toggle)))
-        case "model":
-            return parseCodexModel(Array(tokens.dropFirst()))
         default:
             return .failure(.unknownCommand("codex \(sub)"))
-        }
-    }
-
-    private static func parseCodexModel(_ tokens: [String]) -> Result<TocodeCommand, TocodeCommandError> {
-        guard let sub = tokens.first?.lowercased() else {
-            return .success(.codex(.model))
-        }
-        switch sub {
-        case "list":
-            guard tokens.count == 1 else { return .failure(.invalidArguments("codex model list")) }
-            return .success(.codex(.modelList))
-        case "set":
-            guard tokens.count == 2 else { return .failure(.missingValue("codex model set <id>")) }
-            return .success(.codex(.modelSet(tokens[1])))
-        default:
-            return .failure(.unknownCommand("codex model \(sub)"))
         }
     }
 

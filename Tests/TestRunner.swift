@@ -1086,7 +1086,7 @@ func testTocodePreferencesMigrationKeepsSuiteOnlyKeys() {
     }
 
     canonical.set("/Users/keep", forKey: RootPathStore.key)
-    canonical.set(true, forKey: ExtendedSettingsStore.akEnabledKey)
+    canonical.set(true, forKey: "tocode.extendedSettings.akEnabled")
     let mapping = KeyboardShortcutMapping(
         id: UUID(),
         name: "打开路径",
@@ -1098,7 +1098,7 @@ func testTocodePreferencesMigrationKeepsSuiteOnlyKeys() {
 
     TocodePreferences.migrateIfNeeded(canonical: canonical, legacy: legacy)
     expect(canonical.string(forKey: RootPathStore.key) == "/Users/keep", "suite 独有根目录保留")
-    expect(canonical.bool(forKey: ExtendedSettingsStore.akEnabledKey), "suite 独有 AK 开关保留")
+    expect(canonical.bool(forKey: "tocode.extendedSettings.akEnabled"), "suite 独有遗留扩展键保留")
     expect(
         canonical.data(forKey: KeyboardShortcutMappingStore.defaultsKey) == mappingData,
         "mac 已有映射覆盖写入"
@@ -1141,7 +1141,7 @@ func testTocodePortableSettingsTransfer() {
     defer { defaults.removePersistentDomain(forName: suite) }
 
     defaults.set("/Users/secret-root", forKey: RootPathStore.key)
-    defaults.set(true, forKey: ExtendedSettingsStore.akEnabledKey)
+    defaults.set(true, forKey: "tocode.extendedSettings.akEnabled")
     defaults.set(true, forKey: CodexSyncSettingsStore.syncEnabledKey)
     let mapping = KeyboardShortcutMapping(
         id: UUID(),
@@ -1187,7 +1187,7 @@ func testTocodePortableSettingsTransfer() {
     expect(text.contains("tocode.settings"), "导出含 format")
     expect(!text.contains("secret-root"), "导出不含根目录")
     expect(!text.contains("extendedSettings"), "导出不含拓展设置键")
-    expect(!text.contains("akEnabled"), "导出不含 AK 开关")
+    expect(!text.contains("akEnabled"), "导出不含遗留扩展键")
     expect(!text.contains("wechat"), "导出不含微信字段")
     expect(!text.contains("rootFolder"), "导出不含根目录字段名")
     expect(!text.contains("spaceModifier"), "导出不含空格修饰键")
@@ -1215,7 +1215,7 @@ func testTocodePortableSettingsTransfer() {
     other.removePersistentDomain(forName: otherSuite)
     defer { other.removePersistentDomain(forName: otherSuite) }
     other.set("/Users/keep-root", forKey: RootPathStore.key)
-    other.set(true, forKey: ExtendedSettingsStore.akEnabledKey)
+    other.set(true, forKey: "tocode.extendedSettings.akEnabled")
     other.set(true, forKey: CodexSyncSettingsStore.syncEnabledKey)
     other.set(true, forKey: TerminalFollowSettingsStore.followEnabledKey)
     other.set(true, forKey: HermesFollowSettingsStore.followEnabledKey)
@@ -1254,7 +1254,7 @@ func testTocodePortableSettingsTransfer() {
     expect(MouseWheelReverseStore(defaults: other).reverseVerticalEnabled, "导入写入垂直滚轮")
     expect(!MouseWheelReverseStore(defaults: other).reverseHorizontalEnabled, "导入写入横向滚轮关闭")
     expect(other.string(forKey: RootPathStore.key) == "/Users/keep-root", "导入不改根目录")
-    expect(other.bool(forKey: ExtendedSettingsStore.akEnabledKey), "导入不改 AK 开关")
+    expect(other.bool(forKey: "tocode.extendedSettings.akEnabled"), "导入不改遗留扩展键")
     expect(other.bool(forKey: CodexSyncSettingsStore.syncEnabledKey), "导入不改 codex跟随")
     expect(other.bool(forKey: TerminalFollowSettingsStore.followEnabledKey), "导入不改终端跟随")
     expect(other.bool(forKey: HermesFollowSettingsStore.followEnabledKey), "导入不改 hermes跟随")
@@ -1526,6 +1526,7 @@ func testUserManualPages() {
     expect(joined.contains("配置 → 导出配置"), "说明书覆盖配置夹导入导出")
     expect(joined.contains("设置夹最底部"), "说明书写明在设置夹底部")
     expect(!joined.contains("AK → 密钥"), "说明书不再写 AK 下密钥入口")
+    expect(!joined.contains("拓展设置"), "说明书不再写拓展设置")
     expect(!joined.contains("密钥 → AI"), "说明书不再写密钥夹")
     expect(!joined.contains("设置 → 密钥"), "说明书不再写设置下密钥")
     expect(joined.contains("文稿/wechat"), "说明书写明归档在本机文稿/wechat")
@@ -1544,9 +1545,9 @@ func testUserManualPages() {
     expect(joined.contains("root clipboard"), "说明书覆盖 root clipboard")
     expect(joined.contains("finder copy"), "说明书覆盖 finder copy")
     expect(joined.contains("不是访达/Codex 跟随后的展示根"), "说明书写明 root open 用固定根")
-    expect(joined.contains("顶层「AK」夹"), "说明书覆盖顶层 AK 夹")
-    expect(joined.contains("悬停后直接列出 Codex 模型"), "说明书覆盖 AK 下直接列出模型")
-    expect(!joined.contains("AK → 模型"), "说明书不再把模型包在 AK 子夹")
+    expect(!joined.contains("顶层「AK」夹"), "说明书不再覆盖顶层 AK 夹")
+    expect(joined.contains("Ancode"), "说明书指向独立应用 Ancode")
+    expect(!joined.contains("AK → 模型"), "说明书不再写 AK → 模型")
     expect(!joined.contains("AK → 密钥 → AI"), "说明书不再写 AK 下密钥路径")
     expect(!joined.contains("设置 → 密钥 → AI"), "说明书不再写设置下密钥入口")
     expect(joined.contains("顶层「模型」"), "说明书覆盖独立顶层模型中转站")
@@ -2099,372 +2100,6 @@ func testCodexSyncSettingsStore() {
     expect(store.syncEnabled == false, "CodexSyncSettingsStore 关闭后恢复 false")
 }
 
-private final class MockCodexModelURLProtocol: URLProtocol {
-    static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
-
-    override class func canInit(with request: URLRequest) -> Bool { true }
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
-
-    override func startLoading() {
-        do {
-            guard let handler = Self.handler else {
-                throw NSError(domain: "MockCodexModelURLProtocol", code: 1)
-            }
-            let (response, data) = try handler(request)
-            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: data)
-            client?.urlProtocolDidFinishLoading(self)
-        } catch {
-            client?.urlProtocol(self, didFailWithError: error)
-        }
-    }
-
-    override func stopLoading() {}
-}
-
-private struct CodexModelFixture {
-    let root: URL
-    let databasePath: String
-    let configPath: String
-}
-
-private func makeCodexModelFixture() -> CodexModelFixture {
-    let root = FileManager.default.temporaryDirectory
-        .appendingPathComponent("codex-model-\(UUID().uuidString)")
-    try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    let databasePath = root.appendingPathComponent("cc-switch.db").path
-    let configPath = root.appendingPathComponent("config.toml").path
-    let template = """
-    model_provider = "custom"
-    model = "v_model/gpt"
-    model_reasoning_effort = "high"
-
-    [model_providers.custom]
-    base_url = "https://ai-router.anker-in.com/v1"
-    experimental_bearer_token = "provider-managed"
-    """
-    let settings: [String: Any] = [
-        "auth": ["OPENAI_API_KEY": "unit-test-key"],
-        "config": template,
-        "untouched": ["enabled": true]
-    ]
-    let settingsData = try! JSONSerialization.data(withJSONObject: settings, options: [.sortedKeys])
-    let settingsJSON = String(data: settingsData, encoding: .utf8)!
-
-    var database: OpaquePointer?
-    expect(sqlite3_open(databasePath, &database) == SQLITE_OK, "模型切换夹具创建 SQLite")
-    let createSQL = """
-    CREATE TABLE providers (
-      id TEXT NOT NULL,
-      app_type TEXT NOT NULL,
-      name TEXT NOT NULL,
-      settings_config TEXT NOT NULL,
-      is_current BOOLEAN NOT NULL DEFAULT 0,
-      PRIMARY KEY (id, app_type)
-    );
-    """
-    expect(sqlite3_exec(database, createSQL, nil, nil, nil) == SQLITE_OK, "模型切换夹具创建 providers")
-    var statement: OpaquePointer?
-    let insertSQL = "INSERT INTO providers(id, app_type, name, settings_config, is_current) VALUES(?, 'codex', 'Anker AI Router', ?, 1)"
-    expect(sqlite3_prepare_v2(database, insertSQL, -1, &statement, nil) == SQLITE_OK, "模型切换夹具准备 Provider")
-    let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
-    sqlite3_bind_text(statement, 1, "anker", -1, transient)
-    sqlite3_bind_text(statement, 2, settingsJSON, -1, transient)
-    expect(sqlite3_step(statement) == SQLITE_DONE, "模型切换夹具写入 Provider")
-    sqlite3_finalize(statement)
-    sqlite3_close(database)
-
-    let live = """
-    model_provider = "custom"
-    model = "v_model/gpt"
-    model_reasoning_effort = "high"
-
-    [desktop]
-    conversationDetailMode = "STEPS_PROSE"
-    """
-    try! live.write(toFile: configPath, atomically: true, encoding: .utf8)
-    try! FileManager.default.setAttributes(
-        [.posixPermissions: NSNumber(value: 0o600)],
-        ofItemAtPath: configPath
-    )
-    return CodexModelFixture(root: root, databasePath: databasePath, configPath: configPath)
-}
-
-private func readProviderSettings(at path: String) -> [String: Any] {
-    var database: OpaquePointer?
-    guard sqlite3_open_v2(path, &database, SQLITE_OPEN_READONLY, nil) == SQLITE_OK,
-          let database else {
-        return [:]
-    }
-    defer { sqlite3_close(database) }
-    var statement: OpaquePointer?
-    guard sqlite3_prepare_v2(
-        database,
-        "SELECT settings_config FROM providers WHERE id='anker' AND app_type='codex'",
-        -1,
-        &statement,
-        nil
-    ) == SQLITE_OK, let statement else {
-        return [:]
-    }
-    defer { sqlite3_finalize(statement) }
-    guard sqlite3_step(statement) == SQLITE_ROW,
-          let bytes = sqlite3_column_text(statement, 0),
-          let data = String(cString: bytes).data(using: .utf8),
-          let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-        return [:]
-    }
-    return object
-}
-
-func testCodexModelTOMLAndCatalog() {
-    let source = """
-    # model = "commented"
-    model_provider = "custom"
-    model = "v_model/gpt" # current
-
-    [desktop]
-    model = "nested"
-    """
-    expect(
-        (try? CodexTOMLModel.read(from: source, location: "test")) == "v_model/gpt",
-        "模型解析只读取唯一顶层 model"
-    )
-    let replaced = try! CodexTOMLModel.replacing(
-        in: source,
-        with: "v_model/gpt-6-astra",
-        location: "test"
-    )
-    expect(replaced.contains("model = \"v_model/gpt-6-astra\" # current"), "模型替换保留原行格式与注释")
-    expect(replaced.contains("model = \"nested\""), "模型替换不改表内同名键")
-    expect(
-        (try? CodexTOMLModel.read(from: "model = \"a\"\nmodel = \"b\"\n", location: "test")) == nil,
-        "重复顶层 model 被拒绝"
-    )
-    expect(
-        (try? CodexTOMLModel.read(from: "[desktop]\nmodel = \"nested\"\n", location: "test")) == nil,
-        "只有表内 model 时被拒绝"
-    )
-
-    let sol = CodexModelCatalog.descriptor(for: "v_model/gpt")
-    expect(sol.displayName == "GPT-5.6 Sol", "Sol 路由使用友好名称")
-    expect(sol.compatibility == .verified, "Sol 路由标记为已验证")
-    let retired = CodexModelCatalog.descriptor(for: "v_model/gpt-5.5")
-    expect(retired.compatibility == .unverified, "已下线旧 ID 不再标记为已验证")
-    let luna = CodexModelCatalog.descriptor(for: "gpt-5.6-luna")
-    expect(luna.compatibility == .unverified, "不在实时目录的 Luna ID 不再标记为已验证")
-    let appsKimi = CodexModelCatalog.descriptor(for: "apps/v_model/kimi")
-    expect(appsKimi.displayName == "Kimi · Apps", "重名模型显示来源")
-    if case .unsupported = CodexModelCatalog.descriptor(for: "apps/v_model/glm-image").compatibility {
-        expect(true, "图片模型标记为不可选择")
-    } else {
-        expect(false, "图片模型标记为不可选择")
-    }
-    if case .unsupported = CodexModelCatalog.descriptor(for: "anthropic/v_model/deepseek-v4-pro").compatibility {
-        expect(true, "已知 /responses 不兼容模型被禁用")
-    } else {
-        expect(false, "已知 /responses 不兼容模型被禁用")
-    }
-    let deduplicated = CodexModelCatalog.descriptors(for: [
-        "apps/v_model/kimi", "apps/v_model/kimi", "v_model/gpt"
-    ])
-    expect(deduplicated.count == 2, "实时模型目录按 ID 去重")
-}
-
-func testCodexModelSwitchIntegrationAndFaults() {
-    let fixture = makeCodexModelFixture()
-    defer { try? FileManager.default.removeItem(at: fixture.root) }
-    let service = CodexModelSwitchService(
-        databasePath: fixture.databasePath,
-        liveConfigPath: fixture.configPath
-    )
-    let initial = try! service.currentState()
-    expect(initial.liveModelID == "v_model/gpt", "模型状态读取实时配置")
-    expect(initial.providerModelID == "v_model/gpt", "模型状态读取 Provider 模板")
-    expect(initial.isConsistent, "初始双配置一致")
-
-    try! service.switchModel(to: "v_model/gpt-6-astra")
-    let switched = try! service.currentState()
-    expect(switched.liveModelID == "v_model/gpt-6-astra", "切换写入 Codex 实时配置")
-    expect(switched.providerModelID == "v_model/gpt-6-astra", "切换写入 CC Switch Provider 模板")
-    let live = try! String(contentsOfFile: fixture.configPath, encoding: .utf8)
-    expect(live.contains("model_reasoning_effort = \"high\""), "实时配置非 model 内容保持")
-    expect(live.contains("conversationDetailMode = \"STEPS_PROSE\""), "实时配置表内容保持")
-    let liveAttributes = try! FileManager.default.attributesOfItem(atPath: fixture.configPath)
-    expect(
-        (liveAttributes[.posixPermissions] as? NSNumber)?.intValue == 0o600,
-        "原子替换保持 Codex 配置 0600 权限"
-    )
-    let settings = readProviderSettings(at: fixture.databasePath)
-    let auth = settings["auth"] as? [String: Any]
-    expect(auth?["OPENAI_API_KEY"] as? String == "unit-test-key", "Provider 凭据保持不变")
-    let untouched = settings["untouched"] as? [String: Any]
-    expect(untouched?["enabled"] as? Bool == true, "Provider JSON 其他字段保持不变")
-
-    let failedWriter = CodexModelSwitchService(
-        databasePath: fixture.databasePath,
-        liveConfigPath: fixture.configPath,
-        fileWriter: { _, _ in
-            throw NSError(domain: "intentional-write-failure", code: 1)
-        }
-    )
-    expect(
-        (try? failedWriter.switchModel(to: "v_model/gpt")) == nil,
-        "实时配置写入失败时切换失败"
-    )
-    let afterFailure = try! service.currentState()
-    expect(afterFailure.liveModelID == "v_model/gpt-6-astra", "写入失败后实时配置保持原值")
-    expect(afterFailure.providerModelID == "v_model/gpt-6-astra", "写入失败后数据库事务回滚")
-
-    let validLive = live
-    try! "model = \"a\"\nmodel = \"b\"\n".write(
-        toFile: fixture.configPath,
-        atomically: true,
-        encoding: .utf8
-    )
-    expect((try? service.switchModel(to: "v_model/gpt")) == nil, "歧义实时配置拒绝切换")
-    try! validLive.write(toFile: fixture.configPath, atomically: true, encoding: .utf8)
-
-    let configuration = URLSessionConfiguration.ephemeral
-    configuration.protocolClasses = [MockCodexModelURLProtocol.self]
-    let networkService = CodexModelSwitchService(
-        databasePath: fixture.databasePath,
-        liveConfigPath: fixture.configPath,
-        session: URLSession(configuration: configuration)
-    )
-    var requestedURL: URL?
-    var authorization: String?
-    MockCodexModelURLProtocol.handler = { request in
-        requestedURL = request.url
-        authorization = request.value(forHTTPHeaderField: "Authorization")
-        let response = HTTPURLResponse(
-            url: request.url!,
-            statusCode: 200,
-            httpVersion: nil,
-            headerFields: nil
-        )!
-        let data = Data(#"{"data":[{"id":"v_model/gpt"},{"id":"apps/v_model/glm-image"},{"id":"v_model/gpt"}]}"#.utf8)
-        return (response, data)
-    }
-    let loaded = DispatchSemaphore(value: 0)
-    var loadedModels: [CodexModelDescriptor] = []
-    networkService.fetchModels { result in
-        if case .success(let models) = result {
-            loadedModels = models
-        }
-        loaded.signal()
-    }
-    _ = loaded.wait(timeout: .now() + 2)
-    expect(requestedURL?.absoluteString == "https://ai-router.anker-in.com/v1/models", "目录只请求固定 Anker HTTPS 地址")
-    expect(authorization == "Bearer unit-test-key", "目录使用当前 Provider 凭据")
-    expect(loadedModels.count == 2, "目录响应解析并去重")
-
-    func catalogRequestFails(status: Int, body: String) -> Bool {
-        MockCodexModelURLProtocol.handler = { request in
-            let response = HTTPURLResponse(
-                url: request.url!,
-                statusCode: status,
-                httpVersion: nil,
-                headerFields: nil
-            )!
-            return (response, Data(body.utf8))
-        }
-        let semaphore = DispatchSemaphore(value: 0)
-        var failed = false
-        networkService.fetchModels { result in
-            if case .failure = result { failed = true }
-            semaphore.signal()
-        }
-        _ = semaphore.wait(timeout: .now() + 2)
-        return failed
-    }
-    expect(catalogRequestFails(status: 401, body: ""), "目录 HTTP 401 明确失败")
-    expect(catalogRequestFails(status: 500, body: ""), "目录 HTTP 500 明确失败")
-    expect(catalogRequestFails(status: 200, body: "not-json"), "目录畸形 JSON 明确失败")
-    expect(catalogRequestFails(status: 200, body: #"{"data":[]}"#), "目录空列表明确失败")
-    MockCodexModelURLProtocol.handler = nil
-}
-
-func testCodexApplicationRestarter() {
-    var alive = Set<pid_t>([101, 202])
-    var signaled: [pid_t] = []
-    var scheduledDelay: TimeInterval?
-    var scheduledWork: (() -> Void)?
-    var launchCount = 0
-    var completionSucceeded = false
-    let restarter = CodexApplicationRestarter(
-        pidProvider: { Array(alive).sorted() },
-        signalSender: { pid in
-            signaled.append(pid)
-            alive.remove(pid)
-            return CodexSignalResult(status: .sent)
-        },
-        processChecker: { alive.contains($0) },
-        scheduler: { delay, work in
-            scheduledDelay = delay
-            scheduledWork = work
-        },
-        launcher: { completion in
-            launchCount += 1
-            completion(.success(()))
-        }
-    )
-    restarter.forceRestart(after: 2) { result in
-        if case .success = result { completionSucceeded = true }
-    }
-    expect(scheduledDelay == 2, "Codex 强制重启固定延迟两秒")
-    expect(signaled.isEmpty, "两秒到达前不发送终止信号")
-    expect(launchCount == 0, "两秒到达前不启动新 Codex")
-    scheduledWork?()
-    expect(signaled == [101, 202], "两秒后向全部 Codex PID 发送强杀")
-    expect(launchCount == 1, "旧 PID 消失后只启动一个 Codex")
-    expect(completionSucceeded, "强制重启成功回调")
-
-    var immediateLaunches = 0
-    let notRunning = CodexApplicationRestarter(
-        pidProvider: { [] },
-        scheduler: { _, _ in expect(false, "Codex 未运行时不应等待") },
-        launcher: { completion in
-            immediateLaunches += 1
-            completion(.success(()))
-        }
-    )
-    notRunning.forceRestart(after: 2) { _ in }
-    expect(immediateLaunches == 1, "Codex 未运行时直接启动")
-
-    var permissionLaunches = 0
-    var permissionFailure = false
-    let denied = CodexApplicationRestarter(
-        pidProvider: { [303] },
-        signalSender: { _ in CodexSignalResult(status: .failed(EPERM)) },
-        processChecker: { _ in true },
-        scheduler: { delay, work in
-            expect(delay == 2, "权限失败路径仍先等待两秒")
-            work()
-        },
-        launcher: { _ in permissionLaunches += 1 }
-    )
-    denied.forceRestart(after: 2) { result in
-        if case .failure = result { permissionFailure = true }
-    }
-    expect(permissionFailure, "SIGKILL 权限失败被报告")
-    expect(permissionLaunches == 0, "SIGKILL 权限失败不重启")
-
-    var esrchLaunches = 0
-    let alreadyExited = CodexApplicationRestarter(
-        pidProvider: { [404] },
-        signalSender: { _ in CodexSignalResult(status: .alreadyExited) },
-        processChecker: { _ in false },
-        scheduler: { _, work in work() },
-        launcher: { completion in
-            esrchLaunches += 1
-            completion(.success(()))
-        }
-    )
-    alreadyExited.forceRestart(after: 2) { _ in }
-    expect(esrchLaunches == 1, "ESRCH 视为已退出并重新启动")
-}
-
 final class MockVisibilityStore: FinderVisibilityStore {
     var value: Bool?
     var writeShouldFail = false
@@ -2657,27 +2292,6 @@ func testShortcutSettingsStoreDefaults() {
     expect(!store.finderMoveHotkeysEnabled, "finderMove 可写回关闭")
 }
 
-func testExtendedSettingsStore() {
-    let suite = "tocode-extended-settings-\(UUID().uuidString)"
-    let defaults = UserDefaults(suiteName: suite)!
-    defaults.removePersistentDomain(forName: suite)
-    defer { defaults.removePersistentDomain(forName: suite) }
-
-    let store = ExtendedSettingsStore(defaults: defaults)
-    expect(!store.akEnabled, "AK 类型默认关闭")
-    expect(ExtendedSettingsStore.folderTitle == "拓展设置", "拓展设置夹标题")
-    expect(ExtendedSettingsStore.akTitle == "AK", "AK 类型标题")
-    expect(ExtendedSettingsStore.topLevelFolderTitle == "AK", "右键顶层 AK 夹标题")
-    expect(ExtendedSettingsStore.akCredentialTitle == "AI", "安克入口文案仍为 AI")
-
-    store.akEnabled = true
-    expect(store.akEnabled, "AK 类型可持久化为开启")
-    let reread = ExtendedSettingsStore(defaults: defaults)
-    expect(reread.akEnabled, "AK 类型重启后仍为开启")
-
-    store.akEnabled = false
-    expect(!store.akEnabled, "AK 类型可写回关闭")
-}
 
 func testShortcutEventClassification() {
     let cmdX = ShortcutKeyClassifier.snapshot(
@@ -7344,9 +6958,9 @@ func testTocodeCommandParser() {
     expect(TocodeCommandParser.parse("codex sync on") == .success(.codex(.sync(.on))), "codex sync on")
     expect(TocodeCommandParser.parse("codex sync OFF") == .success(.codex(.sync(.off))), "codex sync off")
     expect(TocodeCommandParser.parse("codex sync toggle") == .success(.codex(.sync(.toggle))), "codex sync toggle")
-    expect(TocodeCommandParser.parse("codex model") == .success(.codex(.model)), "codex model")
-    expect(TocodeCommandParser.parse("codex model list") == .success(.codex(.modelList)), "codex model list")
-    expect(TocodeCommandParser.parse("codex model set v_model/gpt-6-astra") == .success(.codex(.modelSet("v_model/gpt-6-astra"))), "codex model set")
+    expect(TocodeCommandParser.parse("codex model").isFailure, "codex model 已移除")
+    expect(TocodeCommandParser.parse("codex model list").isFailure, "codex model list 已移除")
+    expect(TocodeCommandParser.parse("codex model set v_model/gpt-6-astra").isFailure, "codex model set 已移除")
 
     expect(TocodeCommandParser.parse("wechat") == .success(.wechat(.status)), "wechat 默认 status")
     expect(TocodeCommandParser.parse("wechat status") == .success(.wechat(.status)), "wechat status")
@@ -7420,7 +7034,6 @@ func testTocodeCommandExecutorMapping() {
     let clipboard = MockTocodeClipboard()
     let launch = MockTocodeLaunchAtLogin()
     let wechat = MockTocodeWeChat()
-    let models = MockTocodeCodexModels()
     let blackout = MockTocodeScreenBlackout()
 
     let fs = FileSystemService()
@@ -7456,7 +7069,6 @@ func testTocodeCommandExecutorMapping() {
         mouseWheel: wheel,
         shortcuts: shortcuts,
         codex: codex,
-        codexModels: models,
         weChat: wechat,
         screenBlackout: ScreenBlackoutService(overlay: blackout),
         notify: { _, _ in }
@@ -7577,9 +7189,7 @@ func testTocodeCommandExecutorMapping() {
     }
     executor.execute("codex sync on")
     // model
-    expect(executor.execute("codex model").isSuccess, "codex model")
-    expect(executor.execute("codex model set v_model/gpt-6-astra").isSuccess, "codex model set")
-    expect(models.switchedIDs == ["v_model/gpt-6-astra"], "codex model set 调用切换")
+    expect(executor.execute("codex model").isFailure, "codex model 执行已移除")
 }
 
 func testTocodeCLIRunnerAndIPC() {
@@ -7754,7 +7364,6 @@ func testRemoteControlAssociationPage() async {
             launchAtLogin: MockTocodeLaunchAtLogin(),
             mouseWheel: MockTocodeWheel(),
             shortcuts: MockTocodeShortcuts(),
-            codexModels: MockTocodeCodexModels(),
             weChat: MockTocodeWeChat(),
             screenBlackout: ScreenBlackoutService(overlay: MockTocodeScreenBlackout()),
             notify: { _, _ in }
@@ -7855,7 +7464,6 @@ func testRemoteControlWhitelist() async {
             launchAtLogin: MockTocodeLaunchAtLogin(),
             mouseWheel: MockTocodeWheel(),
             shortcuts: MockTocodeShortcuts(),
-            codexModels: MockTocodeCodexModels(),
             weChat: MockTocodeWeChat(),
             screenBlackout: ScreenBlackoutService(overlay: overlay),
             notify: { _, _ in }
@@ -7937,7 +7545,6 @@ func testRemoteControlWhitelist() async {
             launchAtLogin: MockTocodeLaunchAtLogin(),
             mouseWheel: MockTocodeWheel(),
             shortcuts: MockTocodeShortcuts(),
-            codexModels: MockTocodeCodexModels(),
             weChat: MockTocodeWeChat(),
             screenBlackout: ScreenBlackoutService(overlay: MockTocodeScreenBlackout()),
             notify: { _, _ in }
@@ -8058,6 +7665,19 @@ final class ScriptedPhoneHermes: PhoneHermesRuntime {
         await chatHook?()
         return "已收到"
     }
+
+    var modelOptionsValue = PhoneHermesModelOptions(
+        model: "deepseek-flash",
+        provider: "deepseek",
+        providers: [
+            PhoneHermesModelChoice(id: "deepseek", name: "DeepSeek", models: ["deepseek-flash", "deepseek-chat"]),
+            PhoneHermesModelChoice(id: "openai-api", name: "OpenAI API", models: ["gpt-4o-mini"])
+        ]
+    )
+
+    func modelOptions(profile: String) async throws -> PhoneHermesModelOptions {
+        modelOptionsValue
+    }
 }
 
 func testPhoneHermesProfileModel() async {
@@ -8106,6 +7726,89 @@ func testPhoneHermesProfileModel() async {
     )
     expect(status.ok && (status.body["model"] as? String) == "mimo-v2.5", "状态里带上当前档案的模型")
     expect(!(status.body.description.contains("hidden")), "状态正文不带密钥")
+
+    let sameProvider = try! HermesProfileCatalog.applyingModel(
+        model: "deepseek-chat",
+        provider: "deepseek",
+        to: yaml
+    )
+    expect(HermesProfileCatalog.modelName(in: sameProvider) == "deepseek-chat", "写回后模型名更新")
+    expect(HermesProfileCatalog.providerName(in: sameProvider) == "deepseek", "写回后厂家更新")
+    expect(sameProvider.contains("api_key: \"${ANKER_API_KEY}\""), "写回不碰密钥行")
+    expect(sameProvider.contains("base_url:"), "同厂家保留 base_url")
+    let switched = try! HermesProfileCatalog.applyingModel(
+        model: "gpt-4o-mini",
+        provider: "openai-api",
+        to: yaml
+    )
+    expect(HermesProfileCatalog.providerName(in: switched) == "openai-api", "可换厂家")
+    expect(!switched.contains("base_url:"), "换厂家时去掉自定义 base_url")
+    expect(switched.contains("api_key: \"${ANKER_API_KEY}\""), "换厂家仍不碰密钥行")
+    do {
+        try HermesProfileCatalog.setConfiguredModel(
+            userHome: root.path, profile: "liubei", model: "${bad}", provider: "deepseek"
+        )
+        expect(false, "非法模型名应拒绝")
+    } catch PhoneHermesModelConfigError.invalidModel {
+        expect(true, "非法模型名拒绝")
+    } catch {
+        expect(false, "非法模型名应是 invalidModel")
+    }
+    do {
+        try HermesProfileCatalog.setConfiguredModel(
+            userHome: root.path, profile: "liubei", model: "ok-model", provider: "Bad Provider"
+        )
+        expect(false, "非法厂家名应拒绝")
+    } catch PhoneHermesModelConfigError.invalidProvider {
+        expect(true, "非法厂家名拒绝")
+    } catch {
+        expect(false, "非法厂家名应是 invalidProvider")
+    }
+
+    try! HermesProfileCatalog.setConfiguredModel(
+        userHome: root.path,
+        profile: "liubei",
+        model: "deepseek-chat",
+        provider: "deepseek"
+    )
+    expect(
+        HermesProfileCatalog.configuredModel(userHome: root.path, profile: "liubei") == "deepseek-chat",
+        "具名档案写回后可读"
+    )
+    let leaked = try! String(contentsOf: named.appendingPathComponent("config.yaml"), encoding: .utf8)
+    expect(leaked.contains("api_key: \"hidden\""), "磁盘上的密钥行仍在")
+
+    let listed = await PhoneHermesApp.handle(
+        kind: "models", sessionID: "", title: "", text: "", runtime: runtime, home: root.path, catalog: ["default", "liubei"]
+    )
+    expect(listed.ok, "可读模型清单")
+    let providers = listed.body["providers"] as? [[String: Any]] ?? []
+    expect(!providers.isEmpty, "清单含厂家")
+    expect(!(listed.body.description.contains("api_key")), "清单不带密钥")
+    let selected = await PhoneHermesApp.handle(
+        kind: "model_select",
+        sessionID: "",
+        title: "deepseek",
+        text: "deepseek-flash",
+        runtime: runtime,
+        home: root.path,
+        catalog: ["default", "liubei"]
+    )
+    expect(selected.ok && (selected.body["model"] as? String) == "deepseek-flash", "可选中清单里的模型")
+    expect(
+        HermesProfileCatalog.configuredModel(userHome: root.path, profile: "default") == "deepseek-flash",
+        "选中后写回 default 档案"
+    )
+    let rejected = await PhoneHermesApp.handle(
+        kind: "model_select",
+        sessionID: "",
+        title: "deepseek",
+        text: "not-in-list",
+        runtime: runtime,
+        home: root.path,
+        catalog: ["default", "liubei"]
+    )
+    expect(!rejected.ok, "清单外的模型拒绝")
 }
 
 func testPhoneHermesMessageSlices() async {
@@ -8556,6 +8259,64 @@ func testPhoneHermesRunStaysVisible() async {
     expect(!still, "这一轮结束后列表不再标成进行中")
 }
 
+func testPhoneHermesChatRejectsOverlapAndImmediateRepeat() async {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("phone-chat-guard-\(UUID().uuidString)", isDirectory: true)
+    try! fm.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: root) }
+    let database = root.appendingPathComponent("projects.db").path
+    let exists: (String) -> Bool = { path in
+        var isDir: ObjCBool = false
+        return fm.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
+    }
+    let project = try! HermesProfileProjects.create(
+        databasePath: database, name: "防重", folder: root.path, isDirectory: exists
+    )
+    let index = PhoneHermesSessionIndex(fileURL: root.appendingPathComponent("sessions.json"))
+    let activity = PhoneHermesActivity()
+    var clock = Date(timeIntervalSince1970: 1_700_000_000)
+    activity.now = { clock }
+    let runtime = ScriptedPhoneHermes()
+    runtime.installed = true
+    runtime.running = true
+    let created = await PhoneHermesApp.handle(
+        kind: "session_create", sessionID: "", title: "", text: "", runtime: runtime,
+        projectID: project.id, sessionIndex: index, activity: activity, projectsDatabase: { _ in database }, isDirectory: exists
+    )
+    let createdID = (created.body["session"] as? [String: String])?["id"] ?? ""
+    runtime.chatHook = {
+        let overlap = await PhoneHermesApp.handle(
+            kind: "chat", sessionID: createdID, title: "", text: "同一句", runtime: runtime,
+            projectID: project.id, sessionIndex: index, activity: activity, projectsDatabase: { _ in database }, isDirectory: exists
+        )
+        expect(!overlap.ok && overlap.text == "这轮对话还在进行", "进行中的第二次 chat 不再打到 Hermes")
+        expect(runtime.chats.count == 1, "重叠请求不记入 Hermes 调用")
+    }
+    let first = await PhoneHermesApp.handle(
+        kind: "chat", sessionID: createdID, title: "", text: "同一句", runtime: runtime,
+        projectID: project.id, sessionIndex: index, activity: activity, projectsDatabase: { _ in database }, isDirectory: exists
+    )
+    expect(first.ok && runtime.chats.count == 1, "第一轮正常发出")
+    runtime.chatHook = nil
+    let immediate = await PhoneHermesApp.handle(
+        kind: "chat", sessionID: createdID, title: "", text: "同一句", runtime: runtime,
+        projectID: project.id, sessionIndex: index, activity: activity, projectsDatabase: { _ in database }, isDirectory: exists
+    )
+    expect(!immediate.ok && immediate.text == "这轮对话还在进行", "刚结束后相同文字不再开回合")
+    expect(runtime.chats.count == 1, "瞬时重复不记入 Hermes 调用")
+    let other = await PhoneHermesApp.handle(
+        kind: "chat", sessionID: createdID, title: "", text: "另一句", runtime: runtime,
+        projectID: project.id, sessionIndex: index, activity: activity, projectsDatabase: { _ in database }, isDirectory: exists
+    )
+    expect(other.ok && runtime.chats.count == 2, "刚结束后不同文字仍可发")
+    clock = clock.addingTimeInterval(PhoneHermesActivity.duplicateWindow + 0.1)
+    let later = await PhoneHermesApp.handle(
+        kind: "chat", sessionID: createdID, title: "", text: "同一句", runtime: runtime,
+        projectID: project.id, sessionIndex: index, activity: activity, projectsDatabase: { _ in database }, isDirectory: exists
+    )
+    expect(later.ok && runtime.chats.count == 3, "窗口过后相同文字可以再发")
+}
+
 func testPhoneProjectAttachments() {
     let fm = FileManager.default
     let root = fm.temporaryDirectory.appendingPathComponent("phone-attach-\(UUID().uuidString)", isDirectory: true)
@@ -8939,7 +8700,6 @@ func testPhoneHermesAppChannel() async {
             launchAtLogin: MockTocodeLaunchAtLogin(),
             mouseWheel: MockTocodeWheel(),
             shortcuts: MockTocodeShortcuts(),
-            codexModels: MockTocodeCodexModels(),
             weChat: MockTocodeWeChat(),
             screenBlackout: ScreenBlackoutService(overlay: MockTocodeScreenBlackout()),
             notify: { _, _ in }
@@ -8986,7 +8746,6 @@ func testWeChatCommandConsumption() async {
             launchAtLogin: MockTocodeLaunchAtLogin(),
             mouseWheel: MockTocodeWheel(),
             shortcuts: MockTocodeShortcuts(),
-            codexModels: MockTocodeCodexModels(),
             weChat: MockTocodeWeChat(),
             screenBlackout: ScreenBlackoutService(overlay: blackout),
             notify: { _, _ in }
@@ -9018,7 +8777,6 @@ func testWeChatCommandConsumption() async {
         launchAtLogin: MockTocodeLaunchAtLogin(),
         mouseWheel: MockTocodeWheel(),
         shortcuts: MockTocodeShortcuts(),
-        codexModels: MockTocodeCodexModels(),
         weChat: mockWeChat,
         screenBlackout: ScreenBlackoutService(overlay: MockTocodeScreenBlackout()),
         notify: { _, _ in }
@@ -9178,7 +8936,6 @@ func testWeChatCLISend() async {
         launchAtLogin: MockTocodeLaunchAtLogin(),
         mouseWheel: MockTocodeWheel(),
         shortcuts: MockTocodeShortcuts(),
-        codexModels: MockTocodeCodexModels(),
         weChat: mockWeChat,
         screenBlackout: ScreenBlackoutService(overlay: MockTocodeScreenBlackout()),
         notify: { _, _ in }
@@ -9451,7 +9208,7 @@ struct TestRunnerMain {
         await testModelRelayUpstreamProxy()
         await testModelRelayHTTPServerRuntime()
         await testModelRelayPortRollback()
-        testModelRelayManualAndLegacyAKContract()
+        testModelRelayManualWithoutAK()
         testModelRelayCallMetricsStore()
         await testModelRelayProxyRecordsOneCallEvenOnUpstreamRetryExhaustion()
         testAnkerCredentialPromptCopyHasNoAnkerWord()
@@ -9461,16 +9218,12 @@ struct TestRunnerMain {
         testDirectoryMenuMultiCopy()
         testCodexProjectService()
         testCodexSyncSettingsStore()
-        testCodexModelTOMLAndCatalog()
-        testCodexModelSwitchIntegrationAndFaults()
         testAnkerCredentialSynchronization()
         testAnkerCredentialFailures()
         testAnkerConfigurationGuards()
-        testCodexApplicationRestarter()
         testFinderVisibilityService()
         testFinderSelectionService()
         testShortcutSettingsStoreDefaults()
-        testExtendedSettingsStore()
         testTrackpadShortcutStoreAndRecognizer()
         await testTrackpadShortcutServiceLifecycleAndFaults()
         await testTrackpadShortcutActionBindingsAndDispatch()
@@ -9520,6 +9273,7 @@ struct TestRunnerMain {
         await testPhoneHermesChatGate()
         await testPhoneHermesSessionDraftRenameAndDelete()
         await testPhoneHermesRunStaysVisible()
+        await testPhoneHermesChatRejectsOverlapAndImmediateRepeat()
         testPhoneProjectAttachments()
         testPhoneAttachmentHolds()
         testPhoneHermesFilePreview()

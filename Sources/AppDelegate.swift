@@ -63,7 +63,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let executor = TocodeCommandExecutor(
             mouseWheel: wheel,
             shortcuts: service,
-            codexModels: CodexModelSwitchService(),
             weChat: UnboundWeChat(),
             screenBlackout: blackout
         )

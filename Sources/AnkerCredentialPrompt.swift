@@ -2,7 +2,7 @@ import AppKit
 
 @MainActor
 enum AnkerCredentialPrompt {
-    static let menuTitle = ExtendedSettingsStore.akCredentialTitle
+    static let menuTitle = "AI"
 
     static func prompt() -> String? {
         let alert = NSAlert()

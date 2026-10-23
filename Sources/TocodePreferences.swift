@@ -23,7 +23,6 @@ enum TocodePreferences {
                 ModelAutomationStore.defaultsKey,
                 DockAutohideRestrictStore.enabledKey,
                 DockAutohideRestrictStore.backupDelayKey,
-                ExtendedSettingsStore.akEnabledKey,
                 CodexSyncSettingsStore.syncEnabledKey,
                 FinderFollowSettingsStore.followEnabledKey
             ]

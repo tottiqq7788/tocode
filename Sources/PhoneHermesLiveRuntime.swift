@@ -201,6 +201,17 @@ final class PhoneHermesLiveRuntime: PhoneHermesRuntime {
         return content.isEmpty ? "没有回复" : content
     }
 
+    func modelOptions(profile: String) async throws -> PhoneHermesModelOptions {
+        let json = try await request(
+            method: "GET",
+            path: "/api/model/options?include_unconfigured=false",
+            body: nil,
+            timeout: 20,
+            profile: profile
+        )
+        return PhoneHermesModelOptions.parse(json)
+    }
+
     private func health(port: Int) async -> Bool {
         guard let url = URL(string: "http://127.0.0.1:\(port)/health") else { return false }
         var request = URLRequest(url: url)
