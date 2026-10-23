@@ -82,6 +82,7 @@ enum TocodeBookmarkCommand: Equatable {
     case delete(String)
     case pull
     case log(Int)
+    case folders
     case backup(TocodeBookmarkBackupCommand)
 }
 
@@ -208,9 +209,18 @@ enum TocodeCommandParser {
         bookmark delete --url <url>         删除并写墓碑
         bookmark pull                       用本机远程同步密钥拉取并合并最新账本
         bookmark log [行数]                 打印最近同步活动日志（默认 80 行）
+        bookmark folders [--json]           只读导出夹树 JSON（含顺序与是否空）
         bookmark backup status|list|now     七日备份状态 / 列表 / 立即日备
         bookmark backup restore [--day YYYY-MM-DD]
                                             从指定日（默认最近）整本还原正式账本
+
+      书签 --folder
+        toolbar|other|mobile|书签栏|其他书签|移动设备书签
+                                            三个根（可单独）
+        toolbar/<路径>  other/<路径>  mobile/<路径>
+        书签栏/<路径>  其他书签/<路径> …
+                                            根下具名夹（不存在则对账时创建）
+        named:<路径> 或 <路径>              具名（named）；非法根写法会报错
 
       其他
         blackout（别名 .lshp）                工具 → 临时黑屏
@@ -409,6 +419,14 @@ enum TocodeCommandParser {
                 return .failure(.invalidArguments("bookmark log [行数]"))
             }
             return .success(.bookmark(.log(min(lines, 2000))))
+        case "folders":
+            if tokens.count == 1 {
+                return .success(.bookmark(.folders))
+            }
+            guard tokens.count == 2, tokens[1] == "--json" || tokens[1] == "-json" else {
+                return .failure(.invalidArguments("bookmark folders [--json]"))
+            }
+            return .success(.bookmark(.folders))
         case "backup":
             return parseBookmarkBackup(Array(tokens.dropFirst()))
         default:

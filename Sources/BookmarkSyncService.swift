@@ -395,6 +395,10 @@ final class BookmarkSyncService {
         backupService.listPayload()
     }
 
+    func foldersTreePayload() -> [[String: Any]] {
+        BookmarkCLIFolderTree.build(from: ledger)
+    }
+
     func backupNowForCLI() async -> Result<BookmarkBackupPack, Error> {
         do {
             let pack = try await backupService.runDailyBackup(force: true) { [weak self] in

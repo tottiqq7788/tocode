@@ -270,9 +270,112 @@ func testBookmarkCLIParser() {
             == .success(.bookmark(.backup(.restore(day: "2026-10-20")))),
         "bookmark backup restore --day"
     )
+    expect(TocodeCommandParser.parse("bookmark folders") == .success(.bookmark(.folders)), "bookmark folders")
+    expect(TocodeCommandParser.parse("bookmark folders --json") == .success(.bookmark(.folders)), "bookmark folders --json")
     expect(TocodeCommandParser.helpText.contains("bookmark backup"), "help 含 backup")
+    expect(TocodeCommandParser.helpText.contains("bookmark folders"), "help 含 folders")
     expect(TocodeCommandParser.helpText.contains("bookmark list"), "help 含 bookmark")
     expect(TocodeCommandParser.parse("bookmark add").isFailure, "bookmark add 缺 url 失败")
+}
+
+func testBookmarkCLIFolderRootedPaths() {
+    switch BookmarkCLIFolder.parse("toolbar") {
+    case .success(let path):
+        expect(path?.kind == .toolbar && path?.segments.isEmpty == true, "toolbar 根")
+    case .failure:
+        expect(false, "toolbar 根")
+    }
+    switch BookmarkCLIFolder.parse("toolbar/工作/a") {
+    case .success(let path):
+        expect(path?.kind == .toolbar && path?.segments == ["工作", "a"], "toolbar 前缀路径")
+    case .failure:
+        expect(false, "toolbar 前缀路径")
+    }
+    switch BookmarkCLIFolder.parse("书签栏/工作") {
+    case .success(let path):
+        expect(path?.kind == .toolbar && path?.segments == ["工作"], "书签栏中文前缀")
+    case .failure:
+        expect(false, "书签栏中文前缀")
+    }
+    switch BookmarkCLIFolder.parse("other/归档/旧") {
+    case .success(let path):
+        expect(path?.kind == .other && path?.segments == ["归档", "旧"], "other 前缀路径")
+    case .failure:
+        expect(false, "other 前缀路径")
+    }
+    switch BookmarkCLIFolder.parse("named:toolbar/假") {
+    case .success(let path):
+        expect(path?.kind == .named && path?.segments == ["toolbar", "假"], "显式 named 保留")
+    case .failure:
+        expect(false, "显式 named 保留")
+    }
+    switch BookmarkCLIFolder.parse("工作/项目") {
+    case .success(let path):
+        expect(path?.kind == .named && path?.segments == ["工作", "项目"], "无前缀仍为 named")
+    case .failure:
+        expect(false, "无前缀仍为 named")
+    }
+    switch BookmarkCLIFolder.parse("toolbar/") {
+    case .failure:
+        expect(true, "toolbar/ 无段报错")
+    case .success:
+        expect(false, "toolbar/ 无段报错")
+    }
+}
+
+func testBookmarkCLIFolderTreeBuild() {
+    let folder = BookmarkFolderPath(kind: .toolbar, segments: ["工作"])
+    var ledger = BookmarkLedgerSnapshot.empty
+    ledger.folders = [
+        BookmarkFolderRecord(path: folder, siblingIndex: 2, updatedAt: 1)
+    ]
+    ledger.entries = [
+        BookmarkEntry(url: "https://a.com", title: "A", folder: folder, siblingIndex: 0, updatedAt: 1),
+        BookmarkEntry(
+            url: "https://b.com",
+            title: "B",
+            folder: BookmarkFolderPath(kind: .toolbar, segments: ["工作", "子"]),
+            siblingIndex: 0,
+            updatedAt: 1
+        )
+    ]
+    let tree = BookmarkCLIFolderTree.build(from: ledger)
+    expect(!tree.isEmpty, "folders 树非空")
+    let work = tree.first {
+        ($0["kind"] as? String) == "toolbar" && ($0["segments"] as? [String]) == ["工作"]
+    }
+    expect(work != nil, "含工作夹")
+    expect(work?["childBookmarkCount"] as? Int == 1, "工作夹下 1 书签")
+    expect(work?["siblingIndex"] as? Int == 2, "保留 siblingIndex")
+    let child = tree.first {
+        ($0["kind"] as? String) == "toolbar" && ($0["segments"] as? [String]) == ["工作", "子"]
+    }
+    expect(child != nil, "由条目推导子夹")
+}
+
+@MainActor
+func testBookmarkFoldersCLICommand() {
+    let bookmarks = MockBookmarkSync()
+    bookmarks.ledger.folders = [
+        BookmarkFolderRecord(
+            path: BookmarkFolderPath(kind: .other, segments: ["工具"]),
+            siblingIndex: 0,
+            updatedAt: 1
+        )
+    ]
+    let executor = TocodeCommandExecutor(
+        mouseWheel: MockTocodeWheel(),
+        shortcuts: MockTocodeShortcuts(),
+        weChat: MockTocodeWeChat(),
+        bookmarkSync: bookmarks,
+        notify: { _, _ in }
+    )
+    if case .success(let out) = executor.execute("bookmark folders --json") {
+        expect(out.text.contains("工具"), "folders 输出含夹名")
+        expect(out.text.contains("childBookmarkCount"), "folders 含计数字段")
+    } else {
+        expect(false, "folders 命令成功")
+    }
 }
 
 @MainActor

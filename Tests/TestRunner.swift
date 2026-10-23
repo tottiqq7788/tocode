@@ -9309,6 +9309,9 @@ struct TestRunnerMain {
         testBookmarkBackupPackUpsertPruneAndRestoreReplace()
         testBookmarkBackupRoomIsolatedFromFormal()
         await testBookmarkBackupCLIRestore()
+        testBookmarkCLIFolderRootedPaths()
+        testBookmarkCLIFolderTreeBuild()
+        testBookmarkFoldersCLICommand()
 
         if failures == 0 {
             print("\nALL TESTS PASSED")

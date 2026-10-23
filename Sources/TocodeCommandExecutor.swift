@@ -339,6 +339,8 @@ final class TocodeCommandExecutor {
                 return .failure(.operationFailed("bookmark pull 需要通过 CLI 异步执行"))
             case .log(let lines):
                 return .success(TocodeCommandOutput(sync.activityLog.dumpText(maxLines: lines)))
+            case .folders:
+                return BookmarkCLIJSON.encode(sync.foldersTreePayload()).map(TocodeCommandOutput.init)
             case .backup(.status):
                 return BookmarkCLIJSON.encode(sync.backupStatusPayload()).map(TocodeCommandOutput.init)
             case .backup(.list):

@@ -270,6 +270,10 @@ final class MockBookmarkSync: BookmarkSyncCommanding {
         ledger = restored
         return .success(ledger)
     }
+
+    func foldersTreePayload() -> [[String: Any]] {
+        BookmarkCLIFolderTree.build(from: ledger)
+    }
 }
 
 final class MockBookmarkKeyStore: BookmarkSyncKeyStoring {
