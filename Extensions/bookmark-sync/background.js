@@ -5,6 +5,7 @@ let port = null;
 let applyingBatch = null;
 let browserName = detectBrowser();
 let profileName = "Default";
+let treePushed = false;
 
 function detectBrowser() {
   const ua = (typeof navigator !== "undefined" && navigator.userAgent) || "";
@@ -31,6 +32,7 @@ function connect() {
     port = null;
     setTimeout(connect, 3000);
   });
+  treePushed = false;
   port.postMessage({
     type: "hello",
     browser: browserName,
@@ -179,7 +181,13 @@ chrome.bookmarks.onRemoved.addListener((_id, removeInfo) => {
 
 async function onHostMessage(message) {
   if (!message || !message.type) return;
+  if (message.type === "tree_ok") {
+    treePushed = true;
+    return;
+  }
   if (message.type === "ledger") {
+    // 先上报本机树再接受删除，避免后加入浏览器被旧账本清掉独有书签。
+    if (!treePushed) return;
     applyingBatch = message.batch || "batch";
     try {
       await applyLedger(message.entries || []);

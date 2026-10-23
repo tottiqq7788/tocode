@@ -58,7 +58,7 @@ final class StatusItemController: NSObject {
         mouseWheel: MouseWheelReverseService,
         dockAutohideRestrict: DockAutohideRestrictService = DockAutohideRestrictService(),
         macTimers: MacTimerControlling = MacTimerService(),
-        bookmarkSync: BookmarkSyncService = BookmarkSyncService(),
+        bookmarkSync: BookmarkSyncService,
         shortcutPoster: TrackpadShortcutEventPosting = SystemTrackpadShortcutEventPoster(),
         launchAtLogin: LaunchAtLoginControlling = LaunchAtLoginService(),
         weChat: WeChatAssociationControlling,

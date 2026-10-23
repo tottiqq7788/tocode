@@ -167,6 +167,7 @@ final class BookmarkNativeBridge {
                 let nodes = (object["nodes"] as? [[String: Any]]) ?? []
                 try service.ingestBrowserTree(browserKey: key, nodes: nodes)
                 send(["type": "tree_ok"], to: bridge)
+                // tree_ok 之后扩展才接受删除；立刻下发合并后的账本。
                 broadcastLedger()
             case "created":
                 guard let key = bridge.browserKey,

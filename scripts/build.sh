@@ -55,7 +55,7 @@ swiftc -O "${CLI_SOURCES[@]}" \
   -o build/tocode \
   "${FRAMEWORKS[@]}"
 
-swiftc -O Sources/BookmarkNativeHostMain.swift \
+swiftc -O -parse-as-library Sources/BookmarkNativeHostMain.swift \
   -o "$APP/Contents/MacOS/tocode-bookmark-host" \
   "${FRAMEWORKS[@]}"
 cp "$APP/Contents/MacOS/tocode-bookmark-host" build/tocode-bookmark-host
