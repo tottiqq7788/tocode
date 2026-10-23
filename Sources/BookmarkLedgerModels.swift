@@ -84,11 +84,20 @@ struct BookmarkTombstone: Codable, Equatable {
     var deletedAt: Double
 }
 
+/// 已删除夹的墓碑：防止浏览器并集 / 远程合并把空夹复活。
+struct BookmarkFolderTombstone: Codable, Equatable {
+    var path: BookmarkFolderPath
+    var deletedAt: Double
+
+    var pathKey: String { path.sortKey }
+}
+
 struct BookmarkLedgerSnapshot: Codable, Equatable {
     var version: Int
     var entries: [BookmarkEntry]
     var folders: [BookmarkFolderRecord]
     var tombstones: [BookmarkTombstone]
+    var folderTombstones: [BookmarkFolderTombstone]
     var remoteRevision: Int
     var joinedBrowserKeys: [String]
 
@@ -97,12 +106,13 @@ struct BookmarkLedgerSnapshot: Codable, Equatable {
         entries: [],
         folders: [],
         tombstones: [],
+        folderTombstones: [],
         remoteRevision: 0,
         joinedBrowserKeys: []
     )
 
     enum CodingKeys: String, CodingKey {
-        case version, entries, folders, tombstones, remoteRevision, joinedBrowserKeys
+        case version, entries, folders, tombstones, folderTombstones, remoteRevision, joinedBrowserKeys
     }
 
     init(
@@ -110,6 +120,7 @@ struct BookmarkLedgerSnapshot: Codable, Equatable {
         entries: [BookmarkEntry],
         folders: [BookmarkFolderRecord] = [],
         tombstones: [BookmarkTombstone],
+        folderTombstones: [BookmarkFolderTombstone] = [],
         remoteRevision: Int,
         joinedBrowserKeys: [String]
     ) {
@@ -117,6 +128,7 @@ struct BookmarkLedgerSnapshot: Codable, Equatable {
         self.entries = entries
         self.folders = folders
         self.tombstones = tombstones
+        self.folderTombstones = folderTombstones
         self.remoteRevision = remoteRevision
         self.joinedBrowserKeys = joinedBrowserKeys
     }
@@ -127,6 +139,7 @@ struct BookmarkLedgerSnapshot: Codable, Equatable {
         entries = try container.decode([BookmarkEntry].self, forKey: .entries)
         folders = try container.decodeIfPresent([BookmarkFolderRecord].self, forKey: .folders) ?? []
         tombstones = try container.decode([BookmarkTombstone].self, forKey: .tombstones)
+        folderTombstones = try container.decodeIfPresent([BookmarkFolderTombstone].self, forKey: .folderTombstones) ?? []
         remoteRevision = try container.decode(Int.self, forKey: .remoteRevision)
         joinedBrowserKeys = try container.decode([String].self, forKey: .joinedBrowserKeys)
     }

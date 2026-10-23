@@ -10,6 +10,8 @@ final class BookmarkBridgeConnection {
     var knownLayout: [String: String] = [:]
     /// pathKey → siblingIndex 字符串；缺失或与账本不符则再 ensure_folder。
     var knownFolderLayout: [String: String] = [:]
+    /// 已确认浏览器侧删除的夹 pathKey（含本来就不存在）。
+    var confirmedFolderRemovals: Set<String> = []
     /// 每个 tree 周期在收到清理回执后才标完成。
     var didPurgeEmptyTitleFolders = false
     var purgeEmptyAttempts = 0

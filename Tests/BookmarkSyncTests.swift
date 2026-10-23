@@ -937,3 +937,212 @@ func testBookmarkBackupCLIRestore() async {
         expect(false, "CLI restore 成功")
     }
 }
+
+func testBookmarkFolderCreateKeepsEmpty() {
+    var ledger = BookmarkLedgerSnapshot.empty
+    let path = BookmarkFolderPath(kind: .toolbar, segments: ["AI"])
+    ledger = BookmarkLedgerMerge.upsertFolderAncestors(path, siblingIndex: 0, updatedAt: 1, in: ledger)
+    expect(ledger.folders.contains { $0.pathKey == path.sortKey }, "create 写入空夹记录")
+    expect(!BookmarkLedgerMerge.hasBookmarks(under: path, in: ledger), "空夹无书签")
+    let tree = BookmarkCLIFolderTree.build(from: ledger)
+    expect(tree.contains { ($0["kind"] as? String) == "toolbar" && ($0["segments"] as? [String]) == ["AI"] }, "folders 可见空夹")
+}
+
+func testBookmarkFolderDeleteTombstoneBlocksUnion() {
+    var ledger = BookmarkLedgerSnapshot.empty
+    let path = BookmarkFolderPath(kind: .toolbar, segments: ["旧壳"])
+    ledger = BookmarkLedgerMerge.upsertFolderAncestors(path, siblingIndex: 1, updatedAt: 1, in: ledger)
+    do {
+        ledger = try BookmarkLedgerMerge.deleteFolder(path, recursive: false, now: 2, in: ledger)
+    } catch {
+        expect(false, "删空夹应成功: \(error)")
+        return
+    }
+    expect(!ledger.folders.contains { $0.pathKey == path.sortKey }, "删后无夹记录")
+    expect(ledger.folderTombstones.contains { $0.pathKey == path.sortKey }, "写入夹墓碑")
+    let revived = BookmarkLedgerMerge.unionMerge(
+        ledger: ledger,
+        incoming: [],
+        incomingFolders: [BookmarkFolderRecord(path: path, siblingIndex: 0, updatedAt: 9)],
+        browserKey: "chrome"
+    )
+    expect(!revived.folders.contains { $0.pathKey == path.sortKey }, "并集不得复活墓碑夹")
+}
+
+func testBookmarkFolderDeleteRejectsNonEmpty() {
+    var ledger = BookmarkLedgerSnapshot.empty
+    let path = BookmarkFolderPath(kind: .toolbar, segments: ["工作"])
+    ledger = BookmarkLedgerMerge.unionMerge(
+        ledger: ledger,
+        incoming: [
+            BookmarkEntry(
+                url: "https://work.example",
+                title: "W",
+                folder: path,
+                siblingIndex: 0,
+                updatedAt: 1
+            )
+        ],
+        browserKey: "cli"
+    )
+    ledger = BookmarkLedgerMerge.upsertFolderAncestors(path, siblingIndex: 0, updatedAt: 1, in: ledger)
+    do {
+        _ = try BookmarkLedgerMerge.deleteFolder(path, recursive: false, in: ledger)
+        expect(false, "有书签时应拒绝删夹")
+    } catch {
+        expect(true, "有书签时应拒绝删夹")
+    }
+}
+
+func testBookmarkFolderPruneEmptyAndReorder() {
+    var ledger = BookmarkLedgerSnapshot.empty
+    let keep = BookmarkFolderPath(kind: .toolbar, segments: ["其它"])
+    let shell = BookmarkFolderPath(kind: .toolbar, segments: ["anker"])
+    ledger = BookmarkLedgerMerge.upsertFolderAncestors(keep, siblingIndex: 5, updatedAt: 1, in: ledger)
+    ledger = BookmarkLedgerMerge.upsertFolderAncestors(shell, siblingIndex: 0, updatedAt: 1, in: ledger)
+    ledger = BookmarkLedgerMerge.unionMerge(
+        ledger: ledger,
+        incoming: [
+            BookmarkEntry(
+                url: "https://keep.example",
+                title: "K",
+                folder: keep,
+                siblingIndex: 0,
+                updatedAt: 1
+            )
+        ],
+        browserKey: "cli"
+    )
+    do {
+        let pruned = try BookmarkLedgerMerge.pruneEmptyFolders(
+            under: BookmarkFolderPath(kind: .toolbar, segments: []),
+            now: 3,
+            in: ledger
+        )
+        ledger = pruned.ledger
+        expect(pruned.removed.contains { $0.sortKey == shell.sortKey }, "剪掉空壳 anker")
+        expect(ledger.folders.contains { $0.pathKey == keep.sortKey }, "保留有书签的其它")
+        ledger = try BookmarkLedgerMerge.moveFolder(
+            from: keep,
+            to: nil,
+            siblingIndex: 0,
+            now: 4,
+            in: ledger
+        )
+        let idx = ledger.folders.first { $0.pathKey == keep.sortKey }?.siblingIndex
+        expect(idx == 0, "move --index 排到最左")
+    } catch {
+        expect(false, "prune/move 不应失败: \(error)")
+    }
+}
+
+func testBookmarkAddUpsertsFolderRecord() {
+    var ledger = BookmarkLedgerSnapshot.empty
+    let path = BookmarkFolderPath(kind: .toolbar, segments: ["开发", "链动"])
+    ledger = BookmarkLedgerMerge.unionMerge(
+        ledger: ledger,
+        incoming: [
+            BookmarkEntry(
+                url: "https://dev.example",
+                title: "D",
+                folder: path,
+                siblingIndex: 0,
+                updatedAt: 1
+            )
+        ],
+        browserKey: "cli"
+    )
+    ledger = BookmarkLedgerMerge.upsertFolderAncestors(path, siblingIndex: nil, updatedAt: 1, in: ledger)
+    expect(ledger.folders.contains { $0.path.segments == ["开发"] }, "祖先夹已写入")
+    expect(ledger.folders.contains { $0.pathKey == path.sortKey }, "叶子夹已写入")
+}
+
+@MainActor
+func testBookmarkFolderCLICommands() {
+    let bookmarks = MockBookmarkSync()
+    let executor = TocodeCommandExecutor(
+        mouseWheel: MockTocodeWheel(),
+        shortcuts: MockTocodeShortcuts(),
+        weChat: MockTocodeWeChat(),
+        bookmarkSync: bookmarks,
+        notify: { _, _ in }
+    )
+    expect(
+        TocodeCommandParser.parse("bookmark folder create toolbar/AI --index 0")
+            == .success(.bookmark(.folder(.create(path: "toolbar/AI", index: 0)))),
+        "folder create 解析"
+    )
+    if case .success = executor.execute("bookmark folder create toolbar/AI --index 0") {
+        expect(bookmarks.ledger.folders.contains { $0.path.segments == ["AI"] }, "CLI create 落账本")
+    } else {
+        expect(false, "CLI folder create")
+    }
+    if case .success = executor.execute("bookmark folder create toolbar/旧壳") {
+        expect(true, "CLI create 旧壳")
+    } else {
+        expect(false, "CLI create 旧壳")
+    }
+    if case .success(let out) = executor.execute("bookmark folder prune-empty --under toolbar") {
+        expect(out.text.contains("removedCount"), "prune 返回计数")
+        expect(bookmarks.ledger.folderTombstones.count >= 1, "prune 写墓碑")
+    } else {
+        expect(false, "CLI prune-empty")
+    }
+}
+
+@MainActor
+func testBookmarkApplyDryRunAndWrite() {
+    let bookmarks = MockBookmarkSync()
+    _ = try? bookmarks.addCLI(
+        url: "https://a.example",
+        title: "A",
+        folder: BookmarkFolderPath(kind: .toolbar, segments: ["其它"]),
+        siblingIndex: 0
+    )
+    let planURL = FileManager.default.temporaryDirectory.appendingPathComponent("tocode-apply-plan.json")
+    let plan: [[String: Any]] = [
+        [
+            "op": "update",
+            "url": "https://a.example",
+            "folder": "toolbar/AI",
+            "index": 0
+        ],
+        [
+            "op": "add",
+            "url": "https://b.example",
+            "title": "B",
+            "folder": "toolbar/AI"
+        ]
+    ]
+    let data = try! JSONSerialization.data(withJSONObject: plan)
+    try! data.write(to: planURL)
+
+    let executor = TocodeCommandExecutor(
+        mouseWheel: MockTocodeWheel(),
+        shortcuts: MockTocodeShortcuts(),
+        weChat: MockTocodeWeChat(),
+        bookmarkSync: bookmarks,
+        notify: { _, _ in }
+    )
+    expect(
+        TocodeCommandParser.parse("bookmark apply --file \(planURL.path) --dry-run").isSuccess,
+        "apply 解析"
+    )
+    if case .success(let dry) = executor.execute("bookmark apply --file \(planURL.path) --dry-run") {
+        expect(dry.text.contains("dryRun"), "dry-run 标记")
+        expect(bookmarks.ledger.entries.count == 1, "dry-run 不改账本条数")
+        expect(bookmarks.ledger.entries.first?.folder.segments == ["其它"], "dry-run 不改文件夹")
+    } else {
+        expect(false, "apply dry-run")
+    }
+    if case .success(let written) = executor.execute("bookmark apply --file \(planURL.path)") {
+        expect(written.text.contains("\"ok\""), "apply 写回 ok")
+        expect(bookmarks.ledger.entries.count == 2, "apply 写入第二条")
+        expect(
+            bookmarks.ledger.entries.contains { $0.url == "https://a.example" && $0.folder.segments == ["AI"] },
+            "apply 搬到 AI"
+        )
+    } else {
+        expect(false, "apply 写回")
+    }
+}

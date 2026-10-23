@@ -348,6 +348,43 @@ async function onHostMessage(message) {
     }
     return;
   }
+  if (message.type === "remove_folder") {
+    if (!treePushed) {
+      send({
+        type: "apply_error",
+        op: "remove_folder_skipped",
+        batch: message.batch || null,
+        url: "",
+        message: "tree_not_ready"
+      });
+      return;
+    }
+    applyingBatch = message.batch || "remove_folder";
+    try {
+      const result = await removeFolder(message.folder, !!message.recursive);
+      send({
+        type: "apply_result",
+        op: "folder_removed",
+        batch: message.batch || null,
+        url: "",
+        folder: message.folder || null,
+        removed: result.removed,
+        missing: !!result.missing
+      });
+    } catch (error) {
+      send({
+        type: "apply_error",
+        op: "remove_folder",
+        batch: message.batch || null,
+        url: "",
+        folder: message.folder || null,
+        message: String(error)
+      });
+    } finally {
+      applyingBatch = null;
+    }
+    return;
+  }
   if (message.type === "upsert") {
     if (!treePushed) {
       send({
@@ -549,12 +586,8 @@ function canonicalize(raw) {
   }
 }
 
-async function ensureFolder(folder, siblingIndex) {
-  const tree = await chrome.bookmarks.getTree();
-  const root = tree[0];
-  const children = (root.children || []).filter((c) => !c.url);
+function resolveRootBase(children, kind) {
   let base = children[0];
-  const kind = (folder && folder.kind) || "other";
   if (kind === "toolbar") {
     base = children.find((c) => isToolbarTitle(c.title)) || children[0];
   } else if (kind === "mobile") {
@@ -564,11 +597,19 @@ async function ensureFolder(folder, siblingIndex) {
       children[1] ||
       children[0];
   } else if (kind === "named") {
-    // named 的第一段通常是顶层自定义夹；先落在「其他书签」下再逐段创建。
     base = children.find((c) => isOtherTitle(c.title)) || children[1] || children[0];
   } else {
     base = children.find((c) => isOtherTitle(c.title)) || children[1] || children[0];
   }
+  return base;
+}
+
+async function ensureFolder(folder, siblingIndex) {
+  const tree = await chrome.bookmarks.getTree();
+  const root = tree[0];
+  const children = (root.children || []).filter((c) => !c.url);
+  const kind = (folder && folder.kind) || "other";
+  const base = resolveRootBase(children, kind);
   if (!base) {
     throw new Error("bookmarks root has no folder children");
   }
@@ -597,6 +638,61 @@ async function ensureFolder(folder, siblingIndex) {
     parentId = next.id;
   }
   return parentId;
+}
+
+/// 按账本路径定位夹；不存在返回 null。
+async function findFolderNode(folder) {
+  const tree = await chrome.bookmarks.getTree();
+  const root = tree[0];
+  const children = (root.children || []).filter((c) => !c.url);
+  const kind = (folder && folder.kind) || "other";
+  const base = resolveRootBase(children, kind);
+  if (!base) return null;
+  let parentId = base.id;
+  const segments = (folder && folder.segments) || [];
+  if (!segments.length) return null;
+  let node = null;
+  for (let i = 0; i < segments.length; i += 1) {
+    const segment = segments[i];
+    if (!segment) continue;
+    const nodes = await chrome.bookmarks.getChildren(parentId);
+    node = nodes.find((n) => !n.url && n.title === segment) || null;
+    if (!node) return null;
+    parentId = node.id;
+  }
+  return node;
+}
+
+function nodeHasBookmarkDescendant(node) {
+  if (!node) return false;
+  if (node.url) return true;
+  for (const child of node.children || []) {
+    if (nodeHasBookmarkDescendant(child)) return true;
+  }
+  return false;
+}
+
+/// 删除空夹。recursive：删整棵空夹树；夹下有书签则抛错。
+async function removeFolder(folder, recursive) {
+  const node = await findFolderNode(folder);
+  if (!node) {
+    return { removed: 0, missing: true };
+  }
+  // 需要 children 才能判断是否空
+  const detailed = (await chrome.bookmarks.getSubTree(node.id))[0];
+  if (nodeHasBookmarkDescendant(detailed)) {
+    throw new Error("folder_not_empty");
+  }
+  if (!recursive) {
+    const kids = (detailed.children || []).filter((c) => !c.url);
+    if (kids.length > 0) {
+      throw new Error("folder_has_child_folders");
+    }
+    await chrome.bookmarks.remove(node.id);
+    return { removed: 1, missing: false };
+  }
+  await chrome.bookmarks.removeTree(node.id);
+  return { removed: 1, missing: false };
 }
 
 /// 删除 toolbar/other/mobile 下会打乱 siblingIndex 的占位：空标题夹与分隔线（不同步）。

@@ -122,6 +122,12 @@ final class BookmarkSyncService {
             updatedAt: updatedAt
         )
         ledger = BookmarkLedgerMerge.unionMerge(ledger: ledger, incoming: [entry], browserKey: browserKey)
+        ledger = BookmarkLedgerMerge.upsertFolderAncestors(
+            folder,
+            siblingIndex: nil,
+            updatedAt: updatedAt,
+            in: ledger
+        )
         try persist(notifyBrowsers: false)
         activityLog.append("新增：\(Self.shortURL(url))（\(browserKey)，\(title)）")
         if let saved = self.entry(url: url) {
@@ -278,6 +284,7 @@ final class BookmarkSyncService {
                 entries: ledger.entries,
                 folders: ledger.folders,
                 tombstones: ledger.tombstones.filter { $0.url != canonical },
+                folderTombstones: ledger.folderTombstones,
                 remoteRevision: ledger.remoteRevision,
                 joinedBrowserKeys: ledger.joinedBrowserKeys
             )
@@ -397,6 +404,179 @@ final class BookmarkSyncService {
 
     func foldersTreePayload() -> [[String: Any]] {
         BookmarkCLIFolderTree.build(from: ledger)
+    }
+
+    func folderTombstonesForBrowser() -> [BookmarkFolderTombstone] {
+        ledger.folderTombstones
+    }
+
+    @discardableResult
+    func createFolderCLI(path: BookmarkFolderPath, siblingIndex: Int?) throws -> BookmarkFolderRecord {
+        if BookmarkLedgerMerge.isRootFolderPath(path) {
+            throw TocodeCommandError.invalidArguments("不可对书签根执行 folder create（请带路径段）")
+        }
+        let now = Date().timeIntervalSince1970
+        ledger = BookmarkLedgerMerge.upsertFolderAncestors(
+            path,
+            siblingIndex: siblingIndex,
+            updatedAt: now,
+            in: ledger
+        )
+        try persist()
+        activityLog.append("CLI 建夹：\(path.sortKey)")
+        scheduleRemotePush()
+        guard let saved = ledger.folders.first(where: { $0.pathKey == path.sortKey }) else {
+            throw TocodeCommandError.operationFailed("建夹后无法读取")
+        }
+        return saved
+    }
+
+    @discardableResult
+    func deleteFolderCLI(path: BookmarkFolderPath, recursive: Bool) throws -> BookmarkLedgerSnapshot {
+        let now = Date().timeIntervalSince1970
+        ledger = try BookmarkLedgerMerge.deleteFolder(path, recursive: recursive, now: now, in: ledger)
+        try persist()
+        activityLog.append("CLI 删夹：\(path.sortKey)\(recursive ? "（递归）" : "")")
+        scheduleRemotePush()
+        return ledger
+    }
+
+    func pruneEmptyFoldersCLI(under: BookmarkFolderPath?) throws -> [BookmarkFolderPath] {
+        let now = Date().timeIntervalSince1970
+        let result = try BookmarkLedgerMerge.pruneEmptyFolders(under: under, now: now, in: ledger)
+        ledger = result.ledger
+        try persist()
+        activityLog.append("CLI 剪枝空夹：\(result.removed.count) 个")
+        scheduleRemotePush()
+        return result.removed
+    }
+
+    @discardableResult
+    func moveFolderCLI(
+        path: BookmarkFolderPath,
+        to: BookmarkFolderPath?,
+        siblingIndex: Int?
+    ) throws -> BookmarkLedgerSnapshot {
+        let now = Date().timeIntervalSince1970
+        ledger = try BookmarkLedgerMerge.moveFolder(
+            from: path,
+            to: to,
+            siblingIndex: siblingIndex,
+            now: now,
+            in: ledger
+        )
+        try persist()
+        activityLog.append(
+            "CLI 移夹：\(path.sortKey)"
+                + (to.map { " → \($0.sortKey)" } ?? "")
+                + (siblingIndex.map { " index=\($0)" } ?? "")
+        )
+        scheduleRemotePush()
+        return ledger
+    }
+
+    func applyPlanCLI(ops: [[String: Any]], dryRun: Bool) throws -> [[String: Any]] {
+        var results: [[String: Any]] = []
+        let snapshotBefore = ledger
+        for (i, op) in ops.enumerated() {
+            let action = ((op["op"] as? String) ?? (op["action"] as? String) ?? "").lowercased()
+            do {
+                switch action {
+                case "add":
+                    guard let url = op["url"] as? String else {
+                        throw TocodeCommandError.invalidArguments("apply[\(i)] add 缺 url")
+                    }
+                    let title = op["title"] as? String
+                    let folder = try parseOptionalFolder(op["folder"], label: "apply[\(i)]")
+                    let index = op["index"] as? Int ?? op["siblingIndex"] as? Int
+                    if dryRun {
+                        results.append([
+                            "index": i, "op": "add", "url": url, "ok": true, "dryRun": true
+                        ])
+                    } else {
+                        let entry = try addCLI(url: url, title: title, folder: folder, siblingIndex: index)
+                        results.append([
+                            "index": i, "op": "add", "url": entry.url, "ok": true, "id": entry.id
+                        ])
+                    }
+                case "update":
+                    guard let url = op["url"] as? String else {
+                        throw TocodeCommandError.invalidArguments("apply[\(i)] update 缺 url")
+                    }
+                    let title = op["title"] as? String
+                    let folder = try parseOptionalFolder(op["folder"], label: "apply[\(i)]")
+                    let index = op["index"] as? Int ?? op["siblingIndex"] as? Int
+                    let newURL = op["newUrl"] as? String ?? op["new_url"] as? String
+                    if dryRun {
+                        results.append([
+                            "index": i, "op": "update", "url": url, "ok": true, "dryRun": true
+                        ])
+                    } else {
+                        let entry = try updateCLI(
+                            url: url,
+                            title: title,
+                            folder: folder,
+                            siblingIndex: index,
+                            newURL: newURL
+                        )
+                        results.append([
+                            "index": i, "op": "update", "url": entry.url, "ok": true, "id": entry.id
+                        ])
+                    }
+                case "delete":
+                    guard let url = op["url"] as? String else {
+                        throw TocodeCommandError.invalidArguments("apply[\(i)] delete 缺 url")
+                    }
+                    if dryRun {
+                        results.append([
+                            "index": i, "op": "delete", "url": url, "ok": true, "dryRun": true
+                        ])
+                    } else {
+                        try deleteCLI(url: url)
+                        results.append(["index": i, "op": "delete", "url": url, "ok": true])
+                    }
+                default:
+                    throw TocodeCommandError.invalidArguments(
+                        "apply[\(i)] 未知 op：\(action)（仅 add|update|delete）"
+                    )
+                }
+            } catch {
+                results.append([
+                    "index": i,
+                    "op": action,
+                    "ok": false,
+                    "error": error.localizedDescription
+                ])
+                if dryRun {
+                    ledger = snapshotBefore
+                }
+                // 写模式下保留已成功条，便于续跑
+                break
+            }
+        }
+        if dryRun {
+            ledger = snapshotBefore
+        }
+        return results
+    }
+
+    private func parseOptionalFolder(_ raw: Any?, label: String) throws -> BookmarkFolderPath? {
+        guard let raw else { return nil }
+        if let text = raw as? String {
+            switch BookmarkCLIFolder.parse(text) {
+            case .success(let path):
+                return path
+            case .failure(let err):
+                throw err
+            }
+        }
+        if let dict = raw as? [String: Any],
+           let kindRaw = dict["kind"] as? String,
+           let kind = BookmarkFolderKind(rawValue: kindRaw) {
+            let segments = (dict["segments"] as? [String]) ?? []
+            return BookmarkFolderPath(kind: kind, segments: segments)
+        }
+        throw TocodeCommandError.invalidArguments("\(label) folder 格式无效")
     }
 
     func backupNowForCLI() async -> Result<BookmarkBackupPack, Error> {

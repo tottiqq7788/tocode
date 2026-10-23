@@ -73,6 +73,13 @@ enum TocodeBookmarkBackupCommand: Equatable {
     case restore(day: String?)
 }
 
+enum TocodeBookmarkFolderCommand: Equatable {
+    case create(path: String, index: Int?)
+    case delete(path: String, recursive: Bool)
+    case pruneEmpty(under: String?)
+    case move(path: String, to: String?, index: Int?)
+}
+
 enum TocodeBookmarkCommand: Equatable {
     case status
     case list
@@ -83,6 +90,8 @@ enum TocodeBookmarkCommand: Equatable {
     case pull
     case log(Int)
     case folders
+    case folder(TocodeBookmarkFolderCommand)
+    case apply(file: String, dryRun: Bool)
     case backup(TocodeBookmarkBackupCommand)
 }
 
@@ -210,16 +219,27 @@ enum TocodeCommandParser {
         bookmark pull                       用本机远程同步密钥拉取并合并最新账本
         bookmark log [行数]                 打印最近同步活动日志（默认 80 行）
         bookmark folders [--json]           只读导出夹树 JSON（含顺序与是否空）
+        bookmark folder create <path> [--index <n>]
+                                            新建空夹（含祖先）
+        bookmark folder delete <path> [--recursive]
+                                            删空夹；递归只删空夹树（有书签则失败）
+        bookmark folder prune-empty [--under <path>]
+                                            批量清理空壳夹
+        bookmark folder move <path> --index <n>
+        bookmark folder move <path> --to <newPath> [--index <n>]
+                                            同父改序，或改路径并迁移子项
+        bookmark apply --file <plan.json> [--dry-run]
+                                            串行批处理 add|update|delete
         bookmark backup status|list|now     七日备份状态 / 列表 / 立即日备
         bookmark backup restore [--day YYYY-MM-DD]
                                             从指定日（默认最近）整本还原正式账本
 
-      书签 --folder
+      书签 --folder / folder 路径
         toolbar|other|mobile|书签栏|其他书签|移动设备书签
                                             三个根（可单独）
         toolbar/<路径>  other/<路径>  mobile/<路径>
         书签栏/<路径>  其他书签/<路径> …
-                                            根下具名夹（不存在则对账时创建）
+                                            根下具名夹
         named:<路径> 或 <路径>              具名（named）；非法根写法会报错
 
       其他
@@ -427,11 +447,172 @@ enum TocodeCommandParser {
                 return .failure(.invalidArguments("bookmark folders [--json]"))
             }
             return .success(.bookmark(.folders))
+        case "folder":
+            return parseBookmarkFolder(Array(tokens.dropFirst()))
+        case "apply":
+            return parseBookmarkApply(Array(tokens.dropFirst()))
         case "backup":
             return parseBookmarkBackup(Array(tokens.dropFirst()))
         default:
             return .failure(.unknownCommand("bookmark \(sub)"))
         }
+    }
+
+    private static func parseBookmarkFolder(_ tokens: [String]) -> Result<TocodeCommand, TocodeCommandError> {
+        guard let sub = tokens.first?.lowercased() else {
+            return .failure(.missingValue("bookmark folder create|delete|prune-empty|move"))
+        }
+        let rest = Array(tokens.dropFirst())
+        switch sub {
+        case "create":
+            return parseFolderCreate(rest)
+        case "delete", "rm", "remove":
+            return parseFolderDelete(rest)
+        case "prune-empty", "prune":
+            return parseFolderPrune(rest)
+        case "move":
+            return parseFolderMove(rest)
+        default:
+            return .failure(.unknownCommand("bookmark folder \(sub)"))
+        }
+    }
+
+    private static func parseFolderCreate(_ tokens: [String]) -> Result<TocodeCommand, TocodeCommandError> {
+        var path: String?
+        var index: Int?
+        var i = 0
+        while i < tokens.count {
+            let t = tokens[i]
+            if t == "--index" || t == "-index" {
+                guard i + 1 < tokens.count, let n = Int(tokens[i + 1]), n >= 0 else {
+                    return .failure(.invalidArguments("bookmark folder create --index <n>"))
+                }
+                index = n
+                i += 2
+            } else if t.hasPrefix("-") {
+                return .failure(.invalidArguments("bookmark folder create <path> [--index <n>]"))
+            } else if path == nil {
+                path = t
+                i += 1
+            } else {
+                return .failure(.invalidArguments("bookmark folder create <path> [--index <n>]"))
+            }
+        }
+        guard let path, !path.isEmpty else {
+            return .failure(.missingValue("bookmark folder create <path>"))
+        }
+        return .success(.bookmark(.folder(.create(path: path, index: index))))
+    }
+
+    private static func parseFolderDelete(_ tokens: [String]) -> Result<TocodeCommand, TocodeCommandError> {
+        var path: String?
+        var recursive = false
+        var i = 0
+        while i < tokens.count {
+            let t = tokens[i]
+            if t == "--recursive" || t == "-r" {
+                recursive = true
+                i += 1
+            } else if t.hasPrefix("-") {
+                return .failure(.invalidArguments("bookmark folder delete <path> [--recursive]"))
+            } else if path == nil {
+                path = t
+                i += 1
+            } else {
+                return .failure(.invalidArguments("bookmark folder delete <path> [--recursive]"))
+            }
+        }
+        guard let path, !path.isEmpty else {
+            return .failure(.missingValue("bookmark folder delete <path>"))
+        }
+        return .success(.bookmark(.folder(.delete(path: path, recursive: recursive))))
+    }
+
+    private static func parseFolderPrune(_ tokens: [String]) -> Result<TocodeCommand, TocodeCommandError> {
+        var under: String?
+        var i = 0
+        while i < tokens.count {
+            let t = tokens[i]
+            if t == "--under" {
+                guard i + 1 < tokens.count else {
+                    return .failure(.missingValue("bookmark folder prune-empty --under <path>"))
+                }
+                under = tokens[i + 1]
+                i += 2
+            } else if t.hasPrefix("-") {
+                return .failure(.invalidArguments("bookmark folder prune-empty [--under <path>]"))
+            } else {
+                return .failure(.invalidArguments("bookmark folder prune-empty [--under <path>]"))
+            }
+        }
+        return .success(.bookmark(.folder(.pruneEmpty(under: under))))
+    }
+
+    private static func parseFolderMove(_ tokens: [String]) -> Result<TocodeCommand, TocodeCommandError> {
+        var path: String?
+        var to: String?
+        var index: Int?
+        var i = 0
+        while i < tokens.count {
+            let t = tokens[i]
+            if t == "--to" {
+                guard i + 1 < tokens.count else {
+                    return .failure(.missingValue("bookmark folder move --to <newPath>"))
+                }
+                to = tokens[i + 1]
+                i += 2
+            } else if t == "--index" || t == "-index" {
+                guard i + 1 < tokens.count, let n = Int(tokens[i + 1]), n >= 0 else {
+                    return .failure(.invalidArguments("bookmark folder move --index <n>"))
+                }
+                index = n
+                i += 2
+            } else if t.hasPrefix("-") {
+                return .failure(.invalidArguments("bookmark folder move <path> (--index <n>|--to <newPath>)"))
+            } else if path == nil {
+                path = t
+                i += 1
+            } else {
+                return .failure(.invalidArguments("bookmark folder move <path> (--index <n>|--to <newPath>)"))
+            }
+        }
+        guard let path, !path.isEmpty else {
+            return .failure(.missingValue("bookmark folder move <path>"))
+        }
+        guard to != nil || index != nil else {
+            return .failure(.invalidArguments("bookmark folder move 须提供 --index 或 --to"))
+        }
+        return .success(.bookmark(.folder(.move(path: path, to: to, index: index))))
+    }
+
+    private static func parseBookmarkApply(_ tokens: [String]) -> Result<TocodeCommand, TocodeCommandError> {
+        var file: String?
+        var dryRun = false
+        var i = 0
+        while i < tokens.count {
+            let t = tokens[i]
+            if t == "--file" || t == "-f" {
+                guard i + 1 < tokens.count else {
+                    return .failure(.missingValue("bookmark apply --file <plan.json>"))
+                }
+                file = tokens[i + 1]
+                i += 2
+            } else if t == "--dry-run" || t == "--dryrun" {
+                dryRun = true
+                i += 1
+            } else if t.hasPrefix("-") {
+                return .failure(.invalidArguments("bookmark apply --file <plan.json> [--dry-run]"))
+            } else if file == nil {
+                file = t
+                i += 1
+            } else {
+                return .failure(.invalidArguments("bookmark apply --file <plan.json> [--dry-run]"))
+            }
+        }
+        guard let file, !file.isEmpty else {
+            return .failure(.missingValue("bookmark apply --file <plan.json>"))
+        }
+        return .success(.bookmark(.apply(file: file, dryRun: dryRun)))
     }
 
     private static func parseBookmarkBackup(_ tokens: [String]) -> Result<TocodeCommand, TocodeCommandError> {

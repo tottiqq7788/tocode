@@ -9312,6 +9312,13 @@ struct TestRunnerMain {
         testBookmarkCLIFolderRootedPaths()
         testBookmarkCLIFolderTreeBuild()
         testBookmarkFoldersCLICommand()
+        testBookmarkFolderCreateKeepsEmpty()
+        testBookmarkFolderDeleteTombstoneBlocksUnion()
+        testBookmarkFolderDeleteRejectsNonEmpty()
+        testBookmarkFolderPruneEmptyAndReorder()
+        testBookmarkAddUpsertsFolderRecord()
+        testBookmarkFolderCLICommands()
+        testBookmarkApplyDryRunAndWrite()
 
         if failures == 0 {
             print("\nALL TESTS PASSED")

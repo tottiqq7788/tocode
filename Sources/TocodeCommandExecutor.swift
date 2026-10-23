@@ -341,6 +341,10 @@ final class TocodeCommandExecutor {
                 return .success(TocodeCommandOutput(sync.activityLog.dumpText(maxLines: lines)))
             case .folders:
                 return BookmarkCLIJSON.encode(sync.foldersTreePayload()).map(TocodeCommandOutput.init)
+            case .folder(let folderCmd):
+                return executeBookmarkFolder(folderCmd, sync: sync)
+            case .apply(let file, let dryRun):
+                return executeBookmarkApply(file: file, dryRun: dryRun, sync: sync)
             case .backup(.status):
                 return BookmarkCLIJSON.encode(sync.backupStatusPayload()).map(TocodeCommandOutput.init)
             case .backup(.list):
@@ -348,6 +352,161 @@ final class TocodeCommandExecutor {
             case .backup(.now), .backup(.restore):
                 return .failure(.operationFailed("bookmark backup now/restore 需要通过 CLI 异步执行"))
             }
+        }
+    }
+
+    private func executeBookmarkFolder(
+        _ command: TocodeBookmarkFolderCommand,
+        sync: BookmarkSyncCommanding
+    ) -> TocodeCommandResult {
+        switch command {
+        case .create(let pathRaw, let index):
+            switch BookmarkCLIFolder.parse(pathRaw) {
+            case .failure(let error):
+                return .failure(error)
+            case .success(let pathOpt):
+                guard let path = pathOpt else {
+                    return .failure(.invalidArguments("bookmark folder create <path>"))
+                }
+                do {
+                    let record = try sync.createFolderCLI(path: path, siblingIndex: index)
+                    return BookmarkCLIJSON.encode([
+                        "ok": true,
+                        "folder": BookmarkCLIFolder.encode(record.path),
+                        "index": record.siblingIndex,
+                        "siblingIndex": record.siblingIndex,
+                        "updatedAt": record.updatedAt
+                    ]).map(TocodeCommandOutput.init)
+                } catch let error as TocodeCommandError {
+                    return .failure(error)
+                } catch {
+                    return .failure(.operationFailed(error.localizedDescription))
+                }
+            }
+        case .delete(let pathRaw, let recursive):
+            switch BookmarkCLIFolder.parse(pathRaw) {
+            case .failure(let error):
+                return .failure(error)
+            case .success(let pathOpt):
+                guard let path = pathOpt else {
+                    return .failure(.invalidArguments("bookmark folder delete <path>"))
+                }
+                do {
+                    _ = try sync.deleteFolderCLI(path: path, recursive: recursive)
+                    return BookmarkCLIJSON.encode([
+                        "ok": true,
+                        "deleted": BookmarkCLIFolder.encode(path),
+                        "recursive": recursive
+                    ]).map(TocodeCommandOutput.init)
+                } catch let error as TocodeCommandError {
+                    return .failure(error)
+                } catch {
+                    return .failure(.operationFailed(error.localizedDescription))
+                }
+            }
+        case .pruneEmpty(let underRaw):
+            let underPath: BookmarkFolderPath?
+            if let underRaw {
+                switch BookmarkCLIFolder.parse(underRaw) {
+                case .failure(let error):
+                    return .failure(error)
+                case .success(let path):
+                    underPath = path
+                }
+            } else {
+                underPath = nil
+            }
+            do {
+                let removed = try sync.pruneEmptyFoldersCLI(under: underPath)
+                return BookmarkCLIJSON.encode([
+                    "ok": true,
+                    "removedCount": removed.count,
+                    "removed": removed.map { BookmarkCLIFolder.encode($0) }
+                ]).map(TocodeCommandOutput.init)
+            } catch let error as TocodeCommandError {
+                return .failure(error)
+            } catch {
+                return .failure(.operationFailed(error.localizedDescription))
+            }
+        case .move(let pathRaw, let toRaw, let index):
+            switch BookmarkCLIFolder.parse(pathRaw) {
+            case .failure(let error):
+                return .failure(error)
+            case .success(let pathOpt):
+                guard let path = pathOpt else {
+                    return .failure(.invalidArguments("bookmark folder move <path>"))
+                }
+                let toPath: BookmarkFolderPath?
+                if let toRaw {
+                    switch BookmarkCLIFolder.parse(toRaw) {
+                    case .failure(let error):
+                        return .failure(error)
+                    case .success(let parsed):
+                        guard let parsed else {
+                            return .failure(.invalidArguments("bookmark folder move --to <newPath>"))
+                        }
+                        toPath = parsed
+                    }
+                } else {
+                    toPath = nil
+                }
+                do {
+                    _ = try sync.moveFolderCLI(path: path, to: toPath, siblingIndex: index)
+                    var payload: [String: Any] = [
+                        "ok": true,
+                        "from": BookmarkCLIFolder.encode(path)
+                    ]
+                    if let toPath {
+                        payload["to"] = BookmarkCLIFolder.encode(toPath)
+                    }
+                    if let index {
+                        payload["index"] = index
+                    }
+                    return BookmarkCLIJSON.encode(payload).map(TocodeCommandOutput.init)
+                } catch let error as TocodeCommandError {
+                    return .failure(error)
+                } catch {
+                    return .failure(.operationFailed(error.localizedDescription))
+                }
+            }
+        }
+    }
+
+    private func executeBookmarkApply(
+        file: String,
+        dryRun: Bool,
+        sync: BookmarkSyncCommanding
+    ) -> TocodeCommandResult {
+        let url = URL(fileURLWithPath: (file as NSString).expandingTildeInPath)
+        guard let data = try? Data(contentsOf: url) else {
+            return .failure(.operationFailed("无法读取 plan 文件：\(file)"))
+        }
+        guard let root = try? JSONSerialization.jsonObject(with: data) else {
+            return .failure(.invalidArguments("plan.json 不是合法 JSON"))
+        }
+        let ops: [[String: Any]]
+        if let list = root as? [[String: Any]] {
+            ops = list
+        } else if let obj = root as? [String: Any], let list = obj["ops"] as? [[String: Any]] {
+            ops = list
+        } else {
+            return .failure(.invalidArguments("plan.json 须为 ops 数组，或 {\"ops\":[...]}"))
+        }
+        do {
+            let results = try sync.applyPlanCLI(ops: ops, dryRun: dryRun)
+            let failed = results.contains { ($0["ok"] as? Bool) == false }
+            let payload: [String: Any] = [
+                "ok": !failed,
+                "dryRun": dryRun,
+                "total": ops.count,
+                "processed": results.count,
+                "results": results
+            ]
+            return BookmarkCLIJSON.encode(payload).map(TocodeCommandOutput.init)
+        } catch let error as TocodeCommandError {
+            return .failure(error)
+        } catch {
+            return .failure(.operationFailed(error.localizedDescription))
         }
     }
 

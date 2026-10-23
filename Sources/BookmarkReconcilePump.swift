@@ -63,6 +63,13 @@ enum BookmarkReconcilePump {
                 }
                 return $0.pathKey < $1.pathKey
             }
+        // 墓碑夹：仅当浏览器已知该路径仍存在时下发 remove_folder。
+        let removalCandidates = service.folderTombstonesForBrowser()
+            .filter { stone in
+                bridge.knownFolderLayout[stone.pathKey] != nil
+                    && !bridge.confirmedFolderRemovals.contains(stone.pathKey)
+            }
+            .sorted { $0.path.segments.count > $1.path.segments.count }
         let target = bridge.browserKey ?? "未命名连接"
         if !bridge.didPurgeEmptyTitleFolders {
             let batch = UUID().uuidString
@@ -93,20 +100,37 @@ enum BookmarkReconcilePump {
             }
             return false
         }
-        if divergent.isEmpty && divergentFolders.isEmpty {
+        if divergent.isEmpty && divergentFolders.isEmpty && removalCandidates.isEmpty {
             service.activityLog.append("布局对账 \(target)：已对齐。")
             return true
         }
+        let removalBatch = Array(removalCandidates.prefix(10))
         let folderBatch = Array(divergentFolders.prefix(10))
         let batchEntries = Array(divergent.prefix(30))
-        let remain = (divergent.count - batchEntries.count) + (divergentFolders.count - folderBatch.count)
+        let remain = (divergent.count - batchEntries.count)
+            + (divergentFolders.count - folderBatch.count)
+            + (removalCandidates.count - removalBatch.count)
         service.activityLog.append(
-            "布局对账 \(target)：纠偏 \(divergent.count) 条、夹 \(divergentFolders.count) 个，本批书签 \(batchEntries.count)、夹 \(folderBatch.count)\(remain > 0 ? "，剩余待下次" : "")。"
+            "布局对账 \(target)：纠偏 \(divergent.count) 条、夹 \(divergentFolders.count) 个、删夹 \(removalCandidates.count)，本批书签 \(batchEntries.count)、夹 \(folderBatch.count)、删 \(removalBatch.count)\(remain > 0 ? "，剩余待下次" : "")。"
         )
         let batch = UUID().uuidString
-        let expect = folderBatch.count + batchEntries.count
+        let expect = folderBatch.count + batchEntries.count + removalBatch.count
         bridge.pendingBatchID = batch
         bridge.pendingBatchRemaining = expect
+        for stone in removalBatch {
+            send(
+                [
+                    "type": "remove_folder",
+                    "batch": batch,
+                    "folder": [
+                        "kind": stone.path.kind.rawValue,
+                        "segments": stone.path.segments
+                    ],
+                    "recursive": true
+                ],
+                bridge
+            )
+        }
         for folder in folderBatch {
             send(
                 [

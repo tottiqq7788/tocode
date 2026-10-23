@@ -43,11 +43,16 @@ enum BookmarkLedgerMerge {
             }
         }
 
+        var folderTombstones = Dictionary(
+            uniqueKeysWithValues: ledger.folderTombstones.map { ($0.pathKey, $0) }
+        )
+
         var byFolder: [String: BookmarkFolderRecord] = [:]
         for record in ledger.folders {
             var normalized = record
             normalized.path = normalizeFolderPath(record.path)
             let key = normalized.pathKey
+            if folderTombstones[key] != nil { continue }
             if let existing = byFolder[key] {
                 byFolder[key] = preferFolder(existing, normalized)
             } else {
@@ -58,6 +63,7 @@ enum BookmarkLedgerMerge {
             var normalized = folder
             normalized.path = normalizeFolderPath(folder.path)
             let key = normalized.pathKey
+            if folderTombstones[key] != nil { continue }
             if let existing = byFolder[key] {
                 byFolder[key] = preferFolder(existing, normalized)
             } else {
@@ -80,6 +86,7 @@ enum BookmarkLedgerMerge {
             entries: canonical.entries.sorted { $0.url < $1.url },
             folders: canonical.folders.sorted { $0.pathKey < $1.pathKey },
             tombstones: tombstones.values.sorted { $0.url < $1.url },
+            folderTombstones: folderTombstones.values.sorted { $0.pathKey < $1.pathKey },
             remoteRevision: ledger.remoteRevision,
             joinedBrowserKeys: joined
         )
@@ -151,6 +158,7 @@ enum BookmarkLedgerMerge {
             entries: entries,
             folders: ledger.folders,
             tombstones: tombstones.values.sorted { $0.url < $1.url },
+            folderTombstones: ledger.folderTombstones,
             remoteRevision: ledger.remoteRevision,
             joinedBrowserKeys: ledger.joinedBrowserKeys
         )
@@ -172,14 +180,19 @@ enum BookmarkLedgerMerge {
         if let folder { entries[index].folder = folder }
         if let siblingIndex { entries[index].siblingIndex = siblingIndex }
         entries[index].updatedAt = updatedAt
-        return BookmarkLedgerSnapshot(
+        var next = BookmarkLedgerSnapshot(
             version: ledger.version,
             entries: entries,
             folders: ledger.folders,
             tombstones: ledger.tombstones,
+            folderTombstones: ledger.folderTombstones,
             remoteRevision: ledger.remoteRevision,
             joinedBrowserKeys: ledger.joinedBrowserKeys
         )
+        if let folder {
+            next = upsertFolderAncestors(folder, siblingIndex: nil, updatedAt: updatedAt, in: next)
+        }
+        return next
     }
 
     /// 把旧网址改成新网址；新网址已存在时旧网址进墓碑，保留已存在条。
@@ -233,14 +246,25 @@ enum BookmarkLedgerMerge {
             byURL[newURL] = created
         }
 
-        return BookmarkLedgerSnapshot(
+        var next = BookmarkLedgerSnapshot(
             version: ledger.version,
             entries: byURL.values.sorted { $0.url < $1.url },
             folders: ledger.folders,
             tombstones: tombstones.values.sorted { $0.url < $1.url },
+            folderTombstones: ledger.folderTombstones,
             remoteRevision: ledger.remoteRevision,
             joinedBrowserKeys: ledger.joinedBrowserKeys
         )
+        let resolvedFolder = folder ?? old?.folder
+        if let resolvedFolder {
+            next = upsertFolderAncestors(
+                resolvedFolder,
+                siblingIndex: nil,
+                updatedAt: updatedAt,
+                in: next
+            )
+        }
+        return next
     }
 
     /// 合并远端解密后的快照（并集 + 墓碑并集，较新墓碑优先）。
@@ -248,8 +272,24 @@ enum BookmarkLedgerMerge {
         local: BookmarkLedgerSnapshot,
         remote: BookmarkLedgerSnapshot
     ) -> BookmarkLedgerSnapshot {
+        // 先并夹墓碑，再 union，避免远程空夹复活已删路径。
+        var folderTombstones = Dictionary(
+            uniqueKeysWithValues: local.folderTombstones.map { ($0.pathKey, $0) }
+        )
+        for stone in remote.folderTombstones {
+            if let existing = folderTombstones[stone.pathKey] {
+                if stone.deletedAt > existing.deletedAt {
+                    folderTombstones[stone.pathKey] = stone
+                }
+            } else {
+                folderTombstones[stone.pathKey] = stone
+            }
+        }
+        var seeded = local
+        seeded.folderTombstones = folderTombstones.values.sorted { $0.pathKey < $1.pathKey }
+
         let merged = unionMerge(
-            ledger: local,
+            ledger: seeded,
             incoming: remote.entries,
             incomingFolders: remote.folders,
             browserKey: nil
@@ -272,8 +312,298 @@ enum BookmarkLedgerMerge {
             entries: entries,
             folders: merged.folders,
             tombstones: tombstones.values.sorted { $0.url < $1.url },
+            folderTombstones: folderTombstones.values.sorted { $0.pathKey < $1.pathKey },
             remoteRevision: max(local.remoteRevision, remote.remoteRevision),
             joinedBrowserKeys: joined.sorted()
+        )
+    }
+
+    /// 为 path 及其祖先 upsert 夹记录，并清除对应夹墓碑。
+    static func upsertFolderAncestors(
+        _ path: BookmarkFolderPath,
+        siblingIndex: Int?,
+        updatedAt: Double,
+        in ledger: BookmarkLedgerSnapshot
+    ) -> BookmarkLedgerSnapshot {
+        let normalized = normalizeFolderPath(path)
+        // 根（segments 空）不单独建夹记录。
+        guard !normalized.segments.isEmpty || normalized.kind == .named else {
+            return ledger
+        }
+        var byFolder = Dictionary(uniqueKeysWithValues: ledger.folders.map { ($0.pathKey, $0) })
+        var folderTombstones = Dictionary(
+            uniqueKeysWithValues: ledger.folderTombstones.map { ($0.pathKey, $0) }
+        )
+
+        var chain: [BookmarkFolderPath] = []
+        var cursor = normalized
+        while true {
+            if !cursor.segments.isEmpty || cursor.kind == .named {
+                chain.append(cursor)
+            }
+            guard let parent = parentPath(of: cursor) else { break }
+            cursor = parent
+        }
+        for (i, folderPath) in chain.enumerated() {
+            let key = folderPath.sortKey
+            folderTombstones.removeValue(forKey: key)
+            let indexForThis: Int?
+            if i == 0 { indexForThis = siblingIndex } else { indexForThis = nil }
+            if var existing = byFolder[key] {
+                if let indexForThis { existing.siblingIndex = indexForThis }
+                existing.updatedAt = max(existing.updatedAt, updatedAt)
+                byFolder[key] = existing
+            } else {
+                byFolder[key] = BookmarkFolderRecord(
+                    path: folderPath,
+                    siblingIndex: indexForThis ?? 0,
+                    updatedAt: updatedAt
+                )
+            }
+        }
+
+        let canonical = canonicalizeSiblingIndices(
+            entries: ledger.entries,
+            folders: Array(byFolder.values)
+        )
+        return BookmarkLedgerSnapshot(
+            version: ledger.version,
+            entries: canonical.entries.sorted { $0.url < $1.url },
+            folders: canonical.folders.sorted { $0.pathKey < $1.pathKey },
+            tombstones: ledger.tombstones,
+            folderTombstones: folderTombstones.values.sorted { $0.pathKey < $1.pathKey },
+            remoteRevision: ledger.remoteRevision,
+            joinedBrowserKeys: ledger.joinedBrowserKeys
+        )
+    }
+
+    static func isRootFolderPath(_ path: BookmarkFolderPath) -> Bool {
+        path.segments.isEmpty && (path.kind == .toolbar || path.kind == .other || path.kind == .mobile)
+    }
+
+    static func isUnder(path: BookmarkFolderPath, ancestor: BookmarkFolderPath) -> Bool {
+        guard path.kind == ancestor.kind else { return false }
+        if ancestor.segments.isEmpty { return !path.segments.isEmpty || path == ancestor }
+        guard path.segments.count >= ancestor.segments.count else { return false }
+        return Array(path.segments.prefix(ancestor.segments.count)) == ancestor.segments
+    }
+
+    static func hasBookmarks(under path: BookmarkFolderPath, in ledger: BookmarkLedgerSnapshot) -> Bool {
+        ledger.entries.contains { entry in
+            isUnder(path: entry.folder, ancestor: path)
+        }
+    }
+
+    static func directChildFolders(of path: BookmarkFolderPath, in ledger: BookmarkLedgerSnapshot) -> [BookmarkFolderRecord] {
+        ledger.folders.filter { child in
+            guard child.path.kind == path.kind else { return false }
+            if path.segments.isEmpty {
+                return child.path.segments.count == 1
+            }
+            return child.path.segments.count == path.segments.count + 1
+                && Array(child.path.segments.prefix(path.segments.count)) == path.segments
+        }
+    }
+
+    /// 删除空夹；recursive 时删整棵空夹树（树下不得有书签）。
+    static func deleteFolder(
+        _ path: BookmarkFolderPath,
+        recursive: Bool,
+        now: Double = Date().timeIntervalSince1970,
+        in ledger: BookmarkLedgerSnapshot
+    ) throws -> BookmarkLedgerSnapshot {
+        let normalized = normalizeFolderPath(path)
+        if isRootFolderPath(normalized) {
+            throw TocodeCommandError.invalidArguments("不可删除书签根（toolbar/other/mobile）")
+        }
+        if hasBookmarks(under: normalized, in: ledger) {
+            throw TocodeCommandError.operationFailed("夹下仍有书签，请先搬迁或删除书签：\(normalized.sortKey)")
+        }
+        if !recursive {
+            let children = directChildFolders(of: normalized, in: ledger)
+            if !children.isEmpty {
+                throw TocodeCommandError.operationFailed(
+                    "夹下仍有子夹（\(children.count)），请加 --recursive 或先删子夹"
+                )
+            }
+        }
+
+        let toRemove: [BookmarkFolderPath]
+        if recursive {
+            toRemove = ledger.folders
+                .map(\.path)
+                .filter { isUnder(path: $0, ancestor: normalized) }
+                .sorted { $0.segments.count > $1.segments.count }
+        } else {
+            toRemove = ledger.folders.contains(where: { $0.pathKey == normalized.sortKey })
+                ? [normalized]
+                : []
+        }
+        // 即使账本无记录（仅浏览器有），也写墓碑以便下行删除。
+        var removeKeys = Set(toRemove.map(\.sortKey))
+        removeKeys.insert(normalized.sortKey)
+
+        var folders = ledger.folders.filter { !removeKeys.contains($0.pathKey) }
+        var folderTombstones = Dictionary(
+            uniqueKeysWithValues: ledger.folderTombstones.map { ($0.pathKey, $0) }
+        )
+        for key in removeKeys {
+            let pathForStone = toRemove.first(where: { $0.sortKey == key }) ?? normalized
+            folderTombstones[key] = BookmarkFolderTombstone(path: pathForStone, deletedAt: now)
+        }
+
+        let canonical = canonicalizeSiblingIndices(entries: ledger.entries, folders: folders)
+        return BookmarkLedgerSnapshot(
+            version: ledger.version,
+            entries: canonical.entries.sorted { $0.url < $1.url },
+            folders: canonical.folders.sorted { $0.pathKey < $1.pathKey },
+            tombstones: ledger.tombstones,
+            folderTombstones: folderTombstones.values.sorted { $0.pathKey < $1.pathKey },
+            remoteRevision: ledger.remoteRevision,
+            joinedBrowserKeys: ledger.joinedBrowserKeys
+        )
+    }
+
+    /// 剪掉空壳夹（无书签、无子夹）；可限定 under 前缀。
+    static func pruneEmptyFolders(
+        under: BookmarkFolderPath?,
+        now: Double = Date().timeIntervalSince1970,
+        in ledger: BookmarkLedgerSnapshot
+    ) throws -> (ledger: BookmarkLedgerSnapshot, removed: [BookmarkFolderPath]) {
+        var current = ledger
+        var removed: [BookmarkFolderPath] = []
+        // 反复从最深空夹删起，直到稳定。
+        while true {
+            let candidates = current.folders
+                .map(\.path)
+                .filter { path in
+                    if isRootFolderPath(path) { return false }
+                    if let under {
+                        return isUnder(path: path, ancestor: under)
+                    }
+                    return true
+                }
+                .filter { path in
+                    !hasBookmarks(under: path, in: current)
+                        && directChildFolders(of: path, in: current).isEmpty
+                }
+                .sorted { $0.segments.count > $1.segments.count }
+            if candidates.isEmpty { break }
+            for path in candidates {
+                // 可能已被上一轮删掉
+                guard current.folders.contains(where: { $0.pathKey == path.sortKey }) else { continue }
+                current = try deleteFolder(path, recursive: false, now: now, in: current)
+                removed.append(path)
+            }
+        }
+        return (current, removed)
+    }
+
+    /// 同父改序，或改路径（rename/move）并迁移子书签/子夹。
+    static func moveFolder(
+        from: BookmarkFolderPath,
+        to: BookmarkFolderPath?,
+        siblingIndex: Int?,
+        now: Double = Date().timeIntervalSince1970,
+        in ledger: BookmarkLedgerSnapshot
+    ) throws -> BookmarkLedgerSnapshot {
+        let source = normalizeFolderPath(from)
+        if isRootFolderPath(source) {
+            throw TocodeCommandError.invalidArguments("不可移动书签根")
+        }
+        guard ledger.folders.contains(where: { $0.pathKey == source.sortKey })
+                || hasBookmarks(under: source, in: ledger) else {
+            throw TocodeCommandError.operationFailed("找不到夹：\(source.sortKey)")
+        }
+
+        let destination: BookmarkFolderPath
+        if let to {
+            destination = normalizeFolderPath(to)
+            if isRootFolderPath(destination) {
+                throw TocodeCommandError.invalidArguments("--to 不能是书签根本身")
+            }
+            if destination.kind != source.kind {
+                // 允许跨根，但需显式路径
+            }
+            if isUnder(path: destination, ancestor: source), destination != source {
+                throw TocodeCommandError.invalidArguments("不能把夹移到自身子路径下")
+            }
+        } else {
+            destination = source
+        }
+
+        var entries = ledger.entries
+        var folders = ledger.folders
+        var folderTombstones = Dictionary(
+            uniqueKeysWithValues: ledger.folderTombstones.map { ($0.pathKey, $0) }
+        )
+
+        if destination.sortKey != source.sortKey {
+            func remap(_ path: BookmarkFolderPath) -> BookmarkFolderPath {
+                guard path.kind == source.kind,
+                      path.segments.count >= source.segments.count,
+                      Array(path.segments.prefix(source.segments.count)) == source.segments else {
+                    return path
+                }
+                let suffix = Array(path.segments.dropFirst(source.segments.count))
+                return BookmarkFolderPath(kind: destination.kind, segments: destination.segments + suffix)
+            }
+            for i in entries.indices {
+                let before = entries[i].folder
+                let after = remap(before)
+                if after != before {
+                    entries[i].folder = after
+                    entries[i].updatedAt = now
+                }
+            }
+            var remapped: [String: BookmarkFolderRecord] = [:]
+            for folder in folders {
+                let after = remap(folder.path)
+                if after.sortKey != folder.pathKey {
+                    folderTombstones[folder.pathKey] = BookmarkFolderTombstone(
+                        path: folder.path,
+                        deletedAt: now
+                    )
+                }
+                folderTombstones.removeValue(forKey: after.sortKey)
+                var record = folder
+                record.path = after
+                record.updatedAt = now
+                if after.sortKey == destination.sortKey, let siblingIndex {
+                    record.siblingIndex = siblingIndex
+                }
+                if let existing = remapped[after.sortKey] {
+                    remapped[after.sortKey] = preferFolder(existing, record)
+                } else {
+                    remapped[after.sortKey] = record
+                }
+            }
+            // 确保目标夹存在
+            if remapped[destination.sortKey] == nil {
+                remapped[destination.sortKey] = BookmarkFolderRecord(
+                    path: destination,
+                    siblingIndex: siblingIndex ?? 0,
+                    updatedAt: now
+                )
+            }
+            folders = Array(remapped.values)
+        } else if let siblingIndex {
+            guard let idx = folders.firstIndex(where: { $0.pathKey == source.sortKey }) else {
+                throw TocodeCommandError.operationFailed("找不到夹记录：\(source.sortKey)")
+            }
+            folders[idx].siblingIndex = siblingIndex
+            folders[idx].updatedAt = now
+        }
+
+        let canonical = canonicalizeSiblingIndices(entries: entries, folders: folders)
+        return BookmarkLedgerSnapshot(
+            version: ledger.version,
+            entries: canonical.entries.sorted { $0.url < $1.url },
+            folders: canonical.folders.sorted { $0.pathKey < $1.pathKey },
+            tombstones: ledger.tombstones,
+            folderTombstones: folderTombstones.values.sorted { $0.pathKey < $1.pathKey },
+            remoteRevision: ledger.remoteRevision,
+            joinedBrowserKeys: ledger.joinedBrowserKeys
         )
     }
 

@@ -153,18 +153,26 @@ final class MockBookmarkSync: BookmarkSyncCommanding {
         let resolvedTitle = (title?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
             ? title!.trimmingCharacters(in: .whitespacesAndNewlines)
             : canonical
+        let resolvedFolder = folder ?? BookmarkFolderPath(kind: .other, segments: [])
+        let now = Date().timeIntervalSince1970
         ledger = BookmarkLedgerMerge.unionMerge(
             ledger: ledger,
             incoming: [
                 BookmarkEntry(
                     url: canonical,
                     title: resolvedTitle,
-                    folder: folder ?? BookmarkFolderPath(kind: .other, segments: []),
+                    folder: resolvedFolder,
                     siblingIndex: siblingIndex ?? 0,
-                    updatedAt: Date().timeIntervalSince1970
+                    updatedAt: now
                 )
             ],
             browserKey: "cli"
+        )
+        ledger = BookmarkLedgerMerge.upsertFolderAncestors(
+            resolvedFolder,
+            siblingIndex: nil,
+            updatedAt: now,
+            in: ledger
         )
         guard let saved = entry(url: canonical) else {
             throw TocodeCommandError.operationFailed("mock add failed")
@@ -273,6 +281,117 @@ final class MockBookmarkSync: BookmarkSyncCommanding {
 
     func foldersTreePayload() -> [[String: Any]] {
         BookmarkCLIFolderTree.build(from: ledger)
+    }
+
+    func createFolderCLI(path: BookmarkFolderPath, siblingIndex: Int?) throws -> BookmarkFolderRecord {
+        if BookmarkLedgerMerge.isRootFolderPath(path) {
+            throw TocodeCommandError.invalidArguments("不可对书签根执行 folder create")
+        }
+        let now = Date().timeIntervalSince1970
+        ledger = BookmarkLedgerMerge.upsertFolderAncestors(
+            path,
+            siblingIndex: siblingIndex,
+            updatedAt: now,
+            in: ledger
+        )
+        guard let saved = ledger.folders.first(where: { $0.pathKey == path.sortKey }) else {
+            throw TocodeCommandError.operationFailed("建夹后无法读取")
+        }
+        return saved
+    }
+
+    func deleteFolderCLI(path: BookmarkFolderPath, recursive: Bool) throws -> BookmarkLedgerSnapshot {
+        ledger = try BookmarkLedgerMerge.deleteFolder(path, recursive: recursive, in: ledger)
+        return ledger
+    }
+
+    func pruneEmptyFoldersCLI(under: BookmarkFolderPath?) throws -> [BookmarkFolderPath] {
+        let result = try BookmarkLedgerMerge.pruneEmptyFolders(under: under, in: ledger)
+        ledger = result.ledger
+        return result.removed
+    }
+
+    func moveFolderCLI(
+        path: BookmarkFolderPath,
+        to: BookmarkFolderPath?,
+        siblingIndex: Int?
+    ) throws -> BookmarkLedgerSnapshot {
+        ledger = try BookmarkLedgerMerge.moveFolder(
+            from: path,
+            to: to,
+            siblingIndex: siblingIndex,
+            in: ledger
+        )
+        return ledger
+    }
+
+    func applyPlanCLI(ops: [[String: Any]], dryRun: Bool) throws -> [[String: Any]] {
+        // 与正式服务同语义：复用路径解析；测试侧直接调用真实合并逻辑字段。
+        var results: [[String: Any]] = []
+        let before = ledger
+        for (i, op) in ops.enumerated() {
+            let action = ((op["op"] as? String) ?? "").lowercased()
+            do {
+                let folder: BookmarkFolderPath?
+                if let folderRaw = op["folder"] as? String {
+                    switch BookmarkCLIFolder.parse(folderRaw) {
+                    case .success(let path): folder = path
+                    case .failure(let err): throw err
+                    }
+                } else {
+                    folder = nil
+                }
+                switch action {
+                case "add":
+                    let url = op["url"] as? String ?? ""
+                    if dryRun {
+                        results.append(["index": i, "op": "add", "url": url, "ok": true, "dryRun": true])
+                    } else {
+                        let entry = try addCLI(
+                            url: url,
+                            title: op["title"] as? String,
+                            folder: folder,
+                            siblingIndex: op["index"] as? Int
+                        )
+                        results.append(["index": i, "op": "add", "url": entry.url, "ok": true])
+                    }
+                case "update":
+                    let url = op["url"] as? String ?? ""
+                    if dryRun {
+                        results.append(["index": i, "op": "update", "url": url, "ok": true, "dryRun": true])
+                    } else {
+                        let entry = try updateCLI(
+                            url: url,
+                            title: op["title"] as? String,
+                            folder: folder,
+                            siblingIndex: op["index"] as? Int,
+                            newURL: op["newUrl"] as? String
+                        )
+                        results.append(["index": i, "op": "update", "url": entry.url, "ok": true])
+                    }
+                case "delete":
+                    let url = op["url"] as? String ?? ""
+                    if dryRun {
+                        results.append(["index": i, "op": "delete", "url": url, "ok": true, "dryRun": true])
+                    } else {
+                        try deleteCLI(url: url)
+                        results.append(["index": i, "op": "delete", "url": url, "ok": true])
+                    }
+                default:
+                    throw TocodeCommandError.invalidArguments("未知 op")
+                }
+            } catch {
+                results.append([
+                    "index": i,
+                    "op": action,
+                    "ok": false,
+                    "error": error.localizedDescription
+                ])
+                break
+            }
+        }
+        if dryRun { ledger = before }
+        return results
     }
 }
 

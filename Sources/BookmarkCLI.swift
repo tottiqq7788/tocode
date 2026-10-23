@@ -219,6 +219,11 @@ protocol BookmarkSyncCommanding: AnyObject {
     func backupNowForCLI() async -> Result<BookmarkBackupPack, Error>
     func restoreBackupForCLI(day: String?) async -> Result<BookmarkLedgerSnapshot, Error>
     func foldersTreePayload() -> [[String: Any]]
+    func createFolderCLI(path: BookmarkFolderPath, siblingIndex: Int?) throws -> BookmarkFolderRecord
+    func deleteFolderCLI(path: BookmarkFolderPath, recursive: Bool) throws -> BookmarkLedgerSnapshot
+    func pruneEmptyFoldersCLI(under: BookmarkFolderPath?) throws -> [BookmarkFolderPath]
+    func moveFolderCLI(path: BookmarkFolderPath, to: BookmarkFolderPath?, siblingIndex: Int?) throws -> BookmarkLedgerSnapshot
+    func applyPlanCLI(ops: [[String: Any]], dryRun: Bool) throws -> [[String: Any]]
 }
 
 extension BookmarkSyncService: BookmarkSyncCommanding {}

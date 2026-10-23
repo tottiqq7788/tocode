@@ -196,6 +196,7 @@ final class BookmarkNativeBridge {
                     folderLayout[folder.pathKey] = String(folder.siblingIndex)
                 }
                 bridge.knownFolderLayout = folderLayout
+                bridge.confirmedFolderRemovals.removeAll()
                 bridge.didPurgeEmptyTitleFolders = false
                 bridge.purgeEmptyAttempts = 0
                 bridge.awaitingTreeReady = true
@@ -295,6 +296,12 @@ final class BookmarkNativeBridge {
                         ?? service.foldersForBrowser().first(where: { $0.pathKey == path.sortKey })?.siblingIndex
                         ?? 0
                     bridge.knownFolderLayout[path.sortKey] = String(index)
+                    bridge.confirmedFolderRemovals.remove(path.sortKey)
+                } else if op == "folder_removed",
+                          let folderDict = object["folder"] as? [String: Any] {
+                    let path = folder(from: folderDict)
+                    bridge.knownFolderLayout.removeValue(forKey: path.sortKey)
+                    bridge.confirmedFolderRemovals.insert(path.sortKey)
                 } else if let canonical = BookmarkURL.canonicalize(url),
                           op == "created" || op == "updated" || op == "exists",
                           let entry = service.entry(url: canonical) {
