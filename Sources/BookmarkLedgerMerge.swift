@@ -854,7 +854,9 @@ enum BookmarkLedgerMerge {
             return .toolbar
         }
         let lower = title.lowercased()
-        if ["其他书签", "other bookmarks", "其他收藏夹", "other favorites"].contains(where: { lower == $0 || title == $0 })
+        // Firefox「书签菜单 / Bookmarks Menu」与「其他书签」同属 other 根别名。
+        if ["其他书签", "other bookmarks", "其他收藏夹", "other favorites", "书签菜单", "bookmarks menu"]
+            .contains(where: { lower == $0 || title == $0 })
             || title.contains("其他书签")
             || lower.contains("unfiled")
             || lower.contains("未整理") {

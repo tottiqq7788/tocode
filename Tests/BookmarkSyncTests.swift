@@ -606,6 +606,98 @@ func testBookmarkToolbarRootSegmentsPreserved() {
     expect(!folderKeys.contains("named|totti"), "不再把根下子夹收成 named")
 }
 
+func testBookmarkFirefoxMenuRootMapsToOther() {
+    // Firefox：书签工具栏 + 书签菜单（内含 Mozilla Firefox 空夹）+ 其他书签。
+    let nodes: [[String: Any]] = [
+        [
+            "type": "folder",
+            "title": "",
+            "index": 0,
+            "children": [
+                [
+                    "type": "folder",
+                    "title": "书签工具栏",
+                    "index": 0,
+                    "dateAdded": 1_000.0,
+                    "children": [] as [Any]
+                ],
+                [
+                    "type": "folder",
+                    "title": "书签菜单",
+                    "index": 1,
+                    "dateAdded": 1_000.0,
+                    "children": [
+                        [
+                            "type": "folder",
+                            "title": "Mozilla Firefox",
+                            "index": 0,
+                            "dateAdded": 2_000.0,
+                            "children": [] as [Any]
+                        ]
+                    ]
+                ],
+                [
+                    "type": "folder",
+                    "title": "其他书签",
+                    "index": 2,
+                    "dateAdded": 1_000.0,
+                    "children": [
+                        [
+                            "type": "folder",
+                            "title": "shell",
+                            "index": 0,
+                            "dateAdded": 3_000.0,
+                            "children": [] as [Any]
+                        ]
+                    ]
+                ]
+            ]
+        ]
+    ]
+    let layout = BookmarkLedgerMerge.layout(fromBrowserNodes: nodes)
+    let folderKeys = Set(layout.folders.map(\.pathKey))
+    expect(folderKeys.contains("other|Mozilla Firefox"), "书签菜单下空夹摄入为 other")
+    expect(folderKeys.contains("other|shell"), "其他书签下空夹仍为 other")
+    expect(!folderKeys.contains(where: { $0.hasPrefix("named|") && $0.contains("Mozilla") }), "不得收成 named")
+
+    let enNodes: [[String: Any]] = [
+        [
+            "type": "folder",
+            "title": "",
+            "index": 0,
+            "children": [
+                [
+                    "type": "folder",
+                    "title": "Bookmarks Toolbar",
+                    "index": 0,
+                    "dateAdded": 1.0,
+                    "children": [] as [Any]
+                ],
+                [
+                    "type": "folder",
+                    "title": "Bookmarks Menu",
+                    "index": 1,
+                    "dateAdded": 1.0,
+                    "children": [
+                        [
+                            "type": "folder",
+                            "title": "Mozilla Firefox",
+                            "index": 0,
+                            "dateAdded": 2.0,
+                            "children": [] as [Any]
+                        ]
+                    ]
+                ]
+            ]
+        ]
+    ]
+    let enLayout = BookmarkLedgerMerge.layout(fromBrowserNodes: enNodes)
+    expect(
+        enLayout.folders.contains { $0.pathKey == "other|Mozilla Firefox" },
+        "Bookmarks Menu 亦映射为 other"
+    )
+}
+
 func testBookmarkToolbarUnionABYExample() {
     // Edge 书签栏 A、B；Chrome 书签栏 A、C、D；Firefox 书签栏 B、C、Y，且 D 在其他书签较新。
     let toolbar = BookmarkFolderPath(kind: .toolbar, segments: [])

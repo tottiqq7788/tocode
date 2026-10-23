@@ -34,14 +34,40 @@ function isToolbarTitle(title) {
 }
 
 /// 与主机 mapRoot 对齐：精确表 + 窄 contains，禁止裸 includes("other")。
+/// Firefox「书签菜单 / Bookmarks Menu」视为 other 别名（与「其他书签」并列）。
 function isOtherTitle(title) {
   const raw = title || "";
   const lower = raw.toLowerCase();
-  const exact = ["其他书签", "other bookmarks", "其他收藏夹", "other favorites"];
+  const exact = [
+    "其他书签",
+    "other bookmarks",
+    "其他收藏夹",
+    "other favorites",
+    "书签菜单",
+    "bookmarks menu"
+  ];
   if (exact.some((x) => lower === x || raw === x)) return true;
   if (raw.includes("其他书签")) return true;
   if (lower.includes("unfiled") || lower.includes("未整理")) return true;
   return false;
+}
+
+/** 新建落点优先「其他书签」类，其次「书签菜单」类，避免 Firefox 双 other 根时全堆到菜单。 */
+function isPreferredOtherBookmarksTitle(title) {
+  const raw = title || "";
+  const lower = raw.toLowerCase();
+  return [
+    "其他书签",
+    "other bookmarks",
+    "其他收藏夹",
+    "other favorites"
+  ].some((x) => lower === x || raw === x) || raw.includes("其他书签");
+}
+
+function isBookmarksMenuTitle(title) {
+  const raw = title || "";
+  const lower = raw.toLowerCase();
+  return lower === "书签菜单" || raw === "书签菜单" || lower === "bookmarks menu";
 }
 
 function isMobileTitle(title) {
@@ -746,6 +772,16 @@ function canonicalize(raw) {
   }
 }
 
+function resolvePreferredOtherRoot(children) {
+  const others = (children || []).filter((c) => !c.url && isOtherTitle(c.title));
+  if (!others.length) return null;
+  return (
+    others.find((c) => isPreferredOtherBookmarksTitle(c.title)) ||
+    others.find((c) => isBookmarksMenuTitle(c.title)) ||
+    others[0]
+  );
+}
+
 function resolveRootBase(children, kind) {
   let base = children[0];
   if (kind === "toolbar") {
@@ -755,14 +791,14 @@ function resolveRootBase(children, kind) {
     if (mobile) {
       base = mobile;
     } else {
-      const other = children.find((c) => isOtherTitle(c.title));
-      base = other || children[1] || children[0];
+      base = resolvePreferredOtherRoot(children) || children[1] || children[0];
       console.warn("mobile root missing; fallback to", base && base.title);
     }
   } else if (kind === "named") {
-    base = children.find((c) => isOtherTitle(c.title)) || children[1] || children[0];
+    base = resolvePreferredOtherRoot(children) || children[1] || children[0];
   } else {
-    base = children.find((c) => isOtherTitle(c.title)) || children[1] || children[0];
+    // other：新建落点优先「其他书签」，否则「书签菜单」，再任意 other 别名根。
+    base = resolvePreferredOtherRoot(children) || children[1] || children[0];
   }
   return base;
 }
@@ -803,17 +839,10 @@ async function ensureFolder(folder, siblingIndex) {
   return parentId;
 }
 
-/// 按账本路径定位夹；不存在返回 null。
-async function findFolderNode(folder) {
-  const tree = await chrome.bookmarks.getTree();
-  const root = tree[0];
-  const children = (root.children || []).filter((c) => !c.url);
-  const kind = (folder && folder.kind) || "other";
-  const base = resolveRootBase(children, kind);
+/// 在单个根下按 segments 定位夹；中途缺失返回 null。
+async function findFolderUnderBase(base, segments) {
   if (!base) return null;
   let parentId = base.id;
-  const segments = (folder && folder.segments) || [];
-  if (!segments.length) return null;
   let node = null;
   for (let i = 0; i < segments.length; i += 1) {
     const segment = segments[i];
@@ -824,6 +853,32 @@ async function findFolderNode(folder) {
     parentId = node.id;
   }
   return node;
+}
+
+/// 按账本路径定位夹；不存在返回 null。
+/// other：遍历全部 other 别名根（Firefox 可同时有「书签菜单」与「其他书签」），避免假 missing。
+async function findFolderNode(folder) {
+  const tree = await chrome.bookmarks.getTree();
+  const root = tree[0];
+  const children = (root.children || []).filter((c) => !c.url);
+  const kind = (folder && folder.kind) || "other";
+  const segments = (folder && folder.segments) || [];
+  if (!segments.length) return null;
+
+  if (kind === "other") {
+    const others = children.filter((c) => isOtherTitle(c.title));
+    const bases = others.length
+      ? others
+      : [resolveRootBase(children, kind)].filter(Boolean);
+    for (const base of bases) {
+      const node = await findFolderUnderBase(base, segments);
+      if (node) return node;
+    }
+    return null;
+  }
+
+  const base = resolveRootBase(children, kind);
+  return findFolderUnderBase(base, segments);
 }
 
 function nodeHasBookmarkDescendant(node) {

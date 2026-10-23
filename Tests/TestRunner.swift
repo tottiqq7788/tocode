@@ -9302,6 +9302,7 @@ struct TestRunnerMain {
         testBookmarkSiblingIndexClamp()
         testBookmarkLayoutIndexAndLegacyDecode()
         testBookmarkToolbarRootSegmentsPreserved()
+        testBookmarkFirefoxMenuRootMapsToOther()
         testBookmarkToolbarUnionABYExample()
         testBookmarkToolbarAliasNormalizedFromOther()
         testBookmarkNamedSupersededByRootedPath()
