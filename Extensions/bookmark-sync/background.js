@@ -655,14 +655,54 @@ function flattenBookmarks(nodes, out = []) {
 }
 
 /// 与主机 BookmarkURL.canonicalize 对齐：协议/主机小写、去默认端口与路径尾 `/`；
-/// query/fragment 按解码形态参与身份（%2F 与 / 同一条），避免扩展与账本分叉。
+/// query/fragment 先宽松解码（%2F≡/、大小写 hex 同一身份），再按 URLComponents.string
+/// 习惯重新编码：非 ASCII / 空格 / #"<>[]\{}^`|% 等为大写百分号，保留 /?&=+;:@!*'()$ 等。
 function decodeURIComponentLenient(s) {
   if (!s) return "";
   try {
     return decodeURIComponent(s.replace(/\+/g, " "));
   } catch (_) {
-    return s;
+    return String(s).replace(/%[0-9A-Fa-f]{2}/g, (m) => {
+      try {
+        return decodeURIComponent(m);
+      } catch {
+        return m;
+      }
+    });
   }
+}
+
+/** 对齐 Swift URLComponents 对 query/fragment 的 .string 编码。 */
+function encodeLikeSwiftURLComponents(decoded) {
+  const mustEncodeAscii = new Set([
+    0x20, // space
+    0x22, // "
+    0x23, // #
+    0x25, // %
+    0x3c, // <
+    0x3e, // >
+    0x5b, // [
+    0x5c, // \
+    0x5d, // ]
+    0x5e, // ^
+    0x60, // `
+    0x7b, // {
+    0x7c, // |
+    0x7d // }
+  ]);
+  let out = "";
+  for (const ch of String(decoded || "")) {
+    const code = ch.codePointAt(0);
+    if (code < 0x80 && code >= 0x21 && !mustEncodeAscii.has(code)) {
+      out += ch;
+      continue;
+    }
+    const bytes = new TextEncoder().encode(ch);
+    for (const b of bytes) {
+      out += "%" + b.toString(16).toUpperCase().padStart(2, "0");
+    }
+  }
+  return out;
 }
 
 function canonicalize(raw) {
@@ -681,8 +721,14 @@ function canonicalize(raw) {
       pathname = pathname.slice(0, -1);
     }
     if (pathname === "/") pathname = "";
-    const query = decodeURIComponentLenient(u.search.startsWith("?") ? u.search.slice(1) : u.search);
-    const fragment = decodeURIComponentLenient(u.hash.startsWith("#") ? u.hash.slice(1) : u.hash);
+    const queryDecoded = decodeURIComponentLenient(
+      u.search.startsWith("?") ? u.search.slice(1) : u.search
+    );
+    const fragmentDecoded = decodeURIComponentLenient(
+      u.hash.startsWith("#") ? u.hash.slice(1) : u.hash
+    );
+    const query = queryDecoded ? encodeLikeSwiftURLComponents(queryDecoded) : "";
+    const fragment = fragmentDecoded ? encodeLikeSwiftURLComponents(fragmentDecoded) : "";
     let out = protocol + "//";
     if (u.username) {
       out += encodeURIComponent(u.username);

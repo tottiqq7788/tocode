@@ -20,7 +20,7 @@ final class BookmarkBridgeConnection {
     var pendingFolderRemovalKeys: Set<String> = []
     /// 删夹批超时次数（可观测；不因此把墓碑当已删）。
     var folderRemovalTimeouts = 0
-    /// 删夹超时过多且从未成功确认时暂停删夹队列。
+    /// 删夹超时达阈值后暂停删夹队列（待下次 tree 恢复）。
     var folderRemovalPaused = false
     /// ensure/upsert 批超时次数。
     var ensureTimeouts = 0

@@ -219,7 +219,18 @@ final class BookmarkNativeBridge {
                     folderLayout[folder.pathKey] = String(folder.siblingIndex)
                 }
                 bridge.knownFolderLayout = folderLayout
-                bridge.confirmedFolderRemovals.removeAll()
+                // 树缺席 = 本端删夹意图已满足；勿在清空确认后对数百条历史墓碑重放 remove_folder。
+                // 账本 folderTombstones 仍保留（跨端 LWW / 防复活）；此处只种确认集。
+                let absentConfirmed = BookmarkReconcilePump.pathKeysSatisfiedByTreeAbsence(
+                    tombstonePathKeys: service.folderTombstonesForBrowser().map(\.pathKey),
+                    knownFolderLayout: folderLayout
+                )
+                bridge.confirmedFolderRemovals = absentConfirmed
+                if !absentConfirmed.isEmpty {
+                    service.activityLog.append(
+                        "扩展树缺席确认删夹（\(key)）：\(absentConfirmed.count) 条墓碑无需下发"
+                    )
+                }
                 bridge.failedFolderRemovals.removeAll()
                 bridge.folderRemovalFailCounts.removeAll()
                 bridge.folderRemovalPaused = false

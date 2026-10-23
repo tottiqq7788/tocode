@@ -173,8 +173,8 @@ enum BookmarkReconcilePump {
                 service.activityLog.append(
                     "布局对账 \(target)：删夹未回执 \(pendingKeys.count) 个（累计超时 \(bridge.folderRemovalTimeouts)），请确认扩展已重载且含 remove_folder。"
                 )
-                if bridge.folderRemovalTimeouts >= folderRemovalTimeoutPause,
-                   bridge.confirmedFolderRemovals.isEmpty {
+                // 达阈值即暂停；勿要求 confirmed 为空（树缺席播种后 confirmed 常非空，否则永不熔断）。
+                if bridge.folderRemovalTimeouts >= folderRemovalTimeoutPause {
                     bridge.folderRemovalPaused = true
                     service.activityLog.append(
                         "布局对账 \(target)：删夹已暂停（扩展可能未重载），待 tree 后恢复。"
@@ -257,6 +257,15 @@ enum BookmarkReconcilePump {
 
     static func fingerprint(folder: BookmarkFolderPath, index: Int, title: String) -> String {
         "\(folder.sortKey)|\(index)|\(title)"
+    }
+
+    /// 浏览器树里不存在的夹墓碑 pathKey：本端删除已满足，不必再发 remove_folder。
+    /// 仍在 knownFolderLayout 中的路径不纳入（需继续下发删除）。
+    static func pathKeysSatisfiedByTreeAbsence(
+        tombstonePathKeys: [String],
+        knownFolderLayout: [String: String]
+    ) -> Set<String> {
+        Set(tombstonePathKeys.filter { knownFolderLayout[$0] == nil })
     }
 
     static func entryPayload(_ entry: BookmarkEntry) -> [String: Any] {

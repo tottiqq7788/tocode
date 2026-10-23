@@ -28,6 +28,28 @@ func testBookmarkURLCanonicalize() {
             == BookmarkURL.canonicalize("https://a.com?q=/path"),
         "query 中 %2F 与 / 同一条"
     )
+    // 中文：大小写百分号与裸 Unicode 同一身份；输出形态为大写百分号（对齐扩展 JS）
+    let zhLower = "https://x.com/#/p=%e7%9f%ad"
+    let zhUpper = "https://x.com/#/p=%E7%9F%AD"
+    let zhRaw = "https://x.com/#/p=短"
+    let zhCanon = BookmarkURL.canonicalize(zhLower)
+    expect(zhCanon == BookmarkURL.canonicalize(zhUpper), "中文百分号大小写同一条")
+    expect(zhCanon == BookmarkURL.canonicalize(zhRaw), "中文裸字与百分号同一条")
+    expect(zhCanon == "https://x.com#/p=%E7%9F%AD", "中文规范化为大写百分号而非裸 Unicode")
+}
+
+func testFolderTombstoneTreeAbsenceSeed() {
+    let gone = BookmarkFolderPath(kind: .other, segments: ["gone"])
+    let present = BookmarkFolderPath(kind: .other, segments: ["keep"])
+    let layout: [String: String] = [present.sortKey: "0"]
+    let confirmed = BookmarkReconcilePump.pathKeysSatisfiedByTreeAbsence(
+        tombstonePathKeys: [gone.sortKey, present.sortKey, "other/also-gone"],
+        knownFolderLayout: layout
+    )
+    expect(confirmed.contains(gone.sortKey), "树缺席墓碑应确认")
+    expect(confirmed.contains("other/also-gone"), "未在 layout 的墓碑应确认")
+    expect(!confirmed.contains(present.sortKey), "树中仍在的夹不得确认（还需删）")
+    expect(confirmed.count == 2, "仅缺席两条")
 }
 
 func testBookmarkLedgerUnionAndDedupe() {

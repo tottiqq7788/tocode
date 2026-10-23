@@ -9291,6 +9291,7 @@ struct TestRunnerMain {
         testTocodeCLIRunnerAndIPC()
         testDiagnosticLogSanitizeAndWrite()
         testBookmarkURLCanonicalize()
+        testFolderTombstoneTreeAbsenceSeed()
         testBookmarkLedgerUnionAndDedupe()
         testBookmarkLedgerTombstoneAfterJoin()
         testBookmarkLedgerChangeURLCollision()
