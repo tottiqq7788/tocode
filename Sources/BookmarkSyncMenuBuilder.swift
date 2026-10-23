@@ -1,5 +1,28 @@
 import AppKit
 
+/// 「拓展安装」子菜单打开时按活连接刷新勾选；需由菜单持有方强引用本对象（NSMenu.delegate 为 weak）。
+@MainActor
+final class BookmarkExtensionInstallMenuDelegate: NSObject, NSMenuDelegate {
+    private let bookmarkSync: BookmarkSyncService
+
+    init(bookmarkSync: BookmarkSyncService) {
+        self.bookmarkSync = bookmarkSync
+        super.init()
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        let online = bookmarkSync.connectedBrowserKeys
+        for item in menu.items {
+            guard let raw = item.representedObject as? String else { continue }
+            let connected = BookmarkOnlinePresence.isBrowserConnected(
+                browserRaw: raw,
+                onlineKeys: online
+            )
+            ShortcutMenuAppearance.apply(to: item, enabled: connected)
+        }
+    }
+}
+
 /// 「工具 → 书签同步」子菜单构建；动作 selector 仍由 StatusItemController 承接。
 enum BookmarkSyncMenuBuilder {
     @MainActor
@@ -10,7 +33,8 @@ enum BookmarkSyncMenuBuilder {
         configureRemote: Selector,
         restoreBackup: Selector,
         backupNow: Selector,
-        installExtension: Selector
+        installExtension: Selector,
+        installMenuDelegate: BookmarkExtensionInstallMenuDelegate
     ) -> NSMenu {
         let bookmarkMenu = NSMenu()
         bookmarkMenu.autoenablesItems = false
@@ -67,6 +91,8 @@ enum BookmarkSyncMenuBuilder {
         installItem.image = NSImage(systemSymbolName: "puzzlepiece.extension", accessibilityDescription: nil)
         let installMenu = NSMenu()
         installMenu.autoenablesItems = false
+        installMenu.delegate = installMenuDelegate
+        let online = bookmarkSync.connectedBrowserKeys
         for browser in BookmarkBrowser.allCases {
             let item = installMenu.addItem(
                 withTitle: browser.title,
@@ -75,7 +101,10 @@ enum BookmarkSyncMenuBuilder {
             )
             item.target = target
             item.representedObject = browser.rawValue
-            let connected = bookmarkSync.connectedBrowserKeys.contains { $0.hasPrefix("\(browser.rawValue):") }
+            let connected = BookmarkOnlinePresence.isBrowserConnected(
+                browserRaw: browser.rawValue,
+                onlineKeys: online
+            )
             ShortcutMenuAppearance.apply(to: item, enabled: connected)
         }
         installItem.submenu = installMenu

@@ -47,6 +47,8 @@ final class StatusItemController: NSObject {
     private weak var liveTimerMenu: NSMenu?
     private weak var liveModelRelayStatusItem: NSMenuItem?
     private var liveTimerMenuItems: [UUID: NSMenuItem] = [:]
+    /// 「拓展安装」子菜单 delegate（NSMenu.delegate 为 weak，须强引用）。
+    private var bookmarkInstallMenuDelegate: BookmarkExtensionInstallMenuDelegate?
     private static let portableSettingsType =
         UTType(tag: "tocode", tagClass: .filenameExtension, conformingTo: .json) ?? .json
 
@@ -677,6 +679,8 @@ final class StatusItemController: NSObject {
 
         let bookmarkItem = toolsMenu.addItem(withTitle: "书签同步", action: nil, keyEquivalent: "")
         bookmarkItem.image = NSImage(systemSymbolName: "bookmark", accessibilityDescription: nil)
+        let installDelegate = BookmarkExtensionInstallMenuDelegate(bookmarkSync: bookmarkSync)
+        bookmarkInstallMenuDelegate = installDelegate
         bookmarkItem.submenu = BookmarkSyncMenuBuilder.makeSubmenu(
             target: self,
             bookmarkSync: bookmarkSync,
@@ -684,7 +688,8 @@ final class StatusItemController: NSObject {
             configureRemote: #selector(configureBookmarkRemoteSync),
             restoreBackup: #selector(restoreBookmarkBackup(_:)),
             backupNow: #selector(runBookmarkBackupNow),
-            installExtension: #selector(installBookmarkExtension(_:))
+            installExtension: #selector(installBookmarkExtension(_:)),
+            installMenuDelegate: installDelegate
         )
         let blackoutItem = toolsMenu.addItem(
             withTitle: "临时黑屏",

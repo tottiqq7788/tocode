@@ -13,6 +13,8 @@ final class BookmarkSyncService {
     private var remoteSyncWork: Task<Void, Never>?
     private var remoteSyncQueued = false
     private var connectedBrowsers: Set<String> = []
+    /// 由 NativeBridge 注入：以活连接现扫为准，避免 Set 与真实 bridge 漂移。
+    var liveConnectedBrowserKeysProvider: (() -> [String])?
     let activityLog: BookmarkSyncActivityLog
 
     /// 整本账变化时通知（远程合并、初次全量对账）。
@@ -71,7 +73,10 @@ final class BookmarkSyncService {
     }
 
     var connectedBrowserKeys: [String] {
-        connectedBrowsers.sorted()
+        if let liveConnectedBrowserKeysProvider {
+            return liveConnectedBrowserKeysProvider()
+        }
+        return connectedBrowsers.sorted()
     }
 
     func markBrowserConnected(_ key: String) {

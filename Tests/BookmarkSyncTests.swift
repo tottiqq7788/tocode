@@ -1301,3 +1301,32 @@ func testFolderRemovalCircuitBreakThreshold() {
     }
     expect(failed.contains(pathKey), "连续失败达上限后进入 failedFolderRemovals")
 }
+
+func testBookmarkOnlinePresenceMultiConnection() {
+    let key = "chrome:Default"
+    // 同 key 两条连接：断一条仍 online
+    let afterOneGone = [key]
+    expect(
+        !BookmarkOnlinePresence.shouldMarkOffline(removedKey: key, remainingKeys: afterOneGone),
+        "同 key 断一条不得标离线"
+    )
+    // 两条都断才 offline
+    expect(
+        BookmarkOnlinePresence.shouldMarkOffline(removedKey: key, remainingKeys: []),
+        "同 key 全断才离线"
+    )
+    expect(
+        !BookmarkOnlinePresence.shouldMarkOffline(removedKey: nil, remainingKeys: []),
+        "未 hello 的断开不触发离线"
+    )
+    let online = BookmarkOnlinePresence.uniqueSortedKeys(from: [key, key, "edge:Default", nil])
+    expect(online == ["chrome:Default", "edge:Default"], "活连接去重排序")
+    expect(
+        BookmarkOnlinePresence.isBrowserConnected(browserRaw: "chrome", onlineKeys: online),
+        "chrome 有 profile 在线则菜单勾选"
+    )
+    expect(
+        !BookmarkOnlinePresence.isBrowserConnected(browserRaw: "firefox", onlineKeys: online),
+        "firefox 无连接则不勾选"
+    )
+}

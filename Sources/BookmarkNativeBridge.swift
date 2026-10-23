@@ -26,6 +26,9 @@ final class BookmarkNativeBridge {
     @MainActor
     func attach(service: BookmarkSyncService) {
         self.service = service
+        service.liveConnectedBrowserKeysProvider = { [weak self] in
+            self?.liveConnectedBrowserKeys() ?? []
+        }
         // 远程合并等整本变化时全量下发；单条增删改走 upsert/remove，避免大快照竞态漏写。
         service.onLedgerChanged = { [weak self] in
             Task { @MainActor in
@@ -100,11 +103,23 @@ final class BookmarkNativeBridge {
         receive(on: bridge)
     }
 
+    /// 当前已 hello 的活连接 browserKey（去重排序）。菜单勾选与 CLI status 以此为准。
+    func liveConnectedBrowserKeys() -> [String] {
+        lock.lock()
+        let keys = connections.values.map(\.browserKey)
+        lock.unlock()
+        return BookmarkOnlinePresence.uniqueSortedKeys(from: keys)
+    }
+
     private func remove(_ bridge: BookmarkBridgeConnection) {
         lock.lock()
         connections.removeValue(forKey: ObjectIdentifier(bridge))
+        let remainingKeys = connections.values.compactMap(\.browserKey)
         lock.unlock()
-        if let key = bridge.browserKey {
+        let key = bridge.browserKey
+        // 同 key 仍有其它 bridge 时不得标离线（重载/双 host 误伤）。
+        if let key,
+           BookmarkOnlinePresence.shouldMarkOffline(removedKey: key, remainingKeys: remainingKeys) {
             Task { @MainActor in
                 self.service?.markBrowserDisconnected(key)
             }

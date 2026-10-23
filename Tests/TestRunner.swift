@@ -9327,6 +9327,7 @@ struct TestRunnerMain {
         testCanonicalizeSiblingIndexBumpsUpdatedAt()
         testTrustedAlignFingerprintAndPoisonGate()
         testFolderRemovalCircuitBreakThreshold()
+        testBookmarkOnlinePresenceMultiConnection()
 
         if failures == 0 {
             print("\nALL TESTS PASSED")
