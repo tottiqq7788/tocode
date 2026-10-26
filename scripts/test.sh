@@ -91,6 +91,7 @@ swiftc Tests/TestRunner.swift \
   Sources/PhoneHermesHomeFolder.swift \
   Sources/PhoneHermesProfileStore.swift \
   Sources/PhoneHermesSessionIndex.swift \
+  Sources/PhoneHermesSessionWorkspace.swift \
   Sources/HermesProfileCatalog.swift \
   Sources/HermesProfileProjects.swift \
   Sources/PhoneHermesApp.swift \

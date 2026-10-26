@@ -8198,6 +8198,98 @@ func testPhoneHermesSessionDraftRenameAndDelete() async {
     expect(removed.ok && runtime.deleted == [createdID] && index.projectID(profile: "default", sessionID: createdID) == nil, "删除后不再记在这个项目下")
 }
 
+func seedHermesSessionState(database: String, id: String, cwd: String?) {
+    var db: OpaquePointer?
+    expect(sqlite3_open(database, &db) == SQLITE_OK && db != nil, "能打开测试用 state.db")
+    guard let db else { return }
+    defer { sqlite3_close(db) }
+    let schema = """
+    CREATE TABLE IF NOT EXISTS sessions (
+        id TEXT PRIMARY KEY,
+        source TEXT,
+        cwd TEXT,
+        git_repo_root TEXT,
+        title TEXT,
+        started_at REAL
+    );
+    """
+    expect(sqlite3_exec(db, schema, nil, nil, nil) == SQLITE_OK, "能建 sessions 表")
+    var statement: OpaquePointer?
+    let sql = "INSERT OR REPLACE INTO sessions (id, source, cwd, title, started_at) VALUES (?, 'api_server', ?, ?, 1)"
+    expect(sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK, "能准备插入会话")
+    guard let statement else { return }
+    defer { sqlite3_finalize(statement) }
+    let keep = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+    sqlite3_bind_text(statement, 1, id, -1, keep)
+    if let cwd {
+        sqlite3_bind_text(statement, 2, cwd, -1, keep)
+    } else {
+        sqlite3_bind_null(statement, 2)
+    }
+    sqlite3_bind_text(statement, 3, id, -1, keep)
+    expect(sqlite3_step(statement) == SQLITE_DONE, "能写入测试会话行")
+}
+
+func testPhoneHermesSessionStampsProjectCwd() async {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("phone-cwd-\(UUID().uuidString)", isDirectory: true)
+    try! fm.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: root) }
+    let database = root.appendingPathComponent("projects.db").path
+    let state = root.appendingPathComponent("state.db").path
+    let exists: (String) -> Bool = { path in
+        var isDir: ObjCBool = false
+        return fm.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
+    }
+    let project = try! HermesProfileProjects.create(
+        databasePath: database, name: "归类", folder: root.path, isDirectory: exists
+    )
+    let index = PhoneHermesSessionIndex(fileURL: root.appendingPathComponent("sessions.json"))
+    let runtime = ScriptedPhoneHermes()
+    runtime.installed = true
+    runtime.running = true
+
+    seedHermesSessionState(database: state, id: "api_1", cwd: nil)
+    let created = await PhoneHermesApp.handle(
+        kind: "session_create", sessionID: "", title: "", text: "", runtime: runtime,
+        projectID: project.id, sessionIndex: index, projectsDatabase: { _ in database }, isDirectory: exists
+    )
+    expect(created.ok, "能建立手机会话")
+    expect(
+        PhoneHermesSessionWorkspace.cwd(stateDatabase: state, sessionID: "api_1") == root.path,
+        "新建且 cwd 为空时写成项目主目录"
+    )
+
+    seedHermesSessionState(database: state, id: "api_2", cwd: "/kept/elsewhere")
+    let second = await PhoneHermesApp.handle(
+        kind: "session_create", sessionID: "", title: "", text: "", runtime: runtime,
+        projectID: project.id, sessionIndex: index, projectsDatabase: { _ in database }, isDirectory: exists
+    )
+    expect(second.ok, "第二个会话也能建立")
+    expect(
+        PhoneHermesSessionWorkspace.cwd(stateDatabase: state, sessionID: "api_2") == "/kept/elsewhere",
+        "已有工作目录不被覆盖"
+    )
+
+    seedHermesSessionState(database: state, id: "old_empty", cwd: nil)
+    index.remember(profile: "default", projectID: project.id, sessionID: "old_empty")
+    runtime.sessions = [PhoneHermesSession(id: "old_empty", title: "旧会话")]
+    let listed = await PhoneHermesApp.handle(
+        kind: "sessions", sessionID: "", title: "", text: "", runtime: runtime,
+        projectID: project.id, sessionIndex: index, projectsDatabase: { _ in database }, isDirectory: exists
+    )
+    expect(listed.ok, "能列出项目会话")
+    expect(
+        PhoneHermesSessionWorkspace.cwd(stateDatabase: state, sessionID: "old_empty") == root.path,
+        "列出时补上索引里 cwd 为空的旧会话"
+    )
+
+    let filled = PhoneHermesSessionWorkspace.stampEmptyCwd(
+        stateDatabase: state, sessionIDs: ["api_2"], cwd: root.path
+    )
+    expect(filled == 0, "直接补写也不改已有 cwd")
+}
+
 func testPhoneHermesRunStaysVisible() async {
     let fm = FileManager.default
     let root = fm.temporaryDirectory.appendingPathComponent("phone-running-\(UUID().uuidString)", isDirectory: true)
@@ -9275,6 +9367,7 @@ struct TestRunnerMain {
         do { try testPhoneHermesProfiles() } catch { expect(false, "档案项目测试没有跑完") }
         await testPhoneHermesChatGate()
         await testPhoneHermesSessionDraftRenameAndDelete()
+        await testPhoneHermesSessionStampsProjectCwd()
         await testPhoneHermesRunStaysVisible()
         await testPhoneHermesChatRejectsOverlapAndImmediateRepeat()
         testPhoneProjectAttachments()

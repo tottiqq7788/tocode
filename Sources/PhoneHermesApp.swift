@@ -978,6 +978,7 @@ enum PhoneHermesApp {
                     return projectID.isEmpty || !HermesProfileProjects.isProjectID(projectID) ? .failure(needProject) : .failure(missingProject)
                 }
                 let known = sessionIndex.sessionIDs(profile: profile, projectID: project.id)
+                stampProjectWorkspace(projectsDatabase: projectsDatabase(profile), sessionIDs: known, root: project.rootPath)
                 let remote = try await runtime.listSessions(profile: profile)
                 let sessions = known.compactMap { id in remote.first { $0.id == id } }
                 return .success("", body: [
@@ -993,6 +994,11 @@ enum PhoneHermesApp {
                 guard isDirectory(project.rootPath) else { return .failure(missingProjectFolder) }
                 let created = try await runtime.createSession(title: title, profile: profile)
                 sessionIndex.remember(profile: profile, projectID: project.id, sessionID: created.id)
+                stampProjectWorkspace(
+                    projectsDatabase: projectsDatabase(profile),
+                    sessionIDs: [created.id],
+                    root: project.rootPath
+                )
                 return .success("", body: ["session": ["id": created.id, "title": created.title]])
             case "session_delete":
                 guard ownedSession(sessionID, profile: profile, projectID: projectID, database: projectsDatabase, sessionIndex: sessionIndex) != nil else {
@@ -1233,6 +1239,12 @@ enum PhoneHermesApp {
     static func ownedProject(_ projectID: String, profile: String, database: (String) -> String) -> HermesProfileProjects.Project? {
         guard HermesProfileProjects.isProjectID(projectID) else { return nil }
         return HermesProfileProjects.project(databasePath: database(profile), id: projectID)
+    }
+
+    /// 手机会话落在 Hermes 侧边栏项目下，靠的是 state.db 的 cwd；补写失败不挡建会话和列表。
+    private static func stampProjectWorkspace(projectsDatabase: String, sessionIDs: [String], root: String) {
+        let path = PhoneHermesSessionWorkspace.stateDatabasePath(projectsDatabase: projectsDatabase)
+        PhoneHermesSessionWorkspace.stampEmptyCwd(stateDatabase: path, sessionIDs: sessionIDs, cwd: root)
     }
 
     private static func projectRows(database path: String) -> [[String: String]] {
