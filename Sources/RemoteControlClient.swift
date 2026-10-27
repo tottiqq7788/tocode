@@ -18,6 +18,7 @@ final class RemoteControlHTTPClient: RemoteControlTransporting {
     var onBinary: ((Data) -> Void)?
     private var task: URLSessionWebSocketTask?
     private var socketURL: URL?
+    private var authToken: String?
     private var retryDelay: TimeInterval = RemoteControlHTTPClient.retryStart
     private var pingAnswered = true
     private let lock = NSLock()
@@ -69,7 +70,8 @@ final class RemoteControlHTTPClient: RemoteControlTransporting {
         var parts = URLComponents(url: relay, resolvingAgainstBaseURL: false)
         parts?.scheme = relay.scheme == "http" ? "ws" : "wss"
         parts?.path = "/v1/ws"
-        parts?.queryItems = [URLQueryItem(name: "token", value: token)]
+        parts?.query = nil
+        parts?.queryItems = nil
         guard let url = parts?.url else { throw URLError(.badURL) }
         let corr = DiagnosticLog.shared.bumpConnectionCorr()
         DiagnosticLog.shared.event(
@@ -77,6 +79,9 @@ final class RemoteControlHTTPClient: RemoteControlTransporting {
             corr: corr,
             detail: ["host": relay.host ?? "", "scheme": parts?.scheme ?? ""]
         )
+        lock.lock()
+        authToken = token
+        lock.unlock()
         start(url)
     }
 
@@ -104,6 +109,7 @@ final class RemoteControlHTTPClient: RemoteControlTransporting {
         let old = task
         task = nil
         socketURL = nil
+        authToken = nil
         lock.unlock()
         old?.cancel(with: .goingAway, reason: nil)
     }
@@ -126,8 +132,27 @@ final class RemoteControlHTTPClient: RemoteControlTransporting {
         DiagnosticLog.shared.event("ws.open", detail: ["replaced_previous": replaced, "host": url.host ?? ""])
         old?.cancel(with: .goingAway, reason: nil)
         next.resume()
+        sendAuth(next)
         receiveLoop(next)
         keepAlive(next)
+    }
+
+    private func sendAuth(_ task: URLSessionWebSocketTask) {
+        lock.lock()
+        let token = authToken
+        lock.unlock()
+        guard let token, !token.isEmpty else { return }
+        let payload: [String: Any] = ["op": "auth", "token": token]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              let text = String(data: data, encoding: .utf8) else { return }
+        task.send(.string(text)) { error in
+            guard let error else { return }
+            let ns = error as NSError
+            DiagnosticLog.shared.event(
+                "ws.auth_send_fail",
+                detail: ["domain": ns.domain, "code": ns.code, "message": String(ns.localizedDescription.prefix(120))]
+            )
+        }
     }
 
     private func receiveLoop(_ task: URLSessionWebSocketTask) {
