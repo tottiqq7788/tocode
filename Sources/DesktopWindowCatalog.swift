@@ -291,9 +291,13 @@ private enum AccessibilityWindowDetails {
             return []
         }
         if let list = value as? [AXUIElement] { return list }
+        guard CFGetTypeID(value) == CFArrayGetTypeID() else { return [] }
         let array = value as! CFArray
-        return (0..<CFArrayGetCount(array)).map {
-            unsafeBitCast(CFArrayGetValueAtIndex(array, $0), to: AXUIElement.self)
+        return (0..<CFArrayGetCount(array)).compactMap {
+            guard let item = CFArrayGetValueAtIndex(array, $0) else { return nil }
+            let object = Unmanaged<CFTypeRef>.fromOpaque(item).takeUnretainedValue()
+            guard CFGetTypeID(object) == AXUIElementGetTypeID() else { return nil }
+            return (object as! AXUIElement)
         }
     }
 

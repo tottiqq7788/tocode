@@ -19,8 +19,9 @@ struct BookmarkBackupStore {
     }
 
     func load() -> BookmarkBackupPack {
-        guard let data = try? Data(contentsOf: packFileURL),
-              let pack = try? JSONDecoder().decode(BookmarkBackupPack.self, from: data) else {
+        guard let data = try? Data(contentsOf: packFileURL) else { return .empty }
+        guard let pack = try? JSONDecoder().decode(BookmarkBackupPack.self, from: data) else {
+            BookmarkCorruptFile.quarantine(packFileURL)
             return .empty
         }
         return pack

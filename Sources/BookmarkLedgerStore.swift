@@ -12,8 +12,9 @@ struct BookmarkLedgerStore {
     }
 
     func load() -> BookmarkLedgerSnapshot {
-        guard let data = try? Data(contentsOf: fileURL),
-              let snapshot = try? JSONDecoder().decode(BookmarkLedgerSnapshot.self, from: data) else {
+        guard let data = try? Data(contentsOf: fileURL) else { return .empty }
+        guard let snapshot = try? JSONDecoder().decode(BookmarkLedgerSnapshot.self, from: data) else {
+            BookmarkCorruptFile.quarantine(fileURL)
             return .empty
         }
         return snapshot
@@ -31,5 +32,24 @@ struct BookmarkLedgerStore {
         try FileManager.default.setAttributes([.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: temporary.path)
         _ = try FileManager.default.replaceItemAt(fileURL, withItemAt: temporary)
         try? FileManager.default.setAttributes([.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: fileURL.path)
+    }
+}
+
+/// 读不懂的文件改名留存，不让后续保存把它覆盖掉。
+enum BookmarkCorruptFile {
+    @discardableResult
+    static func quarantine(_ url: URL, now: Date = Date()) -> URL? {
+        let stamp = Int(now.timeIntervalSince1970)
+        let target = url.deletingPathExtension()
+            .appendingPathExtension("corrupt-\(stamp)-\(UUID().uuidString.prefix(8))")
+            .appendingPathExtension(url.pathExtension)
+        do {
+            try FileManager.default.moveItem(at: url, to: target)
+            NSLog("Tocode 书签文件无法解析，已留存为 %@", target.lastPathComponent)
+            return target
+        } catch {
+            NSLog("Tocode 书签文件无法解析，留存失败：%@", error.localizedDescription)
+            return nil
+        }
     }
 }

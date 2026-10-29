@@ -289,6 +289,33 @@ enum PhoneHermesDirectory {
         ])
     }
 
+    /// 打包前的原始体积上限是传输上限的这么多倍，留出压缩空间，同时挡住整个大目录。
+    static let rawFactor = 8
+
+    /// 累计原始字节数，超过 cap 立即返回 nil，不把大目录走完。
+    static func rawSize(of paths: [String], cap: Int, fileManager: FileManager = .default) -> Int? {
+        var total = 0
+        func add(_ path: String) -> Bool {
+            let size = (try? fileManager.attributesOfItem(atPath: path)[.size] as? NSNumber)?.intValue ?? 0
+            total += size
+            return total <= cap
+        }
+        for path in paths {
+            var isDir: ObjCBool = false
+            guard fileManager.fileExists(atPath: path, isDirectory: &isDir) else { continue }
+            guard isDir.boolValue else {
+                if !add(path) { return nil }
+                continue
+            }
+            guard let walker = fileManager.enumerator(atPath: path) else { continue }
+            while let relative = walker.nextObject() as? String {
+                if walker.fileAttributes?[.type] as? FileAttributeType == .typeDirectory { continue }
+                if !add((path as NSString).appendingPathComponent(relative)) { return nil }
+            }
+        }
+        return total
+    }
+
     /// 打包选中的项目内相对路径。单文件原样；含文件夹或多文件时打成临时 zip（仅传输）。
     static func packDownload(
         root: String,
@@ -313,7 +340,11 @@ enum PhoneHermesDirectory {
             }
             resolved.append((relative, path, isDir.boolValue))
         }
+        guard let rawBytes = rawSize(of: resolved.map(\.path), cap: byteLimit * rawFactor, fileManager: fileManager) else {
+            return .failure("选中的内容太大，没法下载")
+        }
         if resolved.count == 1, !resolved[0].isDir {
+            guard rawBytes <= byteLimit else { return .failure("超过 20MB，没法下载") }
             guard let data = fileManager.contents(atPath: resolved[0].path) else {
                 return .failure("读不出这个文件")
             }

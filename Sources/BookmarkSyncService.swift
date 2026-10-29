@@ -67,7 +67,13 @@ final class BookmarkSyncService {
     func refreshRemoteKeyCache() {
         let store = keyStore
         Task.detached(priority: .utility) { [weak self] in
-            let present = (try? store.loadPlaintext())?.isEmpty == false
+            let loaded: String?
+            do {
+                loaded = try store.loadPlaintext()
+            } catch {
+                return
+            }
+            let present = loaded?.isEmpty == false
             await MainActor.run { self?.remoteKeyCached = present }
         }
     }
@@ -249,10 +255,10 @@ final class BookmarkSyncService {
                 self.remoteSyncQueued = false
                 await self.performRemoteSync()
             } while self.remoteSyncQueued
+            self.remoteSyncWork = nil
         }
         remoteSyncWork = work
         await work.value
-        remoteSyncWork = nil
     }
 
     @MainActor

@@ -13,6 +13,29 @@ protocol RemoteControlTransporting: AnyObject {
     var onBinary: ((Data) -> Void)? { get set }
 }
 
+struct RemoteControlPingState {
+    enum Tick: Equatable { case stale, unanswered, ping }
+
+    private var live: ObjectIdentifier?
+    private var answered = true
+
+    mutating func reset(_ id: ObjectIdentifier) {
+        live = id
+        answered = true
+    }
+
+    mutating func tick(_ id: ObjectIdentifier) -> Tick {
+        guard live == id else { return .stale }
+        guard answered else { return .unanswered }
+        answered = false
+        return .ping
+    }
+
+    mutating func pong(_ id: ObjectIdentifier) {
+        if live == id { answered = true }
+    }
+}
+
 final class RemoteControlHTTPClient: RemoteControlTransporting {
     var onMessage: (([String: Any]) -> Void)?
     var onBinary: ((Data) -> Void)?
@@ -20,7 +43,7 @@ final class RemoteControlHTTPClient: RemoteControlTransporting {
     private var socketURL: URL?
     private var authToken: String?
     private var retryDelay: TimeInterval = RemoteControlHTTPClient.retryStart
-    private var pingAnswered = true
+    private var ping = RemoteControlPingState()
     private let lock = NSLock()
     private let session = URLSession(configuration: .default)
 
@@ -96,11 +119,11 @@ final class RemoteControlHTTPClient: RemoteControlTransporting {
     func send(_ object: [String: Any]) async throws {
         let data = try JSONSerialization.data(withJSONObject: object)
         guard let text = String(data: data, encoding: .utf8) else { throw URLError(.cannotDecodeContentData) }
-        try await current()?.send(.string(text))
+        try await connected().send(.string(text))
     }
 
     func sendBytes(_ data: Data) async throws {
-        try await current()?.send(.data(data))
+        try await connected().send(.data(data))
     }
 
     func disconnect() {
@@ -114,9 +137,10 @@ final class RemoteControlHTTPClient: RemoteControlTransporting {
         old?.cancel(with: .goingAway, reason: nil)
     }
 
-    private func current() -> URLSessionWebSocketTask? {
+    private func connected() throws -> URLSessionWebSocketTask {
         lock.lock()
         defer { lock.unlock() }
+        guard let task else { throw URLError(.networkConnectionLost) }
         return task
     }
 
@@ -127,7 +151,7 @@ final class RemoteControlHTTPClient: RemoteControlTransporting {
         let old = task
         let replaced = old != nil
         task = next
-        pingAnswered = true
+        ping.reset(ObjectIdentifier(next))
         lock.unlock()
         DiagnosticLog.shared.event("ws.open", detail: ["replaced_previous": replaced, "host": url.host ?? ""])
         old?.cancel(with: .goingAway, reason: nil)
@@ -208,16 +232,19 @@ final class RemoteControlHTTPClient: RemoteControlTransporting {
     private func keepAlive(_ watched: URLSessionWebSocketTask) {
         DispatchQueue.global().asyncAfter(deadline: .now() + Self.pingInterval) { [weak self] in
             guard let self else { return }
+            let id = ObjectIdentifier(watched)
             self.lock.lock()
-            let live = self.task === watched
-            let answered = self.pingAnswered
-            self.pingAnswered = false
+            let tick = self.task === watched ? self.ping.tick(id) : .stale
             self.lock.unlock()
-            guard live else { return }
-            guard answered else {
+            switch tick {
+            case .stale:
+                return
+            case .unanswered:
                 DiagnosticLog.shared.event("ws.ping_fail", detail: ["reason": "unanswered"])
                 watched.cancel(with: .abnormalClosure, reason: nil)
                 return
+            case .ping:
+                break
             }
             watched.sendPing { [weak self] error in
                 guard let self else { return }
@@ -230,7 +257,7 @@ final class RemoteControlHTTPClient: RemoteControlTransporting {
                     return
                 }
                 self.lock.lock()
-                if self.task === watched { self.pingAnswered = true }
+                if self.task === watched { self.ping.pong(id) }
                 self.lock.unlock()
             }
             self.keepAlive(watched)

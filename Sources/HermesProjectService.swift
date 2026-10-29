@@ -777,9 +777,13 @@ enum HermesVisibleEntryReader {
     private static func elements(_ element: AXUIElement, _ attributeName: String) -> [AXUIElement] {
         guard let raw = copied(element, attributeName) else { return [] }
         if let list = raw as? [AXUIElement] { return list }
+        guard CFGetTypeID(raw) == CFArrayGetTypeID() else { return [] }
         let array = raw as! CFArray
-        return (0..<CFArrayGetCount(array)).map {
-            unsafeBitCast(CFArrayGetValueAtIndex(array, $0), to: AXUIElement.self)
+        return (0..<CFArrayGetCount(array)).compactMap {
+            guard let item = CFArrayGetValueAtIndex(array, $0) else { return nil }
+            let object = Unmanaged<CFTypeRef>.fromOpaque(item).takeUnretainedValue()
+            guard CFGetTypeID(object) == AXUIElementGetTypeID() else { return nil }
+            return (object as! AXUIElement)
         }
     }
 

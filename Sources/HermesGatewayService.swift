@@ -317,9 +317,17 @@ private final class LiveHermesGatewayLauncher: HermesGatewayLaunching {
         process.standardError = FileHandle.nullDevice
         do {
             try process.run()
-            process.waitUntilExit()
         } catch {
             NSLog("Tocode 停止 Hermes 网关失败")
+            return
+        }
+        let deadline = Date().addingTimeInterval(HermesGatewayService.stopWait)
+        while process.isRunning && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        if process.isRunning {
+            NSLog("Tocode 停止 Hermes 网关超时")
+            process.terminate()
         }
     }
 

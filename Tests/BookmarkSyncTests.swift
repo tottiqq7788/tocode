@@ -429,6 +429,60 @@ func testBookmarkFoldersCLICommand() {
     }
 }
 
+func testBookmarkLedgerStoreKeepsCorruptFile() {
+    let fm = FileManager.default
+    let dir = fm.temporaryDirectory.appendingPathComponent("tocode-ledger-\(UUID().uuidString)", isDirectory: true)
+    try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: dir) }
+    let file = dir.appendingPathComponent("bookmark-ledger.json")
+    let garbage = Data("{not json".utf8)
+    fm.createFile(atPath: file.path, contents: garbage)
+    let store = BookmarkLedgerStore(fileURL: file)
+    expect(store.load().entries.isEmpty, "损坏账本读成空")
+    let kept = (try? fm.contentsOfDirectory(atPath: dir.path))?.filter { $0.contains(".corrupt-") } ?? []
+    expect(kept.count == 1, "损坏账本改名留存")
+    expect(kept.first.flatMap { fm.contents(atPath: dir.appendingPathComponent($0).path) } == garbage, "留存内容原样")
+    try? store.save(.empty)
+    let after = (try? fm.contentsOfDirectory(atPath: dir.path))?.filter { $0.contains(".corrupt-") } ?? []
+    expect(after.count == 1, "之后保存不覆盖留存文件")
+    expect(fm.fileExists(atPath: file.path) == false || store.load().entries.isEmpty, "空账本照常可写")
+}
+
+@MainActor
+func testIPCServerReadsRequestAcrossChunks() async {
+    let executor = TocodeCommandExecutor(
+        mouseWheel: MockTocodeWheel(),
+        shortcuts: MockTocodeShortcuts(),
+        weChat: MockTocodeWeChat(),
+        bookmarkSync: MockBookmarkSync(),
+        notify: { _, _ in }
+    )
+    let path = "/tmp/tocode-ipc-\(UUID().uuidString.prefix(8)).sock"
+    let server = TocodeIPCServer(executor: executor, path: path)
+    defer { server.stop() }
+    do {
+        try server.start()
+    } catch {
+        expect(false, "IPC server 启动")
+        return
+    }
+    try? await Task.sleep(nanoseconds: 300_000_000)
+    let title = String(repeating: "长", count: 100_000)
+    let request = TocodeIPCRequest(
+        id: "big",
+        command: "bookmark",
+        args: ["add", "--url", "https://example.com/big", "--title", title, "--folder", "toolbar"]
+    )
+    let result = await Task.detached {
+        TocodeSocketTransport(path: path, timeout: 5).send(request)
+    }.value
+    if case .success(let response) = result {
+        expect(response.id == "big", "超过 64KB 的请求按行拼完整后处理")
+    } else {
+        expect(false, "超过 64KB 的请求按行拼完整后处理")
+    }
+}
+
 @MainActor
 func testBookmarkCLIExecutorCRUDAndPull() async {
     let bookmarks = MockBookmarkSync()

@@ -162,9 +162,21 @@ final class RemoteControlService {
     }
 
     func setBindingKey(_ secret: String) throws {
+        let previousSecret = try bindingKeys.loadPlaintext()
+        let previousDigest = record.bindingKeyDigest
         try bindingKeys.savePlaintext(secret)
         record.bindingKeyDigest = BindingKeyDigest.hex(of: secret)
-        try store.save(record)
+        do {
+            try store.save(record)
+        } catch {
+            record.bindingKeyDigest = previousDigest
+            if let previousSecret {
+                try? bindingKeys.savePlaintext(previousSecret)
+            } else {
+                try? bindingKeys.deletePlaintext()
+            }
+            throw error
+        }
     }
 
     func clearBindingKey() throws {
@@ -369,6 +381,9 @@ final class RemoteControlService {
             guard let pending = InboundProjectFile(message, linkID: linkID, requestID: requestID) else {
                 replyProjectFile(linkID: linkID, requestID: requestID, ok: false, path: "", text: "文件头无效")
                 return
+            }
+            if let stale = inboundFile {
+                replyProjectFile(linkID: stale.linkID, requestID: stale.requestID, ok: false, path: "", text: "文件内容没有收到")
             }
             inboundFile = pending
             return
@@ -607,7 +622,11 @@ final class RemoteControlService {
             await fail(PhoneHermesApp.needProject)
             return
         }
-        switch PhoneHermesDirectory.packDownload(root: project.rootPath, relatives: relatives) {
+        let root = project.rootPath
+        let pack = await Task.detached(priority: .userInitiated) {
+            PhoneHermesDirectory.packDownload(root: root, relatives: relatives)
+        }.value
+        switch pack {
         case .failure(let message):
             await fail(message)
         case .success(let name, let mode, let data):

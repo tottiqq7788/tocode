@@ -84,7 +84,9 @@ final class TocodeIPCServer {
         receive(on: connection)
     }
 
-    private func receive(on connection: NWConnection) {
+    static let maxRequestBytes = 1024 * 1024
+
+    private func receive(on connection: NWConnection, pending: Data = Data()) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) {
             [weak self] data, _, isComplete, receiveError in
             guard let self else { return }
@@ -92,14 +94,24 @@ final class TocodeIPCServer {
                 self.remove(connection)
                 return
             }
-            if let data, !data.isEmpty {
-                self.handle(data: data, on: connection)
+            var buffer = pending
+            if let data { buffer.append(data) }
+            while let newline = buffer.firstIndex(of: 0x0A) {
+                let line = buffer[buffer.startIndex..<newline]
+                buffer = Data(buffer[buffer.index(after: newline)...])
+                if !line.isEmpty { self.handle(data: Data(line), on: connection) }
             }
-            if isComplete {
+            if buffer.count > Self.maxRequestBytes {
+                self.send(TocodeIPCResponse(id: "", ok: false, data: nil, error: "请求过大"), on: connection)
                 self.remove(connection)
                 return
             }
-            self.receive(on: connection)
+            if isComplete {
+                if !buffer.isEmpty { self.handle(data: buffer, on: connection) }
+                self.remove(connection)
+                return
+            }
+            self.receive(on: connection, pending: buffer)
         }
     }
 

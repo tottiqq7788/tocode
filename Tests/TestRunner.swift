@@ -7448,6 +7448,23 @@ func testRemoteButtonsStayOnThisMac() {
     expect(RemoteButtonIcons.all.count >= 40, "图标目录够用")
 }
 
+func testRemoteControlPingState() {
+    let old = NSObject()
+    let new = NSObject()
+    var state = RemoteControlPingState()
+    state.reset(ObjectIdentifier(old))
+    expect(state.tick(ObjectIdentifier(old)) == .ping, "首轮保活发 ping")
+    state.reset(ObjectIdentifier(new))
+    expect(state.tick(ObjectIdentifier(old)) == .stale, "旧连接的保活定时器失效")
+    expect(state.tick(ObjectIdentifier(new)) == .ping, "旧定时器不清掉新连接的应答标记")
+    state.pong(ObjectIdentifier(old))
+    expect(state.tick(ObjectIdentifier(new)) == .unanswered, "旧连接的 pong 不冒充新连接")
+    state.reset(ObjectIdentifier(new))
+    _ = state.tick(ObjectIdentifier(new))
+    state.pong(ObjectIdentifier(new))
+    expect(state.tick(ObjectIdentifier(new)) == .ping, "收到 pong 后下一轮继续 ping")
+}
+
 @MainActor
 func testRemoteControlWhitelist() async {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -8048,6 +8065,32 @@ func testPhoneHermesChatGate() async {
     case .failure(let text):
         expect(false, "单文件下载应成功，实际：\(text)")
     }
+    let heavy = wide.appendingPathComponent("heavy.bin")
+    FileManager.default.createFile(atPath: heavy.path, contents: Data(repeating: 1, count: 16))
+    switch PhoneHermesDirectory.packDownload(root: wide.path, relatives: ["heavy.bin"], byteLimit: 4) {
+    case .failure(let text):
+        expect(text == "超过 20MB，没法下载", "超限单文件不读进内存就拒绝")
+    case .success:
+        expect(false, "超限单文件不读进内存就拒绝")
+    }
+    try? FileManager.default.removeItem(at: heavy)
+    let bigDir = wide.appendingPathComponent("big-dir", isDirectory: true)
+    try? FileManager.default.createDirectory(at: bigDir, withIntermediateDirectories: true)
+    for index in 0..<3 {
+        FileManager.default.createFile(
+            atPath: bigDir.appendingPathComponent("blob\(index).bin").path,
+            contents: Data(repeating: 7, count: 64)
+        )
+    }
+    expect(PhoneHermesDirectory.rawSize(of: [bigDir.path], cap: 1000) == 192, "原始体积累加目录内文件")
+    expect(PhoneHermesDirectory.rawSize(of: [bigDir.path], cap: 100) == nil, "原始体积超上限提前停")
+    switch PhoneHermesDirectory.packDownload(root: wide.path, relatives: ["big-dir"], byteLimit: 10) {
+    case .failure(let text):
+        expect(text == "选中的内容太大，没法下载", "超大文件夹在复制前就拒绝")
+    case .success:
+        expect(false, "超大文件夹在复制前就拒绝")
+    }
+    try? FileManager.default.removeItem(at: bigDir)
     expect(PhoneHermesApp.downloadRelatives(from: #"["a.md","dir"]"#) == ["a.md", "dir"], "下载列表解析 JSON 数组")
     expect(PhoneHermesApp.downloadRelatives(from: "not-json") == nil, "下载列表拒绝非 JSON")
 
@@ -9361,6 +9404,7 @@ struct TestRunnerMain {
         testRemoteControlBrowserPage()
         await testRemoteControlAssociationPage()
         testRemoteButtonsStayOnThisMac()
+        testRemoteControlPingState()
         await testRemoteControlWhitelist()
         await testPhoneHermesProfileModel()
         await testPhoneHermesMessageSlices()
@@ -9391,6 +9435,8 @@ struct TestRunnerMain {
         testBookmarkSyncActivityLog()
         testBookmarkExtensionOpenHelpers()
         testBookmarkCLIParser()
+        testBookmarkLedgerStoreKeepsCorruptFile()
+        await testIPCServerReadsRequestAcrossChunks()
         await testBookmarkCLIExecutorCRUDAndPull()
         testBookmarkSiblingIndexClamp()
         testBookmarkLayoutIndexAndLegacyDecode()

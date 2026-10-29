@@ -246,7 +246,7 @@ final class GlobalShortcutService {
 
     private func process(_ event: KeyboardEventSnapshot) -> ShortcutStep {
         let frontmost = frontmostApps.frontmost()
-        let qTarget = commandQTargets.commandQTarget()
+        let qTarget = event.key == .commandQ ? commandQTargets.commandQTarget() : nil
         return engine.process(
             event,
             frontmost: frontmost,
