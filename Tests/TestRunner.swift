@@ -1486,6 +1486,48 @@ private final class FakeAutomationPasteboard: AutomationPasteboardReading {
     func string() -> String? { value }
 }
 
+func testSettingsPagesUseSecondaryTabs() {
+    let titles = SettingsPage.allCases.map(\.title)
+    expect(
+        titles == ["菜单栏", "路径", "输入", "工具", "模型", "连接", "通用"],
+        "设置一级页按菜单栏、路径、输入、工具、模型、连接、通用排列"
+    )
+    func sectionTitles(_ page: SettingsPage) -> [String] { page.sections.map(\.title) }
+    expect(sectionTitles(.menubar) == ["文件夹", "窗口"], "菜单栏二级标签")
+    expect(sectionTitles(.path) == ["固定根", "跟随", "访达"], "路径二级标签")
+    expect(sectionTitles(.input) == ["键盘", "触控板", "遥控", "改键"], "输入二级标签")
+    expect(sectionTitles(.tools) == ["定时器", "书签", "扩展", "程序坞"], "工具二级标签")
+    expect(sectionTitles(.model) == ["状态", "厂家", "密钥", "自动化"], "模型二级标签")
+    expect(sectionTitles(.connection) == ["应用", "微信"], "连接二级标签")
+    expect(sectionTitles(.general) == ["启动", "配置", "说明"], "通用二级标签")
+    expect(SettingsPage.tools.sections.contains { $0.id == "timers" }, "定时器仍在工具页")
+    expect(StatusBarIconCatalog.folder.count >= 8, "文件夹图标样式不少于 8 个")
+    expect(StatusBarIconCatalog.windows.count >= 8, "窗口图标样式不少于 8 个")
+    expect(StatusBarIconCatalog.contains("folder", slot: .folder), "默认文件夹符号在目录里")
+    expect(StatusBarIconCatalog.contains("macwindow", slot: .windows), "默认窗口符号在目录里")
+}
+
+func testStatusBarIconSettings() {
+    let suite = "tocode-test-icons-\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defaults.removePersistentDomain(forName: suite)
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let store = StatusBarIconSettingsStore(defaults: defaults)
+    expect(store.isVisible(.folder), "文件夹图标默认显示")
+    expect(store.isVisible(.windows), "窗口图标默认显示")
+    expect(store.symbol(for: .folder) == "folder", "文件夹图标默认符号")
+    expect(store.symbol(for: .windows) == "macwindow", "窗口图标默认符号")
+    store.setVisible(false, slot: .folder)
+    expect(!store.isVisible(.folder), "文件夹图标可以关掉")
+    expect(store.isVisible(.windows), "关掉一个图标不影响另一个")
+    store.setSymbol("books.vertical.fill", slot: .folder)
+    expect(store.symbol(for: .folder) == "books.vertical.fill", "记住所选文件夹符号")
+    defaults.set("not-a-symbol", forKey: StatusBarIconSlot.folder.symbolKey)
+    expect(store.symbol(for: .folder) == "folder", "不认识的符号退回默认")
+    store.setSymbol("macwindow", slot: .folder)
+    expect(store.symbol(for: .folder) == "folder", "另一个图标的符号不能写进文件夹")
+}
+
 func testUserManualPages() {
     expect(UserManual.menuTitle == "说明书", "说明书顶层标题")
     let titles = UserManual.pages.map(\.title)
@@ -1500,7 +1542,7 @@ func testUserManualPages() {
     expect(joined.contains("一行一条") || joined.contains("换行"), "说明书说明多路径换行")
     expect(joined.contains("历史"), "说明书覆盖目录树历史同级")
     expect(joined.contains("始终从当前解析根的第一层开始"), "说明书写明根菜单不整页跳转")
-    expect(joined.contains("分隔线 →「历史」→「配置」→「终端」→「新增」"), "说明书写明根菜单底部结构")
+    expect(joined.contains("分隔线 →「历史」→「终端」→「新增」"), "说明书写明根菜单底部结构")
     expect(joined.contains("终端跟随（默认关）"), "说明书覆盖终端跟随开关")
     expect(joined.contains("hermes跟随（默认关）"), "说明书覆盖 hermes跟随开关")
     expect(joined.contains("当前打开的会话"), "说明书写明用当前打开会话找档案")
@@ -1527,14 +1569,15 @@ func testUserManualPages() {
     expect(joined.contains("创建成功后会自动把新建项"), "说明书覆盖新增成功复制路径")
     expect(joined.contains("全角括号包裹"), "说明书写明「路径」格式")
     expect(joined.contains("配置 → 导出配置"), "说明书覆盖配置夹导入导出")
-    expect(joined.contains("设置夹最底部"), "说明书写明在设置夹底部")
+    expect(joined.contains("设置窗口「通用」"), "说明书写明说明书在设置窗口通用页")
     expect(!joined.contains("AK → 密钥"), "说明书不再写 AK 下密钥入口")
     expect(!joined.contains("拓展设置"), "说明书不再写拓展设置")
     expect(!joined.contains("密钥 → AI"), "说明书不再写密钥夹")
     expect(!joined.contains("设置 → 密钥"), "说明书不再写设置下密钥")
     expect(joined.contains("文稿/wechat"), "说明书写明归档在本机文稿/wechat")
     expect(!joined.contains("/Users/admin/Documents/wechat"), "说明书不写死 admin 用户路径")
-    expect(joined.contains("按住 totti 再左键点图标"), "说明书写明 totti 左键切换窗口")
+    expect(joined.contains("窗口图标左键"), "说明书写明窗口图标左键切换窗口")
+    expect(!joined.contains("按住 totti 再左键点图标"), "说明书不再要求按住 totti 才打开窗口菜单")
     expect(joined.contains("点击桌面夹"), "说明书写明点击桌面夹切换")
     expect(joined.contains("向右箭头"), "说明书写明桌面夹有向右箭头")
     expect(joined.contains("全屏空间不是夹"), "说明书写明全屏空间不是夹")
@@ -1638,20 +1681,20 @@ func testRootPathStore() {
 
 func testDesktopWindowSwitch() {
     expect(
-        StatusItemPrimaryClick.resolve(isRightClick: false, tottiHeld: true) == .desktopWindows,
-        "左键加 totti 进入窗口菜单"
+        StatusItemPrimaryClick.resolve(slot: .folder, isRightClick: false) == .directory,
+        "文件夹左键进入目录树"
     )
     expect(
-        StatusItemPrimaryClick.resolve(isRightClick: false, tottiHeld: false) == .directory,
-        "普通左键进入目录树"
+        StatusItemPrimaryClick.resolve(slot: .folder, isRightClick: true) == .bookmarks,
+        "文件夹右键进入书签"
     )
     expect(
-        StatusItemPrimaryClick.resolve(isRightClick: true, tottiHeld: true) == .actionMenu,
-        "按住 totti 时右键仍是功能菜单"
+        StatusItemPrimaryClick.resolve(slot: .windows, isRightClick: false) == .desktopWindows,
+        "窗口图标左键进入窗口菜单"
     )
     expect(
-        StatusItemPrimaryClick.resolve(isRightClick: true, tottiHeld: false) == .actionMenu,
-        "普通右键是功能菜单"
+        StatusItemPrimaryClick.resolve(slot: .windows, isRightClick: true) == .actions,
+        "窗口图标右键进入一次性动作"
     )
     expect(SkyLightSpaceDumpParser.parse(["不是字典"]) == nil, "桌面结构认不出时失败")
 
@@ -9337,6 +9380,8 @@ struct TestRunnerMain {
         testTocodePreferencesMigrationReadsProcessStandardDomain()
         testTocodePortableSettingsTransfer()
         testUserManualPages()
+        testSettingsPagesUseSecondaryTabs()
+        testStatusBarIconSettings()
         await testModelRelayPromptFormLayout()
         testModelRelayValidationConfigAndVault()
         testModelRelayHTTPParser()
@@ -9427,6 +9472,7 @@ struct TestRunnerMain {
         await testTocodeCommandExecutorMapping()
         testTocodeCLIRunnerAndIPC()
         testDiagnosticLogSanitizeAndWrite()
+        testBookmarkMenuModel()
         testBookmarkURLCanonicalize()
         testFolderTombstoneTreeAbsenceSeed()
         testBookmarkLedgerUnionAndDedupe()

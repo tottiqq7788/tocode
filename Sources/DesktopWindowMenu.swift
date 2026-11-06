@@ -1,14 +1,28 @@
 import Foundation
 
-/// 菜单栏主键点击的去向。右键始终是功能菜单；左键只在正在按住 totti 时打开桌面窗口菜单。
+/// 两个菜单栏图标各自的左键和右键。totti 不再参与这次分流。
+enum StatusItemSlot: Equatable {
+    case folder
+    case windows
+}
+
 enum StatusItemPrimaryClick: Equatable {
     case directory
-    case actionMenu
+    case bookmarks
     case desktopWindows
+    case actions
 
-    static func resolve(isRightClick: Bool, tottiHeld: Bool) -> StatusItemPrimaryClick {
-        if isRightClick { return .actionMenu }
-        return tottiHeld ? .desktopWindows : .directory
+    static func resolve(slot: StatusItemSlot, isRightClick: Bool) -> StatusItemPrimaryClick {
+        switch (slot, isRightClick) {
+        case (.folder, false):
+            return .directory
+        case (.folder, true):
+            return .bookmarks
+        case (.windows, false):
+            return .desktopWindows
+        case (.windows, true):
+            return .actions
+        }
     }
 }
 

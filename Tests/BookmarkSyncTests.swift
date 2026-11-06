@@ -1656,3 +1656,35 @@ func testBookmarkOnlinePresenceMultiConnection() {
         "firefox 无连接则不勾选"
     )
 }
+
+func testBookmarkMenuModel() {
+    expect(BookmarkMenuModel.roots(from: .empty).isEmpty, "空账本不生成书签菜单")
+    let link = BookmarkEntry(
+        url: "https://a.com",
+        title: "A",
+        folder: BookmarkFolderPath(kind: .toolbar, segments: []),
+        siblingIndex: 0,
+        updatedAt: 1
+    )
+    let nested = BookmarkEntry(
+        url: "https://b.com/x",
+        title: "",
+        folder: BookmarkFolderPath(kind: .toolbar, segments: ["资料"]),
+        siblingIndex: 0,
+        updatedAt: 2
+    )
+    let snapshot = BookmarkLedgerSnapshot(
+        version: 1,
+        entries: [link, nested],
+        folders: [],
+        tombstones: [],
+        remoteRevision: 0,
+        joinedBrowserKeys: []
+    )
+    let roots = BookmarkMenuModel.roots(from: snapshot)
+    expect(roots.count == 1 && roots[0].title == "书签栏" && roots[0].url == nil, "书签栏是文件夹")
+    expect(roots[0].children.contains { $0.url == "https://a.com" && $0.title == "A" }, "根上的网址可打开")
+    let folder = roots[0].children.first { $0.title == "资料" && $0.url == nil }
+    expect(folder?.children.first?.url == "https://b.com/x", "子夹里的网址保留")
+    expect(folder?.children.first?.title == "https://b.com/x", "空标题用网址显示")
+}

@@ -27,6 +27,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var modelRelay: ModelRelayService?
     private var hermesGateway: HermesGatewayService?
 
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.regular)
+        let main = NSMenu()
+        let appItem = NSMenuItem()
+        appItem.title = "Tocode"
+        main.addItem(appItem)
+        let appMenu = NSMenu(title: "Tocode")
+        appMenu.addItem(
+            withTitle: "关于 Tocode",
+            action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
+            keyEquivalent: ""
+        )
+        appMenu.addItem(.separator())
+        let openSettings = NSMenuItem(
+            title: "设置…",
+            action: #selector(openSettingsFromMenu),
+            keyEquivalent: ","
+        )
+        openSettings.target = self
+        appMenu.addItem(openSettings)
+        appMenu.addItem(.separator())
+        appMenu.addItem(
+            withTitle: "隐藏 Tocode",
+            action: #selector(NSApplication.hide(_:)),
+            keyEquivalent: "h"
+        )
+        let hideOthers = appMenu.addItem(
+            withTitle: "隐藏其他",
+            action: #selector(NSApplication.hideOtherApplications(_:)),
+            keyEquivalent: "h"
+        )
+        hideOthers.keyEquivalentModifierMask = [.command, .option]
+        appMenu.addItem(
+            withTitle: "显示全部",
+            action: #selector(NSApplication.unhideAllApplications(_:)),
+            keyEquivalent: ""
+        )
+        appItem.submenu = appMenu
+        NSApp.mainMenu = main
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         TocodePreferences.migrateIfNeeded()
         let service = GlobalShortcutService()
@@ -163,6 +204,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hermesGateway.applySavedPreference()
 
         weChat.startBoundListener()
+        controller.showSettings()
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        controller?.showSettings()
+        return true
+    }
+
+    @objc private func openSettingsFromMenu() {
+        controller?.showSettings()
     }
 
     private func installCLI() {

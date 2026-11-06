@@ -27,6 +27,8 @@ swiftc Tests/TestRunner.swift \
   Sources/CodexProjectService.swift \
   Sources/CodexSyncSettingsStore.swift \
   Sources/FinderFollowSettingsStore.swift \
+  Sources/SettingsOutline.swift \
+  Sources/StatusBarIconSettings.swift \
   Sources/TerminalFollowSettingsStore.swift \
   Sources/HermesFollowSettingsStore.swift \
   Sources/HermesProjectService.swift \
