@@ -6012,6 +6012,19 @@ func testScreenBlackoutService() {
     expect(overlay.showCount == 2, "再次 activate 重新 show")
 }
 
+@MainActor
+func testScreenBlackoutCoversFullscreenSpace() {
+    let behavior = ScreenBlackoutPresentation.collectionBehavior
+    expect(behavior.contains(.fullScreenAuxiliary), "黑屏加入其他应用的全屏空间")
+    expect(behavior.contains(.canJoinAllSpaces), "黑屏仍覆盖各个桌面")
+    expect(behavior.contains(.stationary), "黑屏不随调度中心挪走")
+    expect(ScreenBlackoutPresentation.level == .screenSaver, "黑屏层级使用屏幕保护层，仍能成为按键窗口")
+    expect(
+        ScreenBlackoutPresentation.level.rawValue >= NSWindow.Level.screenSaver.rawValue,
+        "黑屏层级不低于屏幕保护"
+    )
+}
+
 func testWeChatModelsCryptoAndState() {
     let voiceJSON = Data(#"{"type":3,"voice_item":{"text_item":{"text":"语音内容"}}}"#.utf8)
     let voice = try! JSONDecoder().decode(WeChatItem.self, from: voiceJSON)
@@ -9492,6 +9505,7 @@ struct TestRunnerMain {
         testMacTimerStoreAndService()
         testDockAutohideRestrict()
         testScreenBlackoutService()
+        testScreenBlackoutCoversFullscreenSpace()
         testWeChatModelsCryptoAndState()
         testWeChatArchiveNaming()
         testWeChatArchiveLocation()

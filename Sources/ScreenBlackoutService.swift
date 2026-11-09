@@ -31,6 +31,24 @@ final class ScreenBlackoutService {
     }
 }
 
+/// 覆盖层要同时出现在普通桌面和其他应用的全屏空间。
+/// 只设 canJoinAllSpaces 时，窗口会留在桌面空间，全屏应用挡住它，退出全屏才看得到。
+enum ScreenBlackoutPresentation {
+    static let collectionBehavior: NSWindow.CollectionBehavior = [
+        .canJoinAllSpaces,
+        .fullScreenAuxiliary,
+        .stationary,
+        .ignoresCycle
+    ]
+    static let level: NSWindow.Level = .screenSaver
+
+    static func apply(to window: NSWindow) {
+        window.collectionBehavior = collectionBehavior
+        window.level = level
+        window.hidesOnDeactivate = false
+    }
+}
+
 /// 实际的全屏黑色无边框覆盖窗口：每个显示器一个，纯黑且不渲染任何提示文字，任意按键或鼠标点击解除。
 @MainActor
 final class ScreenBlackoutOverlay: ScreenBlackoutOverlaying {
@@ -50,11 +68,11 @@ final class ScreenBlackoutOverlay: ScreenBlackoutOverlaying {
                 defer: false
             )
             window.backgroundColor = .black
-            window.level = .screenSaver
-            window.collectionBehavior = [.canJoinAllSpaces, .stationary]
             window.isOpaque = true
             window.hasShadow = false
             window.isReleasedWhenClosed = false
+            window.isMovable = false
+            ScreenBlackoutPresentation.apply(to: window)
 
             let content = ScreenBlackoutContentView(frame: screen.frame)
             content.wantsLayer = true
@@ -64,13 +82,22 @@ final class ScreenBlackoutOverlay: ScreenBlackoutOverlaying {
                 self?.dismiss()
             }
             window.contentView = content
-            window.makeKeyAndOrderFront(nil)
             window.orderFrontRegardless()
-            window.makeFirstResponder(content)
             created.append(window)
         }
         windows = created
+        // 激活会把窗口重新归到本应用所在的桌面空间，需要再声明一次全屏空间并置前。
         NSApp.activate(ignoringOtherApps: true)
+        for window in windows {
+            ScreenBlackoutPresentation.apply(to: window)
+            window.orderFrontRegardless()
+        }
+        if let keyWindow = windows.first {
+            keyWindow.makeKey()
+            keyWindow.makeFirstResponder(keyWindow.contentView)
+            ScreenBlackoutPresentation.apply(to: keyWindow)
+            keyWindow.orderFrontRegardless()
+        }
     }
 
     func dismiss() {
