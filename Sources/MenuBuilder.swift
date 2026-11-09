@@ -103,13 +103,25 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
         entryItems.removeAll()
         bottomItems.removeAll()
         menuDirectoryMap.removeAll()
+        menu.delegate = self
         fill(menu, with: self.treeRoot, showHistory: true)
     }
 
+    /// 子菜单窗口出现前填充。跟踪开始后再改条目数会让子菜单被关掉，鼠标不动也不会再展开。
+    func menu(_ menu: NSMenu, willHighlight item: NSMenuItem?) {
+        guard let submenu = item?.submenu else { return }
+        populateIfNeeded(submenu)
+    }
+
     func menuWillOpen(_ menu: NSMenu) {
+        populateIfNeeded(menu)
+    }
+
+    /// 只在仍是单个占位项时填充一次。高亮和打开都可能走到这里，不能重复追加。
+    private func populateIfNeeded(_ menu: NSMenu) {
         guard let dir = menuDirectoryMap[ObjectIdentifier(menu)] else { return }
-        guard let idx = menu.items.firstIndex(where: { $0.title == Self.placeholderTitle }) else { return }
-        menu.removeItem(at: idx)
+        guard menu.items.count == 1, menu.items[0].title == Self.placeholderTitle else { return }
+        menu.removeItem(at: 0)
         fill(menu, with: dir, showHistory: false)
     }
 

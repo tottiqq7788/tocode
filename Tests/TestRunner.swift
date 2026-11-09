@@ -237,6 +237,60 @@ func testRootMenuTerminalItem() {
     expect(menu.items.last?.title == "访问", "访问模式只改底部新增")
 }
 
+@MainActor
+func testSubmenuPrefillsOnHighlight() {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("tocode-prefill-\(UUID().uuidString)", isDirectory: true)
+    let child = root.appendingPathComponent("child", isDirectory: true)
+    let nested = child.appendingPathComponent("nested", isDirectory: true)
+    try! FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+    try! Data().write(to: child.appendingPathComponent("note.txt"))
+    try! Data().write(to: nested.appendingPathComponent("deep.txt"))
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let suite = "tocode.prefill.test.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let builder = MenuBuilder(resumeStore: DirectoryMenuResumeStore(defaults: defaults))
+    let menu = NSMenu()
+    menu.autoenablesItems = false
+    builder.fillRoot(menu, with: root.path)
+    expect((menu.delegate as AnyObject?) === builder, "根菜单把高亮交给构建器")
+
+    guard let childItem = menu.items.first(where: { $0.title == "child" }),
+          let submenu = childItem.submenu else {
+        expect(false, "子文件夹有待填充的子菜单")
+        return
+    }
+    expect(submenu.items.map(\.title) == ["\u{2026}"], "高亮前子菜单只有占位项")
+
+    builder.menu(menu, willHighlight: childItem)
+    let once = submenu.items.map(\.title)
+    expect(once.contains("note.txt"), "高亮时已填入真实条目")
+    expect(once.contains("nested"), "高亮时已填入下级文件夹")
+    expect(once.last == "新增", "高亮填充后底部仍是新增")
+    expect(!once.contains("\u{2026}"), "占位项已去掉")
+    expect(!once.contains("终端"), "子文件夹菜单没有终端")
+
+    guard let nestedItem = submenu.items.first(where: { $0.title == "nested" }),
+          let nestedMenu = nestedItem.submenu else {
+        expect(false, "更深层文件夹有待填充的子菜单")
+        return
+    }
+    expect(nestedMenu.items.map(\.title) == ["\u{2026}"], "更深层在高亮前仍是占位")
+    builder.menu(submenu, willHighlight: nestedItem)
+    let nestedOnce = nestedMenu.items.map(\.title)
+    expect(nestedOnce.contains("deep.txt"), "高亮更深层时填入其内容")
+    expect(!nestedOnce.contains("终端"), "更深层菜单没有终端")
+
+    builder.menu(menu, willHighlight: childItem)
+    builder.menuWillOpen(submenu)
+    expect(submenu.items.map(\.title) == once, "再次高亮或打开不重复条目")
+    builder.menu(submenu, willHighlight: nestedItem)
+    builder.menuWillOpen(nestedMenu)
+    expect(nestedMenu.items.map(\.title) == nestedOnce, "更深层再次高亮或打开不重复条目")
+}
+
 func testTerminalWindowFollow() {
     let path = "/tmp/tocode terminal \(UUID().uuidString)"
     expect(!DirectoryTerminalCommand.frontWindowScript.contains(path), "读取前台窗口的脚本不含目录")
@@ -9363,6 +9417,7 @@ struct TestRunnerMain {
         testFileSystemService()
         testFileCreationAndTrash()
         await testRootMenuTerminalItem()
+        await testSubmenuPrefillsOnHighlight()
         testTerminalWindowFollow()
         testHermesProjectFollow()
         testHermesCurrentProfileDatabase()

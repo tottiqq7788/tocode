@@ -409,7 +409,6 @@ final class StatusItemController: NSObject, SettingsHosting {
         let root = resolveDirectoryRoot()
         builder.makeRootConfigItem = nil
         builder.fillRoot(menu, with: root, includeHidden: visibility.currentShowAllFiles())
-        addBottomSpacer(to: menu)
 
         startModifierPolling()
         builder.resetMultiCopySession()
@@ -433,7 +432,6 @@ final class StatusItemController: NSObject, SettingsHosting {
             target: self,
             action: #selector(openBookmarkMenuItem(_:))
         )
-        addBottomSpacer(to: menu)
         popUp(menu, on: button)
     }
 
@@ -515,7 +513,6 @@ final class StatusItemController: NSObject, SettingsHosting {
                 liveTimerMenuItems[timer.id] = item
             }
         }
-        addBottomSpacer(to: menu)
         startTimerMenuRefresh()
         popUp(menu, on: button)
         stopTimerMenuRefresh()
@@ -1485,14 +1482,6 @@ final class StatusItemController: NSObject, SettingsHosting {
     }
 
     // MARK: - 通知
-
-    /// 在菜单末尾加一段底部留白，避免最后一项贴着菜单框底。
-    private func addBottomSpacer(to menu: NSMenu) {
-        let item = NSMenuItem()
-        item.view = NSView(frame: NSRect(x: 0, y: 0, width: 10, height: 8))
-        item.isEnabled = false
-        menu.addItem(item)
-    }
 
     private func requestNotificationAuthorization() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
