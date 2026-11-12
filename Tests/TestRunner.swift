@@ -9766,6 +9766,38 @@ func testDiagnosticLogSanitizeAndWrite() {
     expect(!raw.contains("\"token\""), "落盘不含 token 键")
 }
 
+func testDiagnosticLogDropsOldestLinesWhenOverCap() {
+    var existing = Data()
+    for index in 0..<20 {
+        existing.append(Data("{\"n\":\(index)}\n".utf8))
+    }
+    let incoming = Data("{\"n\":20}\n".utf8)
+    let kept = DiagnosticLog.keepingNewestLines(
+        existing,
+        incomingBytes: incoming.count,
+        maxBytes: 80,
+        slackBytes: 0
+    )
+    let text = String(data: kept, encoding: .utf8) ?? ""
+    expect(kept.count + incoming.count <= 80, "裁掉旧行后能放下新的一行")
+    expect(text.contains("{\"n\":19}"), "留下最新的旧行")
+    expect(!text.contains("{\"n\":0}"), "丢掉最前面的行")
+    expect(text.isEmpty || text.hasPrefix("{"), "不从一行中间切开")
+    expect(text.isEmpty || text.hasSuffix("\n"), "保留的内容以整行结束")
+
+    let cut = DiagnosticLog.keepingNewestLines(
+        Data("aaaa\nbbbb\ncccc\n".utf8),
+        incomingBytes: 5,
+        maxBytes: 13,
+        slackBytes: 0
+    )
+    expect(String(data: cut, encoding: .utf8) == "cccc\n", "切在行中间时整行丢掉")
+
+    let blob = Data(repeating: UInt8(ascii: "a"), count: 50)
+    let dropped = DiagnosticLog.keepingNewestLines(blob, incomingBytes: 10, maxBytes: 40, slackBytes: 0)
+    expect(dropped.isEmpty, "没有换行就整段丢掉，不留半行")
+}
+
 @main
 struct TestRunnerMain {
     static func main() async {
@@ -9888,6 +9920,7 @@ struct TestRunnerMain {
         await testTocodeCommandExecutorMapping()
         testTocodeCLIRunnerAndIPC()
         testDiagnosticLogSanitizeAndWrite()
+        testDiagnosticLogDropsOldestLinesWhenOverCap()
         testBookmarkMenuModel()
         testBookmarkURLCanonicalize()
         testFolderTombstoneTreeAbsenceSeed()

@@ -12,6 +12,8 @@ final class DiagnosticLog {
     private let tsFormatter: ISO8601DateFormatter
     private var corr = UUID().uuidString.lowercased()
     private static let maxFileBytes = 8 * 1024 * 1024
+    /// 触顶后一次多丢掉这块旧内容，避免每写一行都重写整个文件。
+    private static let trimSlackBytes = 256 * 1024
     private static let keepDays = 7
     private static let blockedKeys: Set<String> = [
         "token", "device_token", "link_token", "authorization", "binding_key",
@@ -109,6 +111,39 @@ final class DiagnosticLog {
         return out
     }
 
+    /// 新内容放不下时，从开头丢掉整行，留下最新的一段。结果加上 `incomingBytes` 不超过 `maxBytes`。
+    static func keepingNewestLines(
+        _ existing: Data,
+        incomingBytes: Int,
+        maxBytes: Int,
+        slackBytes: Int = 0
+    ) -> Data {
+        guard incomingBytes > 0, incomingBytes <= maxBytes else { return Data() }
+        let room = maxBytes - incomingBytes
+        guard existing.count > room else { return existing }
+        let needed = existing.count - room
+        let drop = min(existing.count, max(needed, slackBytes))
+        return dropWholeLines(existing, minimumDrop: drop)
+    }
+
+    private static func dropWholeLines(_ data: Data, minimumDrop: Int) -> Data {
+        guard minimumDrop > 0 else { return data }
+        if minimumDrop >= data.count { return Data() }
+        let newline = UInt8(ascii: "\n")
+        var index = minimumDrop
+        if data[index - 1] == newline {
+            return data.subdata(in: index..<data.count)
+        }
+        while index < data.count {
+            if data[index] == newline {
+                let start = index + 1
+                return start >= data.count ? Data() : data.subdata(in: start..<data.count)
+            }
+            index += 1
+        }
+        return Data()
+    }
+
     private func append(_ row: [String: Any]) {
         lock.lock()
         defer { lock.unlock() }
@@ -128,11 +163,8 @@ final class DiagnosticLog {
                     attributes: [.posixPermissions: NSNumber(value: 0o600)]
                 )
             }
-            if let attrs = try? fileManager.attributesOfItem(atPath: file.path),
-               let size = attrs[.size] as? NSNumber,
-               size.intValue > Self.maxFileBytes {
-                return
-            }
+            guard bytes.count <= Self.maxFileBytes else { return }
+            try trimFrontIfNeededLocked(file: file, incoming: bytes.count)
             let handle = try FileHandle(forWritingTo: file)
             defer { try? handle.close() }
             try handle.seekToEnd()
@@ -144,6 +176,25 @@ final class DiagnosticLog {
         } catch {
             return
         }
+    }
+
+    private func trimFrontIfNeededLocked(file: URL, incoming: Int) throws {
+        let attrs = try fileManager.attributesOfItem(atPath: file.path)
+        let size = (attrs[.size] as? NSNumber)?.intValue ?? 0
+        guard size + incoming > Self.maxFileBytes else { return }
+        let existing = try Data(contentsOf: file)
+        let kept = Self.keepingNewestLines(
+            existing,
+            incomingBytes: incoming,
+            maxBytes: Self.maxFileBytes,
+            slackBytes: Self.trimSlackBytes
+        )
+        guard kept.count != existing.count else { return }
+        try kept.write(to: file, options: .atomic)
+        try fileManager.setAttributes(
+            [.posixPermissions: NSNumber(value: 0o600)],
+            ofItemAtPath: file.path
+        )
     }
 
     private func fileURLLocked(for date: Date) -> URL {
