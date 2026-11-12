@@ -27,11 +27,14 @@ final class MenuOpenNote: NSObject, NSMenuDelegate {
     }
 }
 
-/// 两个菜单栏图标：文件夹负责路径和书签，窗口图标负责桌面和一次性动作。
+/// 一颗菜单栏图标：左键打开当前菜单，右键在文件、窗口、书签之间切换。
 @MainActor
 final class StatusItemController: NSObject, SettingsHosting {
-    private let folderItem: NSStatusItem
-    private let windowsItem: NSStatusItem
+    private let statusItem: NSStatusItem
+    private var ringSample = StatusRingSample()
+    private let menuKind = StatusMenuKindStore()
+    private var meterTimer: Timer?
+    private let outputWatch = StatusOutputLevelWatch()
     private var settingsWindow: SettingsWindowController?
     private let terminalWindows: DirectoryTerminalWindowStore
     private let terminalFrontWindow: DirectoryTerminalFrontWindowReading
@@ -57,7 +60,6 @@ final class StatusItemController: NSObject, SettingsHosting {
     private let codex: CodexProjectService
     private let codexSync: CodexSyncSettingsStore
     private let finderFollow: FinderFollowSettingsStore
-    private let statusBarIcons = StatusBarIconSettingsStore()
     private let terminalFollow: TerminalFollowSettingsStore
     private let hermesFollow: HermesFollowSettingsStore
     private let hermesProjects: HermesProjectService
@@ -66,17 +68,9 @@ final class StatusItemController: NSObject, SettingsHosting {
     private let commandExecutor: TocodeCommandExecutor
     private let desktopCatalog: DesktopWindowCataloging
     private let desktopSwitcher: DesktopSpaceSwitching
-    private let modelRelay: ModelRelayService
-    private let automationRunner: ModelAutomationRunner
     private let actionDispatcher = KeyboardMappingActionDispatcher()
-    private var isCreatingModelRelayProvider = false
-    private var relayBusyProviderIDs: Set<UUID> = []
     private var modifierPollingTimer: Timer?
     private var isPresentingStatusMenu = false
-    private var timerMenuRefreshTimer: Timer?
-    private weak var liveTimerMenu: NSMenu?
-    private weak var liveModelRelayStatusItem: NSMenuItem?
-    private var liveTimerMenuItems: [UUID: NSMenuItem] = [:]
     /// 「拓展安装」子菜单 delegate（NSMenu.delegate 为 weak，须强引用）。
     private var bookmarkInstallMenuDelegate: BookmarkExtensionInstallMenuDelegate?
     private static let portableSettingsType =
@@ -103,7 +97,6 @@ final class StatusItemController: NSObject, SettingsHosting {
         hermesProjects: HermesProjectService = HermesProjectService(),
         hermesGateway: HermesGatewayControlling,
         screenBlackout: ScreenBlackoutService? = nil,
-        modelRelay: ModelRelayService,
         commandExecutor: TocodeCommandExecutor,
         desktopCatalog: DesktopWindowCataloging = SystemDesktopWindowCatalog(),
         desktopSwitcher: DesktopSpaceSwitching = SystemDesktopSpaceSwitcher()
@@ -128,23 +121,6 @@ final class StatusItemController: NSObject, SettingsHosting {
         self.hermesProjects = hermesProjects
         self.hermesGateway = hermesGateway
         self.screenBlackout = screenBlackout ?? ScreenBlackoutService(overlay: ScreenBlackoutOverlay())
-        self.modelRelay = modelRelay
-        self.automationRunner = ModelAutomationRunner(
-            lookup: { ModelAutomationStore().automation(id: $0) },
-            readSelection: { await SystemSelectedTextReader().readSelectedText() },
-            complete: { alias, prompt, text in
-                try await modelRelay.completeAutomation(
-                    modelAlias: alias,
-                    systemPrompt: prompt,
-                    userText: text
-                )
-            },
-            copy: { ClipboardService().copy($0) },
-            paste: { KeyboardEventSynthesizer().postCommandV() },
-            notify: { title, body in
-                ModelAutomationNotification.post(title: title, body: body)
-            }
-        )
         self.commandExecutor = commandExecutor
         self.desktopCatalog = desktopCatalog
         self.desktopSwitcher = desktopSwitcher
@@ -152,8 +128,7 @@ final class StatusItemController: NSObject, SettingsHosting {
         self.terminalWindows = terminalWindows
         self.terminalFrontWindow = SystemDirectoryTerminalFrontWindowReader()
         self.builder = MenuBuilder(terminalWindows: terminalWindows)
-        folderItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        windowsItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        statusItem = NSStatusBar.system.statusItem(withLength: 36)
         super.init()
         actionDispatcher.execute = { [weak self] command in
             guard let self else {
@@ -186,18 +161,8 @@ final class StatusItemController: NSObject, SettingsHosting {
             return self.dockAutohideRestrict.isEffective ? "已开启" : "已关闭"
         }
         actionDispatcher.lockScreen = { ScreenLock.lock() }
-        macTimers.onChange = { [weak self] in
-            MainActor.assumeIsolated {
-                self?.refreshLiveTimerMenuItems()
-            }
-        }
-        installStatusItem(folderItem, slot: .folder, autosaveName: "tocode.folder")
-        installStatusItem(windowsItem, slot: .windows, autosaveName: "tocode.windows")
-        modelRelay.didChange = { [weak self] in
-            MainActor.assumeIsolated {
-                self?.refreshModelRelayStatus()
-            }
-        }
+        installStatusItem()
+        startMeterTimer()
         requestNotificationAuthorization()
     }
 
@@ -208,51 +173,89 @@ final class StatusItemController: NSObject, SettingsHosting {
         settingsWindow?.reveal(page: page, timerID: timerID)
     }
 
-    private func installStatusItem(
-        _ item: NSStatusItem,
-        slot: StatusBarIconSlot,
-        autosaveName: String
-    ) {
-        item.autosaveName = autosaveName
-        applyStatusBarIcon(item, slot: slot)
-    }
-
-    private func statusItemHelp(_ slot: StatusBarIconSlot) -> String {
-        let left = statusBarIcons.menu(for: slot, isRightClick: false).menuTitle
-        let right = statusBarIcons.menu(for: slot, isRightClick: true).menuTitle
-        return "左键\(left)，右键\(right)"
-    }
-
-    private func applyStatusBarIcon(_ item: NSStatusItem, slot: StatusBarIconSlot) {
-        item.isVisible = statusBarIcons.isVisible(slot)
-        guard let button = item.button else { return }
-        let help = statusItemHelp(slot)
-        button.image = NSImage(
-            systemSymbolName: statusBarIcons.symbol(for: slot),
-            accessibilityDescription: help
-        )
-        button.toolTip = help
+    private func installStatusItem() {
+        statusItem.autosaveName = "tocode.folder"
+        guard let button = statusItem.button else { return }
+        button.title = ""
+        button.imagePosition = .imageOnly
+        // 按图像的 32×28 原尺寸绘制。缩小适配会把圆环一起缩窄，左右又空出一截。
+        button.imageScaling = .scaleNone
         button.target = self
         button.action = #selector(handleClick(_:))
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        applyMenuKind()
+    }
+
+    private func applyMenuKind() {
+        updateIcon()
+    }
+
+    private func updateIcon() {
+        guard let button = statusItem.button else { return }
+        let kind = menuKind.kind()
+        button.image = StatusRingIcon.image(
+            sample: ringSample,
+            symbol: kind.symbolName,
+            title: kind.title
+        )
+        let help = "左键\(kind.title)，右键切换"
+        button.toolTip = help
+        button.setAccessibilityLabel(help)
+    }
+
+    private func startMeterTimer() {
+        outputWatch.onChange = { [weak self] in
+            MainActor.assumeIsolated {
+                self?.refreshMeters()
+            }
+        }
+        outputWatch.start()
+        refreshMeters()
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.refreshMeters()
+            }
+        }
+        timer.tolerance = 0.15
+        RunLoop.main.add(timer, forMode: .common)
+        meterTimer = timer
+    }
+
+    private func refreshMeters() {
+        let next = StatusMeters.current()
+        guard meterChanged(next) else { return }
+        ringSample = next
+        updateIcon()
+    }
+
+    private func meterChanged(_ next: StatusRingSample) -> Bool {
+        if next.battery != ringSample.battery { return true }
+        if abs(next.volume - ringSample.volume) > 0.004 { return true }
+        switch (next.brightness, ringSample.brightness) {
+        case (nil, nil):
+            return false
+        case let (nextLevel?, current?):
+            return abs(nextLevel - current) > 0.004
+        default:
+            return true
+        }
     }
 
     @objc private func handleClick(_ sender: Any?) {
         if isPresentingStatusMenu { return }
-        guard let event = NSApp.currentEvent else { return }
-        let button = (sender as? NSStatusBarButton) ?? folderItem.button
-        guard let button else { return }
-        let slot: StatusBarIconSlot = button === windowsItem.button ? .windows : .folder
-        let isRight = event.type == .rightMouseUp
-        switch statusBarIcons.menu(for: slot, isRightClick: isRight) {
-        case .directory:
+        guard let event = NSApp.currentEvent, let button = statusItem.button else { return }
+        if event.type == .rightMouseUp {
+            menuKind.cycle()
+            applyMenuKind()
+            return
+        }
+        switch menuKind.kind() {
+        case .files:
             showDirectoryMenu(on: button)
+        case .windows:
+            showDesktopWindowMenu(on: button)
         case .bookmarks:
             showBookmarkMenu(on: button)
-        case .desktopWindows:
-            showDesktopWindowMenu(on: button)
-        case .actions:
-            showActionPalette(on: button)
         }
     }
 
@@ -424,14 +427,16 @@ final class StatusItemController: NSObject, SettingsHosting {
         )
     }
 
-    /// 文件夹图标左键：弹出目录树。根菜单含「历史」「终端」与「新增」，不含配置。
+    /// 文件菜单：弹出目录树。根菜单含「历史」「配置」「终端」与「新增」。
     /// Shift 连续多选尽量保持同一菜单；若系统仍关闭则立刻再弹同一菜单。
     private func showDirectoryMenu(on button: NSStatusBarButton) {
         let menu = NSMenu()
         menu.autoenablesItems = false
 
         let root = resolveDirectoryRoot()
-        builder.makeRootConfigItem = nil
+        builder.makeRootConfigItem = { [weak self] in
+            self?.makeRootConfigMenuItem() ?? NSMenuItem()
+        }
         builder.fillRoot(menu, with: root, includeHidden: visibility.currentShowAllFiles())
 
         startModifierPolling()
@@ -445,6 +450,51 @@ final class StatusItemController: NSObject, SettingsHosting {
 
         builder.resetMultiCopySession()
         stopModifierPolling()
+    }
+
+    private func makeRootConfigMenuItem() -> NSMenuItem {
+        let item = NSMenuItem(title: RootConfigMenu.title, action: nil, keyEquivalent: "")
+        item.image = NSImage(systemSymbolName: "folder.badge.gearshape", accessibilityDescription: RootConfigMenu.title)
+        let submenu = NSMenu()
+        submenu.autoenablesItems = false
+
+        let copyPath = submenu.addItem(
+            withTitle: RootConfigMenu.copyTitle,
+            action: #selector(copyFinderSelectedPath),
+            keyEquivalent: ""
+        )
+        copyPath.target = self
+        copyPath.image = NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: nil)
+
+        submenu.addItem(.separator())
+        let actionTargets: [(Selector, String)] = [
+            (#selector(readClipboard), "doc.on.clipboard"),
+            (#selector(chooseRoot), "folder.badge.plus"),
+            (#selector(resetRoot), "arrow.counterclockwise"),
+        ]
+        for (title, target) in zip(RootConfigMenu.actionTitles, actionTargets) {
+            let entry = submenu.addItem(withTitle: title, action: target.0, keyEquivalent: "")
+            entry.target = self
+            entry.image = NSImage(systemSymbolName: target.1, accessibilityDescription: nil)
+        }
+        submenu.addItem(.separator())
+        let follows: [(Bool, Selector)] = [
+            (finderFollow.followEnabled, #selector(toggleFinderFollow(_:))),
+            (terminalFollow.followEnabled, #selector(toggleTerminalFollow(_:))),
+            (codexSync.syncEnabled, #selector(toggleCodexProjectSync(_:))),
+            (hermesFollow.followEnabled, #selector(toggleHermesFollow(_:))),
+        ]
+        for (title, follow) in zip(RootConfigMenu.followTitles, follows) {
+            addShortcutToggle(to: submenu, title: title, enabled: follow.0, action: follow.1)
+        }
+        item.submenu = submenu
+        return item
+    }
+
+    private func addShortcutToggle(to menu: NSMenu, title: String, enabled: Bool, action: Selector) {
+        let item = menu.addItem(withTitle: title, action: action, keyEquivalent: "")
+        item.target = self
+        ShortcutMenuAppearance.apply(to: item, enabled: enabled)
     }
 
     private func showBookmarkMenu(on button: NSStatusBarButton) {
@@ -468,93 +518,6 @@ final class StatusItemController: NSObject, SettingsHosting {
         NSWorkspace.shared.open(url)
     }
 
-    /// 窗口图标右键：只执行，不编辑配置。
-    private func showActionPalette(on button: NSStatusBarButton) {
-        let menu = NSMenu()
-        menu.autoenablesItems = false
-
-        let blackout = menu.addItem(
-            withTitle: "临时黑屏",
-            action: #selector(activateScreenBlackout),
-            keyEquivalent: ""
-        )
-        blackout.target = self
-        blackout.image = NSImage(systemSymbolName: "display.trianglebadge.exclamationmark", accessibilityDescription: nil)
-
-        let lock = menu.addItem(
-            withTitle: "锁定屏幕",
-            action: #selector(lockScreenFromMenu),
-            keyEquivalent: ""
-        )
-        lock.target = self
-        lock.image = NSImage(systemSymbolName: "lock.fill", accessibilityDescription: nil)
-
-        let weChatLocation = menu.addItem(
-            withTitle: "微信文件位置",
-            action: #selector(openWeChatLocation),
-            keyEquivalent: ""
-        )
-        weChatLocation.target = self
-        weChatLocation.image = NSImage(systemSymbolName: "folder", accessibilityDescription: nil)
-
-        let openRoot = menu.addItem(
-            withTitle: "在访达打开根目录",
-            action: #selector(openFinderAtRoot),
-            keyEquivalent: ""
-        )
-        openRoot.target = self
-        openRoot.image = NSImage(systemSymbolName: "macwindow", accessibilityDescription: nil)
-
-        let copy = menu.addItem(
-            withTitle: "复制访达选中路径",
-            action: #selector(copyFinderSelectedPath),
-            keyEquivalent: ""
-        )
-        copy.target = self
-        copy.image = NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: nil)
-
-        menu.addItem(.separator())
-        liveTimerMenuItems.removeAll()
-        let now = Date()
-        let running = macTimers.timers.filter(\.isRunning)
-        if running.isEmpty {
-            let none = menu.addItem(withTitle: "没有正在运行的定时器", action: nil, keyEquivalent: "")
-            none.isEnabled = false
-        } else {
-            for timer in running {
-                let item = menu.addItem(
-                    withTitle: MacTimerRemaining.menuTitle(
-                        name: timer.name,
-                        fireAt: timer.fireAt,
-                        now: now
-                    ),
-                    action: #selector(openTimerInSettings(_:)),
-                    keyEquivalent: ""
-                )
-                item.target = self
-                item.representedObject = timer.id.uuidString
-                item.toolTip = timer.target.displayText
-                liveTimerMenuItems[timer.id] = item
-            }
-        }
-        startTimerMenuRefresh()
-        popUp(menu, on: button, kind: "actions")
-        stopTimerMenuRefresh()
-        liveTimerMenu = nil
-        liveTimerMenuItems.removeAll()
-    }
-
-    @objc private func lockScreenFromMenu() {
-        if !ScreenLock.lock() {
-            notifyMappedAction("无法锁定屏幕", "系统没有接受锁定请求。")
-        }
-    }
-
-    @objc private func openTimerInSettings(_ sender: NSMenuItem) {
-        let id = (sender.representedObject as? String).flatMap(UUID.init(uuidString:))
-        showSettings(page: .tools, timerID: id)
-    }
-
     /// 用状态栏菜单跟踪打开。`menu.popUp` 在应用不在前台时，下级窗口一出现就会收到一次虚假的鼠标离开。
     private func popUp(_ menu: NSMenu, on button: NSStatusBarButton, kind: String) {
         guard let item = statusItem(for: button) else { return }
@@ -575,8 +538,7 @@ final class StatusItemController: NSObject, SettingsHosting {
     }
 
     private func statusItem(for button: NSStatusBarButton) -> NSStatusItem? {
-        if button === folderItem.button { return folderItem }
-        if button === windowsItem.button { return windowsItem }
+        if button === statusItem.button { return statusItem }
         return nil
     }
 
@@ -697,219 +659,6 @@ final class StatusItemController: NSObject, SettingsHosting {
         ShortcutMenuAppearance.apply(to: sender, enabled: terminalFollow.followEnabled)
     }
 
-    private func modelRelayStatusTitle() -> String {
-        let state = modelRelay.runState
-        if case .running = state, modelRelay.router.availableAliases().isEmpty {
-            return "\(state.menuText) · 无健康上游"
-        }
-        return state.menuText
-    }
-
-    private func refreshModelRelayStatus() {
-        liveModelRelayStatusItem?.title = "状态"
-        if let snapshotPort = Optional(modelRelay.snapshot().port) {
-            liveModelRelayStatusItem?.toolTip =
-                "\(modelRelayStatusTitle()) · http://127.0.0.1:\(snapshotPort)/v1"
-        }
-    }
-
-    @objc private func showModelRelayStatus() {
-        let snapshot = modelRelay.snapshot()
-        ModelRelayStatusPanel.present(
-            port: snapshot.port,
-            runState: modelRelay.runState,
-            providers: snapshot.providers,
-            metrics: modelRelay.callMetrics
-        )
-    }
-
-    @objc private func restartModelRelay() {
-        modelRelay.stop()
-        do {
-            try modelRelay.start()
-        } catch {
-            ModelRelayPrompts.showError(error, title: "中转服务启动失败")
-        }
-    }
-
-    @objc private func changeModelRelayPort() {
-        let snapshot = modelRelay.snapshot()
-        guard let port = ModelRelayPrompts.port(current: snapshot.port) else { return }
-        modelRelay.updatePort(port) { result in
-            if case .failure(let error) = result {
-                ModelRelayPrompts.showError(error, title: "端口未修改，已恢复原监听")
-            }
-        }
-    }
-
-    @objc private func addModelRelayProvider() {
-        guard !isCreatingModelRelayProvider else { return }
-        isCreatingModelRelayProvider = true
-        presentModelRelayProviderForm(providerID: nil)
-    }
-
-    private func presentModelRelayProviderForm(
-        providerID: UUID?,
-        draft: ModelRelayPrompts.ProviderDraft? = nil,
-        tested: ModelRelayProviderConnectionTest? = nil,
-        status: String? = nil
-    ) {
-        let existing = providerID.flatMap { id in
-            modelRelay.snapshot().providers.first(where: { $0.id == id })
-        }
-        if providerID != nil, existing == nil {
-            ModelRelayPrompts.showError(ModelRelayError.providerNotFound)
-            return
-        }
-        switch ModelRelayPrompts.providerForm(
-            existing: existing,
-            draft: draft,
-            tested: tested,
-            status: status,
-            performTest: { [weak self] nextDraft, completion in
-                guard let self else { return }
-                let baseURL: String
-                do {
-                    baseURL = try nextDraft.resolvedBaseURL()
-                } catch {
-                    completion(.failure(error))
-                    return
-                }
-                if let providerID {
-                    self.relayBusyProviderIDs.insert(providerID)
-                }
-                self.modelRelay.testProviderConnection(
-                    providerID: providerID,
-                    baseURL: baseURL,
-                    candidateSecret: nextDraft.secret.isEmpty ? nil : nextDraft.secret
-                ) { [weak self] result in
-                    if let providerID {
-                        self?.relayBusyProviderIDs.remove(providerID)
-                    }
-                    completion(result)
-                }
-            },
-            performRefresh: providerID.map { id in
-                { [weak self] completion in
-                    guard let self else { return }
-                    self.relayBusyProviderIDs.insert(id)
-                    self.modelRelay.fetchModels(providerID: id) { [weak self] result in
-                        self?.relayBusyProviderIDs.remove(id)
-                        completion(result.map(\.count))
-                    }
-                }
-            }
-        ) {
-        case .cancel:
-            if providerID == nil {
-                isCreatingModelRelayProvider = false
-            }
-            return
-        case .delete(let nextDraft):
-            guard let providerID,
-                  let provider = modelRelay.snapshot().providers.first(where: { $0.id == providerID }) else {
-                return
-            }
-            guard ModelRelayPrompts.confirm(
-                title: "删除厂家“\(provider.name)”？",
-                detail: "该厂家的模型目录和唯一上游 Key 都会删除。"
-            ) else {
-                presentModelRelayProviderForm(
-                    providerID: providerID,
-                    draft: nextDraft,
-                    tested: tested,
-                    status: status
-                )
-                return
-            }
-            do {
-                try modelRelay.deleteProvider(id: providerID)
-            } catch {
-                ModelRelayPrompts.showError(error, title: "厂家未删除")
-                presentModelRelayProviderForm(
-                    providerID: providerID,
-                    draft: nextDraft,
-                    tested: tested,
-                    status: error.localizedDescription
-                )
-            }
-        case .save(let nextDraft, let latestTest):
-            do {
-                if let providerID {
-                    try modelRelay.updateProvider(
-                        id: providerID,
-                        name: nextDraft.name,
-                        using: nextDraft.requiresConnectionTest() ? latestTest : nil
-                    )
-                } else {
-                    guard let latestTest else {
-                        throw ModelRelayError.providerConnectionNotTested
-                    }
-                    try modelRelay.createProvider(name: nextDraft.name, using: latestTest)
-                    isCreatingModelRelayProvider = false
-                }
-            } catch {
-                presentModelRelayProviderForm(
-                    providerID: providerID,
-                    draft: nextDraft,
-                    tested: latestTest,
-                    status: error.localizedDescription
-                )
-            }
-        }
-    }
-
-    @objc private func manageModelRelayProvider(_ sender: NSMenuItem) {
-        guard let providerID = representedUUID(sender) else { return }
-        presentModelRelayProviderForm(providerID: providerID)
-    }
-
-    @objc private func addModelRelayLocalKey() {
-        guard let input = ModelRelayPrompts.localKey() else { return }
-        do {
-            _ = try modelRelay.createLocalKey(name: input.name)
-            ModelRelayPrompts.showMessage(
-                title: "本地 Key 已生成",
-                detail: "点击该名称并通过设备验证后，即可复制连接信息。"
-            )
-        } catch {
-            ModelRelayPrompts.showError(error, title: "本地 Key 未生成")
-        }
-    }
-
-    @objc private func accessModelRelayLocalKey(_ sender: NSMenuItem) {
-        guard let id = representedUUID(sender),
-              let record = modelRelay.snapshot().localKeys.first(where: { $0.id == id }) else { return }
-        let needsMigration = modelRelay.localKeyNeedsMigration(id)
-        guard let action = ModelRelayPrompts.localKeyAction(
-            name: record.name,
-            needsMigration: needsMigration
-        ) else { return }
-        Task { @MainActor in
-            do {
-                switch action {
-                case .copy:
-                    try await DeviceOwnerAuth.evaluate(reason: "验证后复制本地中转连接信息")
-                    clipboard.copy(try modelRelay.connectionBlock(localKeyID: id))
-                    ModelRelayPrompts.showMessage(
-                        title: "连接信息已复制",
-                        detail: "剪贴板包含 Base URL、API Key 和当前可用模型，请妥善保管。"
-                    )
-                case .migrate(let password):
-                    clipboard.copy(try modelRelay.connectionBlock(localKeyID: id, password: password))
-                    ModelRelayPrompts.showMessage(
-                        title: "已迁移并复制",
-                        detail: "密钥已迁入钥匙串。之后复制只需设备验证。"
-                    )
-                case .delete:
-                    try await DeviceOwnerAuth.evaluate(reason: "验证后删除本地中转 Key")
-                    try modelRelay.deleteLocalKey(id: id)
-                }
-            } catch {
-                ModelRelayPrompts.showError(error, title: "本地 Key 操作失败")
-            }
-        }
-    }
 
     private func representedUUID(_ sender: NSMenuItem) -> UUID? {
         (sender.representedObject as? String).flatMap(UUID.init(uuidString:))
@@ -1041,7 +790,12 @@ final class StatusItemController: NSObject, SettingsHosting {
                     break
                 }
             } catch {
-                ModelRelayPrompts.showError(error, title: "绑定密钥")
+                let alert = NSAlert()
+                alert.alertStyle = .warning
+                alert.messageText = "绑定密钥"
+                alert.informativeText = error.localizedDescription
+                alert.addButton(withTitle: "好")
+                alert.runModal()
             }
             return
         }
@@ -1050,7 +804,12 @@ final class StatusItemController: NSObject, SettingsHosting {
             do {
                 try remoteControl.setBindingKey(secret)
             } catch {
-                ModelRelayPrompts.showError(error, title: "绑定密钥未保存")
+                let alert = NSAlert()
+                alert.alertStyle = .warning
+                alert.messageText = "绑定密钥未保存"
+                alert.informativeText = error.localizedDescription
+                alert.addButton(withTitle: "好")
+                alert.runModal()
             }
         case .clear, .cancel:
             break
@@ -1196,8 +955,7 @@ final class StatusItemController: NSObject, SettingsHosting {
         let existing = trackpadShortcuts.binding(for: gesture)
         switch ShortcutRecorderPrompt.prompt(
             for: gesture,
-            existing: existing,
-            automations: ModelAutomationStore().all()
+            existing: existing
         ) {
         case .save(let target):
             if target.emitsTotti {
@@ -1255,8 +1013,7 @@ final class StatusItemController: NSObject, SettingsHosting {
         while true {
             switch KeyboardShortcutMappingPrompt.prompt(
                 draft: draft,
-                isEditing: isEditing,
-                automations: ModelAutomationStore().all()
+                isEditing: isEditing
             ) {
             case .save(let candidate):
                 switch keyboardRemaps.saveMapping(candidate) {
@@ -1304,8 +1061,7 @@ final class StatusItemController: NSObject, SettingsHosting {
         while true {
             switch RemoteButtonPrompt.prompt(
                 draft: draft,
-                isEditing: isEditing,
-                automations: ModelAutomationStore().all()
+                isEditing: isEditing
             ) {
             case .save(let candidate):
                 switch store.save(candidate) {
@@ -1349,9 +1105,6 @@ final class StatusItemController: NSObject, SettingsHosting {
                 return (true, "已执行")
             }
             return (false, "系统没有打开该网址。")
-        case .runAutomation(let id):
-            runModelAutomation(id)
-            return (true, "已执行")
         case .emitDown, .emitRepeat, .emitUp, .pass, .suppress:
             return (false, "无法执行")
         }
@@ -1405,8 +1158,7 @@ final class StatusItemController: NSObject, SettingsHosting {
         while true {
             switch MacTimerPrompt.prompt(
                 draft: draft,
-                mode: mode,
-                automations: ModelAutomationStore().all()
+                mode: mode
             ) {
             case .save(let candidate):
                 switch macTimers.saveAndStart(candidate) {
@@ -1436,41 +1188,6 @@ final class StatusItemController: NSObject, SettingsHosting {
         alert.runModal()
     }
 
-    private func startTimerMenuRefresh() {
-        stopTimerMenuRefresh()
-        guard liveTimerMenuItems.contains(where: { pair in
-            macTimers.timers.contains { $0.id == pair.key && $0.isRunning }
-        }) else { return }
-        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated {
-                self?.refreshLiveTimerMenuItems()
-            }
-        }
-        RunLoop.current.add(timer, forMode: .eventTracking)
-        timerMenuRefreshTimer = timer
-    }
-
-    private func stopTimerMenuRefresh() {
-        timerMenuRefreshTimer?.invalidate()
-        timerMenuRefreshTimer = nil
-    }
-
-    private func refreshLiveTimerMenuItems() {
-        let now = Date()
-        let timersByID = Dictionary(uniqueKeysWithValues: macTimers.timers.map { ($0.id, $0) })
-        for (id, item) in liveTimerMenuItems {
-            guard let timer = timersByID[id] else { continue }
-            item.title = MacTimerRemaining.menuTitle(
-                name: timer.name,
-                fireAt: timer.fireAt,
-                now: now
-            )
-            ShortcutMenuAppearance.apply(to: item, enabled: timer.isRunning)
-            item.toolTip = timer.target.displayText
-            item.menu?.itemChanged(item)
-        }
-    }
-
     /// 复制当前访达选中文件或文件夹本身的绝对路径。
     @objc private func copyFinderSelectedPath() {
         guard case .success(let path) = finderSelection.resolveSelectedItemPath() else { return }
@@ -1481,64 +1198,6 @@ final class StatusItemController: NSObject, SettingsHosting {
         actionDispatcher.perform(action)
     }
 
-    func runModelAutomation(_ id: UUID) {
-        automationRunner.run(id: id)
-    }
-
-    @objc private func createModelAutomation() {
-        presentModelAutomationEditor(draft: ModelAutomationDraft(), isEditing: false)
-    }
-
-    @objc private func editModelAutomation(_ sender: NSMenuItem) {
-        guard
-            let rawID = sender.representedObject as? String,
-            let id = UUID(uuidString: rawID),
-            let automation = ModelAutomationStore().automation(id: id)
-        else {
-            return
-        }
-        presentModelAutomationEditor(
-            draft: ModelAutomationDraft(automation: automation),
-            isEditing: true
-        )
-    }
-
-    private func presentModelAutomationEditor(
-        draft initialDraft: ModelAutomationDraft,
-        isEditing: Bool
-    ) {
-        var draft = initialDraft
-        let store = ModelAutomationStore()
-        while true {
-            let aliases = modelRelay.router.availableAliases()
-            switch ModelAutomationPrompt.prompt(
-                draft: draft,
-                isEditing: isEditing,
-                modelAliases: aliases
-            ) {
-            case .save(let candidate):
-                switch store.save(candidate, availableAliases: Set(aliases)) {
-                case .success:
-                    return
-                case .failure(let error):
-                    let alert = NSAlert()
-                    alert.alertStyle = .warning
-                    alert.messageText = "无法保存自动化"
-                    alert.informativeText = error.localizedDescription
-                    alert.addButton(withTitle: "好")
-                    alert.runModal()
-                    draft = candidate
-                }
-            case .delete:
-                if let id = draft.id {
-                    store.delete(id: id)
-                }
-                return
-            case .cancel:
-                return
-            }
-        }
-    }
 
     /// 定时器到点：桌面切换与快捷键合成走 poster，其余走动作 dispatcher。
     func performMappedTarget(_ target: KeyboardShortcutMappingTarget) {
@@ -1555,8 +1214,6 @@ final class StatusItemController: NSObject, SettingsHosting {
             }
         case .emitDown, .emitRepeat, .emitUp, .pass, .suppress:
             break
-        case .runAutomation(let id):
-            runModelAutomation(id)
         }
     }
 
@@ -1704,14 +1361,6 @@ extension StatusItemController {
     var settingsHorizontalWheel: Bool { mouseWheel.isHorizontalEffective }
     var settingsSpaceModifier: Bool { spaceModifier.isEffective }
     var settingsDockRestrict: Bool { dockAutohideRestrict.isEffective }
-    var settingsFolderIconVisible: Bool { statusBarIcons.isVisible(.folder) }
-    var settingsWindowsIconVisible: Bool { statusBarIcons.isVisible(.windows) }
-    var settingsFolderIconSymbol: String { statusBarIcons.symbol(for: .folder) }
-    var settingsWindowsIconSymbol: String { statusBarIcons.symbol(for: .windows) }
-    var settingsFolderLeftClick: StatusItemPrimaryClick { statusBarIcons.menu(for: .folder, isRightClick: false) }
-    var settingsFolderRightClick: StatusItemPrimaryClick { statusBarIcons.menu(for: .folder, isRightClick: true) }
-    var settingsWindowsLeftClick: StatusItemPrimaryClick { statusBarIcons.menu(for: .windows, isRightClick: false) }
-    var settingsWindowsRightClick: StatusItemPrimaryClick { statusBarIcons.menu(for: .windows, isRightClick: true) }
     var settingsLaunchAtLogin: Bool { launchAtLogin.isEnabled }
     var settingsHermesInstalled: Bool { hermesGateway.isInstalled }
     var settingsHermesGatewayOn: Bool { hermesGateway.phase != .off }
@@ -1722,14 +1371,6 @@ extension StatusItemController {
     var settingsBindingKeySet: Bool { remoteControl.hasBindingKey }
     var settingsAppAssociated: Bool { remoteControl.isAssociated }
     var settingsWeChatBound: Bool { weChat.isBound }
-    var settingsModelSummary: String {
-        let port = modelRelay.snapshot().port
-        return "\(modelRelayStatusTitle()) · http://127.0.0.1:\(port)/v1"
-    }
-    var settingsModelFailed: Bool {
-        if case .failed = modelRelay.runState { return true }
-        return false
-    }
     var settingsKeyboardMappings: [SettingsLabeledID] {
         keyboardRemaps.mappings.map {
             SettingsLabeledID(
@@ -1759,21 +1400,6 @@ extension StatusItemController {
             )
         }
     }
-    var settingsProviders: [SettingsLabeledID] {
-        modelRelay.snapshot().providers.map {
-            SettingsLabeledID(id: $0.id, title: $0.name, detail: $0.baseURL)
-        }
-    }
-    var settingsLocalKeys: [SettingsLabeledID] {
-        modelRelay.snapshot().localKeys.map {
-            SettingsLabeledID(id: $0.id, title: $0.name, detail: "")
-        }
-    }
-    var settingsAutomations: [SettingsLabeledID] {
-        ModelAutomationStore().all().map {
-            SettingsLabeledID(id: $0.id, title: $0.name, detail: $0.modelAlias)
-        }
-    }
     var settingsBookmarkBackups: [String] {
         bookmarkSync.backupListPayload().compactMap { $0["day"] as? String }
     }
@@ -1799,38 +1425,6 @@ extension StatusItemController {
     func settingsSetHorizontalWheel(_ on: Bool) { _ = mouseWheel.setHorizontalEnabled(on) }
     func settingsSetSpaceModifier(_ on: Bool) { _ = spaceModifier.setEnabled(on) }
     func settingsSetDockRestrict(_ on: Bool) { _ = dockAutohideRestrict.setEnabled(on) }
-    func settingsSetFolderIconVisible(_ on: Bool) {
-        statusBarIcons.setVisible(on, slot: .folder)
-        applyStatusBarIcon(folderItem, slot: .folder)
-    }
-    func settingsSetWindowsIconVisible(_ on: Bool) {
-        statusBarIcons.setVisible(on, slot: .windows)
-        applyStatusBarIcon(windowsItem, slot: .windows)
-    }
-    func settingsSetFolderIconSymbol(_ symbol: String) {
-        statusBarIcons.setSymbol(symbol, slot: .folder)
-        applyStatusBarIcon(folderItem, slot: .folder)
-    }
-    func settingsSetWindowsIconSymbol(_ symbol: String) {
-        statusBarIcons.setSymbol(symbol, slot: .windows)
-        applyStatusBarIcon(windowsItem, slot: .windows)
-    }
-    func settingsSetFolderLeftClick(_ menu: StatusItemPrimaryClick) {
-        statusBarIcons.setMenu(menu, slot: .folder, isRightClick: false)
-        applyStatusBarIcon(folderItem, slot: .folder)
-    }
-    func settingsSetFolderRightClick(_ menu: StatusItemPrimaryClick) {
-        statusBarIcons.setMenu(menu, slot: .folder, isRightClick: true)
-        applyStatusBarIcon(folderItem, slot: .folder)
-    }
-    func settingsSetWindowsLeftClick(_ menu: StatusItemPrimaryClick) {
-        statusBarIcons.setMenu(menu, slot: .windows, isRightClick: false)
-        applyStatusBarIcon(windowsItem, slot: .windows)
-    }
-    func settingsSetWindowsRightClick(_ menu: StatusItemPrimaryClick) {
-        statusBarIcons.setMenu(menu, slot: .windows, isRightClick: true)
-        applyStatusBarIcon(windowsItem, slot: .windows)
-    }
     func settingsSetLaunchAtLogin(_ on: Bool) {
         guard on != launchAtLogin.isEnabled else { return }
         if case .failure(let error) = launchAtLogin.setEnabled(on) {
@@ -1862,15 +1456,6 @@ extension StatusItemController {
     func settingsInstallBookmark(_ browser: BookmarkBrowser) {
         installBookmarkExtension(menuSender(browser.rawValue))
     }
-    func settingsShowModelStatus() { showModelRelayStatus() }
-    func settingsChangeModelPort() { changeModelRelayPort() }
-    func settingsRestartModel() { restartModelRelay() }
-    func settingsAddProvider() { addModelRelayProvider() }
-    func settingsEditProvider(id: UUID) { manageModelRelayProvider(menuSender(id.uuidString)) }
-    func settingsAccessLocalKey(id: UUID) { accessModelRelayLocalKey(menuSender(id.uuidString)) }
-    func settingsAddLocalKey() { addModelRelayLocalKey() }
-    func settingsCreateAutomation() { createModelAutomation() }
-    func settingsEditAutomation(id: UUID) { editModelAutomation(menuSender(id.uuidString)) }
     func settingsManageBindingKey() { manageBindingKey() }
     func settingsOpenRemoteAssociation() { openRemoteAssociation() }
     func settingsSetMenuTracking(_ on: Bool) {

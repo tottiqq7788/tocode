@@ -230,7 +230,16 @@ struct RemoteButtonStore {
 
     func all() -> [RemoteButton] {
         guard let data = defaults.data(forKey: Self.defaultsKey) else { return [] }
-        return (try? JSONDecoder().decode([RemoteButton].self, from: data)) ?? []
+        let cleaned = AutomationTargetCleanup.cleanedRecords(from: data)
+        let payload = cleaned.removed.isEmpty ? data : cleaned.data
+        guard let decoded = try? JSONDecoder().decode([RemoteButton].self, from: payload) else {
+            return []
+        }
+        if !cleaned.removed.isEmpty {
+            defaults.set(cleaned.data, forKey: Self.defaultsKey)
+            AutomationTargetCleanup.remember(cleaned.removed, defaults: defaults)
+        }
+        return decoded
     }
 
     func save(_ draft: RemoteButtonDraft) -> Result<RemoteButton, RemoteButtonValidationError> {
@@ -314,8 +323,7 @@ enum RemoteButtonPromptResult {
 enum RemoteButtonPrompt {
     static func prompt(
         draft: RemoteButtonDraft,
-        isEditing: Bool,
-        automations: [ModelAutomation] = []
+        isEditing: Bool
     ) -> RemoteButtonPromptResult {
         let alert = NSAlert()
         alert.alertStyle = .informational
@@ -352,7 +360,6 @@ enum RemoteButtonPrompt {
         let targetEditor = KeyboardMappingTargetEditor(
             target: mappedTarget,
             actionTriggerPhrase: "点一下后",
-            automations: automations,
             extraActions: RemoteButtonExtras.all,
             selectedExtra: selectedExtra
         )

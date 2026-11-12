@@ -96,7 +96,6 @@ final class TrackpadShortcutService: NSObject, TrackpadShortcutControlling {
     private var recognizers: [UInt: TrackpadTapRecognizer] = [:]
     private var observingWake = false
     var actionHandler: ((KeyboardMappingAction) -> Void)?
-    var automationHandler: ((UUID) -> Void)?
 
     init(
         store: TrackpadShortcutStore = TrackpadShortcutStore(),
@@ -291,8 +290,6 @@ final class TrackpadShortcutService: NSObject, TrackpadShortcutControlling {
             }
         case .emitDown, .emitRepeat, .emitUp, .pass, .suppress:
             break
-        case .runAutomation(let id):
-            automationHandler?(id)
         }
     }
 }

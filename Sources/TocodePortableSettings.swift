@@ -75,7 +75,8 @@ enum TocodePortableSettingsTransfer {
     }
 
     static func decode(_ data: Data) throws -> TocodePortableSettings {
-        let settings = try JSONDecoder().decode(TocodePortableSettings.self, from: data)
+        let cleaned = AutomationTargetCleanup.cleanedRecords(from: data)
+        let settings = try JSONDecoder().decode(TocodePortableSettings.self, from: cleaned.data)
         guard settings.format == TocodePortableSettings.formatID else {
             throw TocodePortableSettingsError.invalidFormat
         }

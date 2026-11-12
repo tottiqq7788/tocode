@@ -93,7 +93,6 @@ final class KeyboardShortcutRemapService: KeyboardShortcutRemapControlling {
     private var engine: KeyboardShortcutRemapEngine
     private var inputCaptureSuspended = false
     var actionHandler: ((KeyboardMappingAction) -> Void)?
-    var automationHandler: ((UUID) -> Void)?
     var shouldYieldAllEvents: (() -> Bool)?
     /// 新键盘钩子插入队首后通知空格修饰键，让它重新占据最前位置。不改变映射状态机。
     var onKeyboardTapInstalled: (() -> Void)?
@@ -253,7 +252,7 @@ final class KeyboardShortcutRemapService: KeyboardShortcutRemapControlling {
         switch step {
         case .pass:
             return .pass
-        case .suppress, .emit, .emitDown, .emitRepeat, .emitUp, .invoke, .openURL, .runAutomation:
+        case .suppress, .emit, .emitDown, .emitRepeat, .emitUp, .invoke, .openURL:
             return .suppress
         }
     }
@@ -291,10 +290,6 @@ final class KeyboardShortcutRemapService: KeyboardShortcutRemapControlling {
                         body: "系统没有打开该网址。规则已保留，其他输入功能不受影响。"
                     )
                 }
-            }
-        case .runAutomation(let id):
-            scheduler.async { [weak self] in
-                self?.automationHandler?(id)
             }
         }
     }

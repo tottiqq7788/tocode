@@ -15,9 +15,6 @@ swiftc Tests/TestRunner.swift \
   Tests/WeChatTestSupport.swift \
   Tests/TocodeCommandTestSupport.swift \
   Tests/AnkerCredentialTests.swift \
-  Tests/ModelRelayTestSupport.swift \
-  Tests/ModelRelayCallMetricsTestSupport.swift \
-  Tests/ModelRelayTests.swift \
   Tests/BookmarkSyncTests.swift \
   "${BOOKMARK_SOURCES[@]}" \
   Sources/PromptTextFields.swift \
@@ -28,7 +25,7 @@ swiftc Tests/TestRunner.swift \
   Sources/CodexSyncSettingsStore.swift \
   Sources/FinderFollowSettingsStore.swift \
   Sources/SettingsOutline.swift \
-  Sources/StatusBarIconSettings.swift \
+  Sources/StatusRingIcon.swift \
   Sources/TerminalFollowSettingsStore.swift \
   Sources/HermesFollowSettingsStore.swift \
   Sources/HermesProjectService.swift \
@@ -108,21 +105,6 @@ swiftc Tests/TestRunner.swift \
   Sources/TocodeSocketTransport.swift \
   Sources/TocodeIPCServer.swift \
   Sources/TocodeCLIRunner.swift \
-  Sources/ModelRelayModels.swift \
-  Sources/ModelRelayConfigStore.swift \
-  Sources/ModelRelayKeychainStore.swift \
-  Sources/ModelRelayLocalKeyVault.swift \
-  Sources/ModelRelayCallMetricsStore.swift \
-  Sources/ModelRelayHTTPParser.swift \
-  Sources/ModelRelayRouter.swift \
-  Sources/ModelRelayUpstreamClient.swift \
-  Sources/ModelRelayHTTPServer.swift \
-  Sources/ModelRelayService.swift \
-  Sources/ModelRelayPrompts.swift \
-  Sources/ModelRelayStatusPanel.swift \
-  Sources/ModelAutomation.swift \
-  Sources/ModelAutomationPrompt.swift \
-  Sources/ModelAutomationRunner.swift \
   -o build/tests \
   -framework AppKit \
   -framework ApplicationServices \
@@ -134,6 +116,7 @@ swiftc Tests/TestRunner.swift \
   -framework ServiceManagement \
   -framework Network \
   -framework CryptoKit \
+  -framework UserNotifications \
   -lsqlite3
 
 ./build/tests

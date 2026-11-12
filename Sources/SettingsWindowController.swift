@@ -21,14 +21,6 @@ protocol SettingsHosting: AnyObject {
     var settingsHorizontalWheel: Bool { get }
     var settingsSpaceModifier: Bool { get }
     var settingsDockRestrict: Bool { get }
-    var settingsFolderIconVisible: Bool { get }
-    var settingsWindowsIconVisible: Bool { get }
-    var settingsFolderIconSymbol: String { get }
-    var settingsWindowsIconSymbol: String { get }
-    var settingsFolderLeftClick: StatusItemPrimaryClick { get }
-    var settingsFolderRightClick: StatusItemPrimaryClick { get }
-    var settingsWindowsLeftClick: StatusItemPrimaryClick { get }
-    var settingsWindowsRightClick: StatusItemPrimaryClick { get }
     var settingsLaunchAtLogin: Bool { get }
     var settingsHermesInstalled: Bool { get }
     var settingsHermesGatewayOn: Bool { get }
@@ -36,15 +28,10 @@ protocol SettingsHosting: AnyObject {
     var settingsBindingKeySet: Bool { get }
     var settingsAppAssociated: Bool { get }
     var settingsWeChatBound: Bool { get }
-    var settingsModelSummary: String { get }
-    var settingsModelFailed: Bool { get }
     var settingsKeyboardMappings: [SettingsLabeledID] { get }
     var settingsTrackpadRows: [(gesture: TrackpadTapGesture, detail: String)] { get }
     var settingsRemoteButtons: [SettingsLabeledID] { get }
     var settingsTimers: [SettingsLabeledID] { get }
-    var settingsProviders: [SettingsLabeledID] { get }
-    var settingsLocalKeys: [SettingsLabeledID] { get }
-    var settingsAutomations: [SettingsLabeledID] { get }
     var settingsBookmarkBackups: [String] { get }
     var settingsBookmarkBrowsers: [(browser: BookmarkBrowser, online: Bool)] { get }
 
@@ -60,14 +47,6 @@ protocol SettingsHosting: AnyObject {
     func settingsSetHorizontalWheel(_ on: Bool)
     func settingsSetSpaceModifier(_ on: Bool)
     func settingsSetDockRestrict(_ on: Bool)
-    func settingsSetFolderIconVisible(_ on: Bool)
-    func settingsSetWindowsIconVisible(_ on: Bool)
-    func settingsSetFolderIconSymbol(_ symbol: String)
-    func settingsSetWindowsIconSymbol(_ symbol: String)
-    func settingsSetFolderLeftClick(_ menu: StatusItemPrimaryClick)
-    func settingsSetFolderRightClick(_ menu: StatusItemPrimaryClick)
-    func settingsSetWindowsLeftClick(_ menu: StatusItemPrimaryClick)
-    func settingsSetWindowsRightClick(_ menu: StatusItemPrimaryClick)
     func settingsSetLaunchAtLogin(_ on: Bool)
     func settingsSetHermesGateway(_ on: Bool)
 
@@ -86,15 +65,6 @@ protocol SettingsHosting: AnyObject {
     func settingsBackupBookmarksNow()
     func settingsRestoreBookmark(day: String)
     func settingsInstallBookmark(_ browser: BookmarkBrowser)
-    func settingsShowModelStatus()
-    func settingsChangeModelPort()
-    func settingsRestartModel()
-    func settingsAddProvider()
-    func settingsEditProvider(id: UUID)
-    func settingsAddLocalKey()
-    func settingsAccessLocalKey(id: UUID)
-    func settingsCreateAutomation()
-    func settingsEditAutomation(id: UUID)
     func settingsManageBindingKey()
     func settingsOpenRemoteAssociation()
     var settingsMenuTracking: Bool { get }
@@ -332,10 +302,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
     private func rows(for page: SettingsPage) -> [NSView] {
         guard let host else { return [] }
         switch (page, currentSectionID()) {
-        case (.menubar, "folder"):
-            return folderIconRows(host)
-        case (.menubar, "windows"):
-            return windowsIconRows(host)
         case (.path, "root"):
             return pathRootRows(host)
         case (.path, "follow"):
@@ -358,14 +324,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
             return extensionRows(host)
         case (.tools, "dock"):
             return dockRows(host)
-        case (.model, "status"):
-            return modelStatusRows(host)
-        case (.model, "providers"):
-            return providerRows(host)
-        case (.model, "keys"):
-            return localKeyRows(host)
-        case (.model, "automations"):
-            return automationRows(host)
         case (.connection, "app"):
             return connectionAppRows(host)
         case (.connection, "wechat"):
@@ -379,89 +337,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
         default:
             return []
         }
-    }
-
-    private func folderIconRows(_ host: SettingsHosting) -> [NSView] {
-        iconRows(
-            visible: host.settingsFolderIconVisible,
-            visibleKey: "folderIcon",
-            symbol: host.settingsFolderIconSymbol,
-            styles: StatusBarIconCatalog.styles(for: .folder),
-            left: host.settingsFolderLeftClick,
-            right: host.settingsFolderRightClick,
-            setLeft: { host.settingsSetFolderLeftClick($0) },
-            setRight: { host.settingsSetFolderRightClick($0) },
-            apply: { host.settingsSetFolderIconSymbol($0) }
-        )
-    }
-
-    private func windowsIconRows(_ host: SettingsHosting) -> [NSView] {
-        iconRows(
-            visible: host.settingsWindowsIconVisible,
-            visibleKey: "windowsIcon",
-            symbol: host.settingsWindowsIconSymbol,
-            styles: StatusBarIconCatalog.styles(for: .windows),
-            left: host.settingsWindowsLeftClick,
-            right: host.settingsWindowsRightClick,
-            setLeft: { host.settingsSetWindowsLeftClick($0) },
-            setRight: { host.settingsSetWindowsRightClick($0) },
-            apply: { host.settingsSetWindowsIconSymbol($0) }
-        )
-    }
-
-    private func iconRows(
-        visible: Bool,
-        visibleKey: String,
-        symbol: String,
-        styles: [StatusBarIconStyle],
-        left: StatusItemPrimaryClick,
-        right: StatusItemPrimaryClick,
-        setLeft: @escaping (StatusItemPrimaryClick) -> Void,
-        setRight: @escaping (StatusItemPrimaryClick) -> Void,
-        apply: @escaping (String) -> Void
-    ) -> [NSView] {
-        [
-            toggle("在菜单栏显示", on: visible, key: visibleKey),
-            menuPopupRow("左键", selected: left, apply: setLeft),
-            menuPopupRow("右键", selected: right, apply: setRight),
-            footnote("左键是\(left.menuTitle)，右键是\(right.menuTitle)。左右键可以选同一个菜单。"),
-            footnote("两个图标都关掉时，从程序坞打开设置再打开。"),
-            footnote("图标样式"),
-            symbolGrid(styles: styles, selected: symbol, apply: apply),
-        ]
-    }
-
-    private func menuPopupRow(
-        _ title: String,
-        selected: StatusItemPrimaryClick,
-        apply: @escaping (StatusItemPrimaryClick) -> Void
-    ) -> NSView {
-        let label = NSTextField(labelWithString: title)
-        label.font = .systemFont(ofSize: 13)
-        label.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let popup = NSPopUpButton()
-        popup.controlSize = .regular
-        for menu in StatusItemPrimaryClick.assignable {
-            popup.addItem(withTitle: menu.menuTitle)
-            popup.lastItem?.representedObject = menu.rawValue
-        }
-        popup.selectItem(withTitle: selected.menuTitle)
-        popup.target = self
-        popup.action = #selector(runControl(_:))
-        actions[ObjectIdentifier(popup)] = { [weak popup] in
-            guard
-                let raw = popup?.selectedItem?.representedObject as? String,
-                let menu = StatusItemPrimaryClick(rawValue: raw)
-            else { return }
-            apply(menu)
-        }
-        let row = NSStackView(views: [label, popup])
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 12
-        row.widthAnchor.constraint(greaterThanOrEqualToConstant: 420).isActive = true
-        popup.widthAnchor.constraint(equalToConstant: 180).isActive = true
-        return row
     }
 
     private func pathRootRows(_ host: SettingsHosting) -> [NSView] {
@@ -601,68 +476,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
         ]
     }
 
-    private func modelStatusRows(_ host: SettingsHosting) -> [NSView] {
-        var rows: [NSView] = [
-            footnote(host.settingsModelSummary),
-            buttonRow([
-                button("状态") { host.settingsShowModelStatus() },
-                button("端口…") { host.settingsChangeModelPort() },
-            ]),
-        ]
-        if host.settingsModelFailed {
-            rows.append(button("重新启动") { host.settingsRestartModel() })
-        }
-        return rows
-    }
-
-    private func providerRows(_ host: SettingsHosting) -> [NSView] {
-        var rows: [NSView] = [
-            button("新增厂家") { host.settingsAddProvider() },
-        ]
-        if host.settingsProviders.isEmpty {
-            rows.append(footnote("还没有厂家。"))
-        } else {
-            for item in host.settingsProviders {
-                rows.append(listRow(item.title, detail: item.detail) {
-                    host.settingsEditProvider(id: item.id)
-                })
-            }
-        }
-        return rows
-    }
-
-    private func localKeyRows(_ host: SettingsHosting) -> [NSView] {
-        var rows: [NSView] = [
-            button("新增密钥") { host.settingsAddLocalKey() },
-        ]
-        if host.settingsLocalKeys.isEmpty {
-            rows.append(footnote("还没有本地访问密钥。"))
-        } else {
-            for item in host.settingsLocalKeys {
-                rows.append(listRow(item.title, detail: "查看或删除") {
-                    host.settingsAccessLocalKey(id: item.id)
-                })
-            }
-        }
-        return rows
-    }
-
-    private func automationRows(_ host: SettingsHosting) -> [NSView] {
-        var rows: [NSView] = [
-            button("新增自动化") { host.settingsCreateAutomation() },
-        ]
-        if host.settingsAutomations.isEmpty {
-            rows.append(footnote("还没有自动化。键盘、触控板和定时器仍可在编辑时选择已有项。"))
-        } else {
-            for item in host.settingsAutomations {
-                rows.append(listRow(item.title, detail: item.detail) {
-                    host.settingsEditAutomation(id: item.id)
-                })
-            }
-        }
-        return rows
-    }
-
     private func connectionAppRows(_ host: SettingsHosting) -> [NSView] {
         [
             button(host.settingsBindingKeySet ? "管理绑定密钥" : "设置绑定密钥") {
@@ -690,7 +503,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
                 host.settingsBindWeChat()
             },
             button("打开文件位置") { host.settingsOpenWeChatLocation() },
-            footnote("一次性动作菜单也可以直接打开归档目录，默认是窗口图标右键。"),
+            footnote("菜单栏不再提供这一项。从这里打开归档目录。"),
         ]
     }
 
@@ -716,48 +529,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
             button("说明书") { host.settingsShowManual() },
             quitButton(host),
         ]
-    }
-
-    private func symbolGrid(
-        styles: [StatusBarIconStyle],
-        selected: String,
-        apply: @escaping (String) -> Void
-    ) -> NSView {
-        let columns = 6
-        let cell = NSSize(width: 44, height: 36)
-        let gap: CGFloat = 8
-        let available = styles.filter {
-            NSImage(systemSymbolName: $0.symbol, accessibilityDescription: $0.title) != nil
-        }
-        let rowCount = max(1, Int(ceil(Double(available.count) / Double(columns))))
-        let wrap = NSView()
-        wrap.translatesAutoresizingMaskIntoConstraints = false
-        let height = CGFloat(rowCount) * cell.height + CGFloat(rowCount - 1) * gap
-        wrap.heightAnchor.constraint(equalToConstant: height).isActive = true
-        for (index, style) in available.enumerated() {
-            let button = NSButton()
-            button.image = NSImage(systemSymbolName: style.symbol, accessibilityDescription: style.title)
-            button.imagePosition = .imageOnly
-            button.bezelStyle = .regularSquare
-            button.isBordered = style.symbol == selected
-            button.contentTintColor = style.symbol == selected ? .controlAccentColor : .labelColor
-            button.toolTip = style.title
-            button.translatesAutoresizingMaskIntoConstraints = false
-            let column = index % columns
-            let row = index / columns
-            wrap.addSubview(button)
-            NSLayoutConstraint.activate([
-                button.leadingAnchor.constraint(equalTo: wrap.leadingAnchor, constant: CGFloat(column) * (cell.width + gap)),
-                button.topAnchor.constraint(equalTo: wrap.topAnchor, constant: CGFloat(row) * (cell.height + gap)),
-                button.widthAnchor.constraint(equalToConstant: cell.width),
-                button.heightAnchor.constraint(equalToConstant: cell.height),
-            ])
-            let symbol = style.symbol
-            actions[ObjectIdentifier(button)] = { apply(symbol) }
-            button.target = self
-            button.action = #selector(runControl(_:))
-        }
-        return wrap
     }
 
     private func footnote(_ text: String) -> NSView {
@@ -885,8 +656,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
     private func applySwitch(key: String, on: Bool) {
         guard let host else { return }
         switch key {
-        case "folderIcon": host.settingsSetFolderIconVisible(on)
-        case "windowsIcon": host.settingsSetWindowsIconVisible(on)
         case "finderFollow": host.settingsSetFinderFollow(on)
         case "terminalFollow": host.settingsSetTerminalFollow(on)
         case "codexFollow": host.settingsSetCodexFollow(on)

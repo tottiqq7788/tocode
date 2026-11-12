@@ -1,45 +1,5 @@
 import Foundation
 
-/// 两个菜单栏图标各自的左键和右键。totti 不再参与这次分流。
-enum StatusItemSlot: Equatable {
-    case folder
-    case windows
-}
-
-enum StatusItemPrimaryClick: String, Equatable {
-    case directory
-    case bookmarks
-    case desktopWindows
-    case actions
-
-    static let assignable: [StatusItemPrimaryClick] = [
-        .directory, .bookmarks, .desktopWindows, .actions
-    ]
-
-    var menuTitle: String {
-        switch self {
-        case .directory: return "目录树"
-        case .bookmarks: return "书签"
-        case .desktopWindows: return "桌面与窗口"
-        case .actions: return "一次性动作"
-        }
-    }
-
-    /// 没有保存过左右键时的对应关系。
-    static func resolve(slot: StatusItemSlot, isRightClick: Bool) -> StatusItemPrimaryClick {
-        switch (slot, isRightClick) {
-        case (.folder, false):
-            return .directory
-        case (.folder, true):
-            return .bookmarks
-        case (.windows, false):
-            return .desktopWindows
-        case (.windows, true):
-            return .actions
-        }
-    }
-}
-
 enum DesktopSpaceKind: Equatable {
     case desktop
     case fullscreen

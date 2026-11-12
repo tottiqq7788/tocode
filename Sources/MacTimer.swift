@@ -366,7 +366,16 @@ struct MacTimerStore {
 
     func allTimers() -> [MacTimer] {
         guard let data = defaults.data(forKey: Self.defaultsKey) else { return [] }
-        return (try? JSONDecoder().decode([MacTimer].self, from: data)) ?? []
+        let cleaned = AutomationTargetCleanup.cleanedRecords(from: data)
+        let payload = cleaned.removed.isEmpty ? data : cleaned.data
+        guard let decoded = try? JSONDecoder().decode([MacTimer].self, from: payload) else {
+            return []
+        }
+        if !cleaned.removed.isEmpty {
+            defaults.set(cleaned.data, forKey: Self.defaultsKey)
+            AutomationTargetCleanup.remember(cleaned.removed, defaults: defaults)
+        }
+        return decoded
     }
 
     func replaceAll(_ timers: [MacTimer]) {

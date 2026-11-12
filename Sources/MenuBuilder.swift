@@ -137,6 +137,14 @@ enum SpuriousMenuExitHub {
     }
 }
 
+enum RootConfigMenu {
+    static let title = "配置"
+    static let copyTitle = "复制路径"
+    static let actionTitles = ["读取剪贴板", "更改目录", "重置初始目录"]
+    static let followTitles = ["访达跟随", "终端跟随", "codex跟随", "hermes跟随"]
+    static var itemTitles: [String] { [copyTitle] + actionTitles + followTitles }
+}
+
 /// 目录树菜单构建器：把目录内容渲染为 NSMenu 树，子文件夹惰性递归展开。
 /// 根菜单在「新增」上方依次提供「历史」「配置」与「终端」；普通模式点击复制；Shift 多选；Option 删除；Command 访问。
 @MainActor

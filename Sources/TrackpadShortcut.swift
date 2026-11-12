@@ -86,6 +86,11 @@ struct TrackpadShortcutStore {
 
     func binding(for gesture: TrackpadTapGesture) -> KeyboardShortcutMappingTarget? {
         guard let data = defaults.data(forKey: key(for: gesture)) else { return nil }
+        if AutomationTargetCleanup.isStoredAutomationTarget(data) {
+            defaults.removeObject(forKey: key(for: gesture))
+            AutomationTargetCleanup.remember([gesture.title], defaults: defaults)
+            return nil
+        }
         return try? JSONDecoder().decode(KeyboardShortcutMappingTarget.self, from: data)
     }
 

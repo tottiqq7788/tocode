@@ -10,13 +10,12 @@ enum KeyboardShortcutMappingPromptResult {
 enum KeyboardShortcutMappingPrompt {
     static func prompt(
         draft: KeyboardShortcutMappingDraft,
-        isEditing: Bool,
-        automations: [ModelAutomation] = []
+        isEditing: Bool
     ) -> KeyboardShortcutMappingPromptResult {
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.messageText = isEditing ? "编辑键盘映射" : "新增键盘映射"
-        alert.informativeText = "点击快捷键框后输入键盘组合，或把源快捷键映射为 Tocode 功能、打开网址或一个自动化。"
+        alert.informativeText = "点击快捷键框后输入键盘组合，或把源快捷键映射为 Tocode 功能或打开网址。"
         alert.addButton(withTitle: "保存")
         alert.addButton(withTitle: "取消")
         if isEditing {
@@ -33,10 +32,7 @@ enum KeyboardShortcutMappingPrompt {
         sourceRecorder.toolTip = "点击后输入需要被替换的快捷键"
 
         let targetLabel = NSTextField(labelWithString: "目标")
-        let targetEditor = KeyboardMappingTargetEditor(
-            target: draft.target,
-            automations: automations
-        )
+        let targetEditor = KeyboardMappingTargetEditor(target: draft.target)
 
         let stack = NSStackView()
         stack.orientation = .vertical
@@ -109,13 +105,12 @@ final class KeyboardMappingTargetEditor: NSObject {
     private static let pageHeight: CGFloat = 76
     private static let recorderHeight: CGFloat = 48
     private static let actionSegment = 1
-    private static let automationSegment = 2
 
     let view: NSView
     var onChange: (() -> Void)?
 
     private let segment = NSSegmentedControl(
-        labels: ["映射快捷键", "映射功能", "自动化"],
+        labels: ["映射快捷键", "映射功能"],
         trackingMode: .selectOne,
         target: nil,
         action: nil
@@ -123,9 +118,7 @@ final class KeyboardMappingTargetEditor: NSObject {
     private let recorder: ShortcutRecorderView
     private let shortcutPage = NSView()
     private let actionPage = NSView()
-    private let automationPage = NSView()
     private let actionPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let automationPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let urlField = NSTextField(string: "")
     private let urlObserver = MappedURLFieldObserver()
     private var selectedAction: KeyboardMappingAction
@@ -136,27 +129,18 @@ final class KeyboardMappingTargetEditor: NSObject {
     private var extraItems: [String: NSMenuItem] = [:]
     private var selectedExtra: String?
     private let actionTriggerPhrase: String
-    private let automations: [ModelAutomation]
-    private var selectedAutomationID: UUID?
     private static let openURLRepresented = "tocode.openURL"
 
     init(
         target: KeyboardShortcutMappingTarget?,
         actionTriggerPhrase: String = "命中源快捷键后",
-        automations: [ModelAutomation] = [],
         extraActions: [RemoteMappingExtra] = [],
         selectedExtra: String? = nil
     ) {
         self.actionTriggerPhrase = actionTriggerPhrase
-        self.automations = automations
         self.extraActions = extraActions
         self.selectedExtra = selectedExtra
-        if case .automation(let id)? = target {
-            recorder = ShortcutRecorderView(shortcut: nil)
-            selectedAction = .blackout
-            selectedAutomationID = id
-            segment.selectedSegment = Self.automationSegment
-        } else if case .openURL(let raw)? = target {
+        if case .openURL(let raw)? = target {
             recorder = ShortcutRecorderView(shortcut: nil)
             selectedAction = .blackout
             openURLSelected = true
@@ -190,18 +174,15 @@ final class KeyboardMappingTargetEditor: NSObject {
         segment.segmentDistribution = .fillEqually
         segment.target = self
         segment.action = #selector(segmentChanged(_:))
-        segment.toolTip = "选择目标是另一个组合键、一个 Tocode 功能，或一个已保存的自动化"
+        segment.toolTip = "选择目标是另一个组合键，或一个 Tocode 功能"
 
         recorder.toolTip = "点击后输入替换后的快捷键"
         recorder.onChange = { [weak self] _ in self?.onChange?() }
         shortcutPage.addSubview(recorder)
 
         populateActionPopup()
-        populateAutomationPopup()
         actionPopup.target = self
         actionPopup.action = #selector(actionPopupChanged(_:))
-        automationPopup.target = self
-        automationPopup.action = #selector(automationPopupChanged(_:))
         actionPopup.toolTip = "按右键菜单分组选择一次性动作、开关切换或打开网址"
         urlField.placeholderString = "https:// 或其它带协议的网址"
         urlField.toolTip = "去掉空白后须包含协议，例如 https://、file:// 或 mailto:"
@@ -209,18 +190,16 @@ final class KeyboardMappingTargetEditor: NSObject {
         urlObserver.onChange = { [weak self] in self?.onChange?() }
         actionPage.addSubview(actionPopup)
         actionPage.addSubview(urlField)
-        automationPage.addSubview(automationPopup)
 
         let container = NSView()
         container.addSubview(shortcutPage)
         container.addSubview(actionPage)
-        container.addSubview(automationPage)
 
         for subview in [segment, container] {
             subview.translatesAutoresizingMaskIntoConstraints = false
             stack.addArrangedSubview(subview)
         }
-        for subview in [shortcutPage, actionPage, automationPage, recorder, actionPopup, automationPopup, urlField] {
+        for subview in [shortcutPage, actionPage, recorder, actionPopup, urlField] {
             subview.translatesAutoresizingMaskIntoConstraints = false
         }
 
@@ -247,15 +226,7 @@ final class KeyboardMappingTargetEditor: NSObject {
             urlField.leadingAnchor.constraint(equalTo: actionPage.leadingAnchor),
             urlField.trailingAnchor.constraint(equalTo: actionPage.trailingAnchor),
             urlField.topAnchor.constraint(equalTo: actionPopup.bottomAnchor, constant: 6),
-            urlField.heightAnchor.constraint(equalToConstant: 24),
-            automationPage.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            automationPage.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            automationPage.topAnchor.constraint(equalTo: container.topAnchor),
-            automationPage.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-            automationPopup.leadingAnchor.constraint(equalTo: automationPage.leadingAnchor),
-            automationPopup.trailingAnchor.constraint(equalTo: automationPage.trailingAnchor),
-            automationPopup.topAnchor.constraint(equalTo: automationPage.topAnchor),
-            automationPopup.heightAnchor.constraint(equalToConstant: 28)
+            urlField.heightAnchor.constraint(equalToConstant: 24)
         ])
 
         updatePages()
@@ -268,16 +239,6 @@ final class KeyboardMappingTargetEditor: NSObject {
 
     /// 当前分段下的目标；快捷键页未录入时返回 nil，用于禁用保存。
     var target: KeyboardShortcutMappingTarget? {
-        if segment.selectedSegment == Self.automationSegment {
-            guard
-                let rawID = automationPopup.selectedItem?.representedObject as? String,
-                let id = UUID(uuidString: rawID),
-                automations.contains(where: { $0.id == id })
-            else {
-                return nil
-            }
-            return .automation(id)
-        }
         if segment.selectedSegment == Self.actionSegment {
             if selectedExtra != nil { return nil }
             if openURLSelected {
@@ -302,7 +263,6 @@ final class KeyboardMappingTargetEditor: NSObject {
         urlField.delegate = nil
         segment.target = nil
         actionPopup.target = nil
-        automationPopup.target = nil
     }
 
     @objc private func segmentChanged(_ sender: NSSegmentedControl) {
@@ -330,10 +290,6 @@ final class KeyboardMappingTargetEditor: NSObject {
         openURLSelected = false
         selectedAction = action
         updateURLField()
-        onChange?()
-    }
-
-    @objc private func automationPopupChanged(_ sender: NSPopUpButton) {
         onChange?()
     }
 
@@ -395,47 +351,10 @@ final class KeyboardMappingTargetEditor: NSObject {
         }
     }
 
-    private func populateAutomationPopup() {
-        let menu = NSMenu()
-        let sorted = automations.sorted {
-            $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
-        }
-        if sorted.isEmpty {
-            let item = NSMenuItem(
-                title: "请先在「模型 → 自动化」新增",
-                action: nil,
-                keyEquivalent: ""
-            )
-            item.isEnabled = false
-            menu.addItem(item)
-        }
-        for automation in sorted {
-            let item = NSMenuItem(title: automation.name, action: nil, keyEquivalent: "")
-            item.representedObject = automation.id.uuidString
-            item.toolTip = "\(actionTriggerPhrase)读取选中文字，调用「\(automation.name)」，并把结果粘贴回去"
-            menu.addItem(item)
-        }
-        if let selectedAutomationID, !sorted.contains(where: { $0.id == selectedAutomationID }) {
-            let missing = NSMenuItem(title: "自动化不存在", action: nil, keyEquivalent: "")
-            missing.isEnabled = false
-            menu.addItem(missing)
-        }
-        automationPopup.menu = menu
-        if let selectedAutomationID,
-           let item = menu.items.first(where: {
-               $0.representedObject as? String == selectedAutomationID.uuidString
-           }) {
-            automationPopup.select(item)
-        } else if let missing = menu.items.first(where: { $0.title == "自动化不存在" }) {
-            automationPopup.select(missing)
-        }
-    }
-
     private func updatePages() {
         let segmentIndex = segment.selectedSegment
         shortcutPage.isHidden = segmentIndex != 0
         actionPage.isHidden = segmentIndex != Self.actionSegment
-        automationPage.isHidden = segmentIndex != Self.automationSegment
         updateURLField()
         // 隐藏页不得继续持有键盘焦点，否则按键会写进看不见的录入框。
         if segmentIndex != 0, recorder.window?.firstResponder === recorder {

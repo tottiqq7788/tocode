@@ -24,7 +24,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var controller: StatusItemController?
     private var commandExecutor: TocodeCommandExecutor?
     private var ipcServer: TocodeIPCServer?
-    private var modelRelay: ModelRelayService?
     private var hermesGateway: HermesGatewayService?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
@@ -70,6 +69,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         TocodePreferences.migrateIfNeeded()
+        _ = KeyboardShortcutMappingStore().allMappings()
+        _ = MacTimerStore().allTimers()
+        _ = RemoteButtonStore().all()
+        _ = TrackpadShortcutStore().allBindings()
+        AutomationTargetCleanup.notifyIfNeeded()
         let service = GlobalShortcutService()
         service.applySavedSettings()
         shortcuts = service
@@ -136,14 +140,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         bookmarkSync.scheduleDailyBackupMonitoring()
 
-        let modelRelay = ModelRelayService()
-        self.modelRelay = modelRelay
-        do {
-            try modelRelay.start()
-        } catch {
-            NSLog("Tocode 本地模型中转启动失败: %@", error.localizedDescription)
-        }
-
         // 启动后把 CLI 安装/刷新到用户 PATH（~/.local/bin/tocode）。
         installCLI()
 
@@ -172,7 +168,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             remoteControl: remote,
             hermesGateway: hermesGateway,
             screenBlackout: blackout,
-            modelRelay: modelRelay,
             commandExecutor: executor
         )
         self.controller = controller
@@ -182,14 +177,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         keyboardRemaps.actionHandler = { [weak controller] action in
             controller?.performMappedAction(action)
         }
-        keyboardRemaps.automationHandler = { [weak controller] id in
-            controller?.runModelAutomation(id)
-        }
         trackpad.actionHandler = { [weak controller] action in
             controller?.performMappedAction(action)
-        }
-        trackpad.automationHandler = { [weak controller] id in
-            controller?.runModelAutomation(id)
         }
         keyboardRemaps.shouldYieldAllEvents = { [weak blackout] in
             blackout?.isPresented == true
@@ -253,8 +242,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hermesGateway = nil
         ipcServer?.stop()
         ipcServer = nil
-        modelRelay?.stop()
-        modelRelay = nil
         shortcuts?.shutdown()
         trackpadShortcuts?.shutdown()
         keyboardRemaps?.shutdown()

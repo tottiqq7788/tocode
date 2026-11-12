@@ -215,6 +215,7 @@ func testRootMenuTerminalItem() {
     builder.menuWillOpen(child?.submenu ?? NSMenu())
     let childTitles = child?.submenu?.items.map(\.title) ?? []
     expect(!childTitles.contains("终端"), "子文件夹菜单没有终端")
+    expect(!childTitles.contains("配置"), "子文件夹菜单没有配置")
     expect(childTitles.last == "新增", "子文件夹菜单底部仍是新增")
 
     guard let terminal = menu.items.first(where: { $0.title == "终端" }) else {
@@ -231,6 +232,7 @@ func testRootMenuTerminalItem() {
 
     builder.setMode(.delete)
     expect(terminal.title == "终端", "删除模式仍显示终端")
+    expect(menu.items.contains { $0.title == "配置" }, "删除模式仍显示配置")
     expect(menu.items.last?.title == "清空", "删除模式只改底部新增")
     builder.setMode(.access)
     expect(terminal.title == "终端", "访问模式仍显示终端")
@@ -1364,22 +1366,7 @@ func testTocodePortableSettingsTransfer() {
         source: RecordedShortcut(keyCode: 11, modifiers: [.control], keyLabel: "B"),
         target: .action(.blackout)
     )
-    let automationID = UUID()
-    _ = ModelAutomationStore(defaults: defaults).save(
-        ModelAutomationDraft(
-            id: automationID,
-            name: "中译英",
-            prompt: "PROMPT-SECRET-074",
-            modelAlias: "demo-model"
-        ),
-        availableAliases: ["demo-model"]
-    )
-    KeyboardShortcutMappingStore(defaults: defaults).replaceAll([mapping, KeyboardShortcutMapping(
-        id: UUID(),
-        name: "翻译",
-        source: RecordedShortcut(keyCode: 16, modifiers: [.totti], keyLabel: "Y"),
-        target: .automation(automationID)
-    )])
+    KeyboardShortcutMappingStore(defaults: defaults).replaceAll([mapping])
     TrackpadShortcutStore(defaults: defaults).setBinding(
         .action(.switchDesktopLeft),
         for: .threeFingerTap
@@ -1406,9 +1393,7 @@ func testTocodePortableSettingsTransfer() {
     expect(!text.contains("wechat"), "导出不含微信字段")
     expect(!text.contains("rootFolder"), "导出不含根目录字段名")
     expect(!text.contains("spaceModifier"), "导出不含空格修饰键")
-    expect(text.contains(automationID.uuidString), "导出的键盘映射只带走自动化 ID")
-    expect(!text.contains("PROMPT-SECRET-074"), "导出不含自动化提示词")
-    expect(!text.contains("demo-model"), "导出不含自动化模型名")
+    expect(!text.contains("automation"), "导出不含自动化目标")
 
     do {
         _ = try TocodePortableSettingsTransfer.decode(Data("{\"format\":\"nope\",\"version\":1}".utf8))
@@ -1435,16 +1420,7 @@ func testTocodePortableSettingsTransfer() {
     other.set(true, forKey: TerminalFollowSettingsStore.followEnabledKey)
     other.set(true, forKey: HermesFollowSettingsStore.followEnabledKey)
     other.set(true, forKey: SpaceModifierStore.enabledKey)
-    let keptAutomationID = UUID()
-    _ = ModelAutomationStore(defaults: other).save(
-        ModelAutomationDraft(
-            id: keptAutomationID,
-            name: "保留",
-            prompt: "KEEP-PROMPT-074",
-            modelAlias: "kept-model"
-        ),
-        availableAliases: ["kept-model"]
-    )
+    other.set(Data("keep-automation".utf8), forKey: "tocode.modelAutomations")
     KeyboardShortcutMappingStore(defaults: other).replaceAll([
         KeyboardShortcutMapping(
             id: UUID(),
@@ -1454,10 +1430,25 @@ func testTocodePortableSettingsTransfer() {
         )
     ])
 
-    let decoded = try! TocodePortableSettingsTransfer.decode(data)
+    var mixedObject = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
+    var mixedMappings = mixedObject["keyboardMappings"] as! [[String: Any]]
+    var droppedMapping = mixedMappings[0]
+    droppedMapping["id"] = UUID().uuidString
+    droppedMapping["name"] = "翻译"
+    droppedMapping["target"] = ["kind": "automation", "automation": UUID().uuidString]
+    mixedMappings.append(droppedMapping)
+    mixedObject["keyboardMappings"] = mixedMappings
+    var mixedPad = mixedObject["trackpad"] as! [String: Any]
+    mixedPad["4"] = ["kind": "automation", "automation": UUID().uuidString]
+    mixedObject["trackpad"] = mixedPad
+    let mixed = try! JSONSerialization.data(withJSONObject: mixedObject)
+    let decoded = try! TocodePortableSettingsTransfer.decode(mixed)
+    expect(decoded.keyboardMappings.map(\.name) == ["黑屏"], "导入丢掉自动化映射并保留其余规则")
+    expect(decoded.trackpad["4"] == nil, "导入丢掉自动化触控板目标")
+    expect(decoded.trackpad["3"] == .action(.switchDesktopLeft), "导入保留其它触控板目标")
     TocodePortableSettingsTransfer.apply(decoded, to: other)
     let applied = KeyboardShortcutMappingStore(defaults: other).allMappings()
-    expect(applied.map(\.name) == ["黑屏", "翻译"], "导入整段替换键盘映射")
+    expect(applied.map(\.name) == ["黑屏"], "导入整段替换键盘映射")
     expect(
         TrackpadShortcutStore(defaults: other).binding(for: .threeFingerTap) == .action(.switchDesktopLeft),
         "导入写入触控板绑定"
@@ -1475,308 +1466,167 @@ func testTocodePortableSettingsTransfer() {
     expect(other.bool(forKey: HermesFollowSettingsStore.followEnabledKey), "导入不改 hermes跟随")
     expect(other.bool(forKey: SpaceModifierStore.enabledKey), "导入不改空格修饰键")
     expect(
-        ModelAutomationStore(defaults: other).automation(id: keptAutomationID)?.prompt == "KEEP-PROMPT-074",
-        "导入不改模型自动化"
+        other.data(forKey: "tocode.modelAutomations") == Data("keep-automation".utf8),
+        "导入不改遗留的自动化配置"
     )
 }
 
-func testModelAutomation() async {
-    expect(TocodePreferences.knownKeys.contains(ModelAutomationStore.defaultsKey), "模型自动化进入已知偏好键")
+func testDroppedAutomationTargets() {
+    expect(!TocodePreferences.knownKeys.contains("tocode.modelAutomations"), "自动化不再作为仍在迁移的偏好键")
 
-    let stringBody = Data(#"{"choices":[{"message":{"content":" Hello "}}]}"#.utf8)
-    expect(ModelAutomationResponse.assistantText(from: stringBody) == "Hello", "助手正文字符串去掉空白")
-    let partsBody = Data(
-        #"{"choices":[{"message":{"content":[{"type":"text","text":"A"},{"type":"text","text":"B"}]}}]}"#.utf8
-    )
-    expect(ModelAutomationResponse.assistantText(from: partsBody) == "AB", "助手正文拼接文本片段")
-    let blankBody = Data(#"{"choices":[{"message":{"content":"  "}}]}"#.utf8)
-    expect(ModelAutomationResponse.assistantText(from: blankBody) == nil, "空白正文不当作结果")
-    let reasoningBody = Data(#"{"choices":[{"message":{"content":null,"reasoning":"secret"}}]}"#.utf8)
-    expect(ModelAutomationResponse.assistantText(from: reasoningBody) == nil, "不读取思考字段")
-
-    let suite = "tocode-automation-\(UUID().uuidString)"
+    let suite = "tocode-drop-automation-\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suite)!
     defaults.removePersistentDomain(forName: suite)
     defer { defaults.removePersistentDomain(forName: suite) }
-    let store = ModelAutomationStore(defaults: defaults)
-    let draft = ModelAutomationDraft(name: " 中译英 ", prompt: " 翻译 ", modelAlias: " demo-model ")
-    guard case .success(let saved) = store.save(draft, availableAliases: ["demo-model"]) else {
-        expect(false, "可保存自动化")
-        return
-    }
-    expect(saved.name == "中译英" && saved.prompt == "翻译" && saved.modelAlias == "demo-model", "保存时去掉空白")
-    if case .failure = store.save(
-        ModelAutomationDraft(name: "中译英", prompt: "另一段", modelAlias: "demo-model"),
-        availableAliases: ["demo-model"]
-    ) {
-        expect(true, "名称不能重复")
-    } else {
-        expect(false, "名称不能重复")
-    }
-    expect(
-        store.save(
-            ModelAutomationDraft(name: "  ", prompt: "翻译", modelAlias: "demo-model"),
-            availableAliases: ["demo-model"]
-        ) == .failure(.emptyName),
-        "空名称不能保存"
-    )
-    expect(
-        store.save(
-            ModelAutomationDraft(name: "空提示", prompt: "  ", modelAlias: "demo-model"),
-            availableAliases: ["demo-model"]
-        ) == .failure(.emptyPrompt),
-        "空提示词不能保存"
-    )
-    expect(
-        store.save(
-            ModelAutomationDraft(name: "无模型", prompt: "翻译", modelAlias: "missing"),
-            availableAliases: ["demo-model"]
-        ) == .failure(.modelUnavailable),
-        "不可用模型不能新增"
-    )
-    guard case .success(let edited) = store.save(
-        ModelAutomationDraft(id: saved.id, name: "中译英", prompt: "改过的提示", modelAlias: "demo-model"),
-        availableAliases: []
-    ) else {
-        expect(false, "编辑时可以保留原来的模型名")
-        return
-    }
-    expect(edited.id == saved.id && edited.prompt == "改过的提示", "编辑保留稳定 ID")
-    store.delete(id: saved.id)
-    expect(store.automation(id: saved.id) == nil, "删除后规则还在也不再能查到自动化")
 
-    let source = RecordedShortcut(keyCode: 16, modifiers: [.totti], keyLabel: "Y")
-    let mapping = KeyboardShortcutMapping(
+    let kept = KeyboardShortcutMapping(
         id: UUID(),
-        name: "翻译",
-        source: source,
-        target: .automation(saved.id)
+        name: "黑屏",
+        source: RecordedShortcut(keyCode: 11, modifiers: [.control], keyLabel: "B"),
+        target: .action(.blackout)
     )
-    let encoded = try! JSONEncoder().encode(mapping)
-    let decoded = try! JSONDecoder().decode(KeyboardShortcutMapping.self, from: encoded)
-    expect(decoded.target == .automation(saved.id), "自动化目标可编解码")
-    var engine = KeyboardShortcutRemapEngine(mappings: [mapping])
-    let down = KeyboardShortcutEventSnapshot(
-        keyCode: source.keyCode,
-        modifiers: source.modifiers,
-        isKeyDown: true,
-        isAutoRepeat: false,
-        isSynthesized: false
-    )
-    expect(engine.process(down) == .runAutomation(saved.id), "自动化只在首次按下执行")
-    let repeated = KeyboardShortcutEventSnapshot(
-        keyCode: source.keyCode,
-        modifiers: source.modifiers,
-        isKeyDown: true,
-        isAutoRepeat: true,
-        isSynthesized: false
-    )
-    expect(engine.process(repeated) == .suppress, "按住自动化不重复执行")
-    let up = KeyboardShortcutEventSnapshot(
-        keyCode: source.keyCode,
-        modifiers: [],
-        isKeyDown: false,
-        isAutoRepeat: false,
-        isSynthesized: false
-    )
-    expect(engine.process(up) == .suppress, "松开自动化不再次执行")
+    var mappings = try! JSONSerialization.jsonObject(with: JSONEncoder().encode([kept])) as! [[String: Any]]
+    var dropped = mappings[0]
+    dropped["id"] = UUID().uuidString
+    dropped["name"] = "翻译"
+    dropped["target"] = ["kind": "automation", "automation": UUID().uuidString]
+    mappings.append(dropped)
+    defaults.set(try! JSONSerialization.data(withJSONObject: mappings), forKey: KeyboardShortcutMappingStore.defaultsKey)
 
-    let previousLookup = ModelAutomationLookup.name
-    defer { ModelAutomationLookup.name = previousLookup }
-    ModelAutomationLookup.name = { $0 == saved.id ? "中译英" : nil }
-    expect(KeyboardShortcutMappingTarget.automation(saved.id).displayText == "自动化 中译英", "菜单显示自动化名称")
-    expect(KeyboardShortcutMappingTarget.automation(UUID()).displayText == "自动化", "缺失自动化仍有兜底名称")
-
-    let changed = FakeAutomationPasteboard()
-    changed.value = "你好"
-    let reader = SystemSelectedTextReader(
-        pasteboard: changed,
-        copySelection: { changed.changeCount += 1 },
-        timeout: 0.2,
-        sleep: { _ in }
+    let loaded = KeyboardShortcutMappingStore(defaults: defaults).allMappings()
+    expect(loaded.map(\.name) == ["黑屏"], "读入丢掉自动化键盘规则并保留其余规则")
+    let stored = String(data: defaults.data(forKey: KeyboardShortcutMappingStore.defaultsKey) ?? Data(), encoding: .utf8) ?? ""
+    expect(!stored.contains("automation"), "写回后不再保留自动化目标")
+    expect(
+        defaults.stringArray(forKey: AutomationTargetCleanup.pendingNamesKey) == ["翻译"],
+        "记下被去掉的键盘规则名称"
     )
-    expect(await reader.readSelectedText() == "你好", "复制后读到选中文字")
-    let unchanged = FakeAutomationPasteboard()
-    unchanged.value = "旧剪贴板"
-    let stale = SystemSelectedTextReader(
-        pasteboard: unchanged,
-        copySelection: {},
-        timeout: 0.05,
-        sleep: { _ in }
+
+    let timer = MacTimer(
+        id: UUID(),
+        name: "休息",
+        kind: .once,
+        durationMinutes: 10,
+        cronExpression: nil,
+        target: .action(.blackout),
+        fireAt: nil
     )
-    expect(await stale.readSelectedText() == nil, "剪贴板没变时不读取")
+    var timers = try! JSONSerialization.jsonObject(with: JSONEncoder().encode([timer])) as! [[String: Any]]
+    var droppedTimer = timers[0]
+    droppedTimer["id"] = UUID().uuidString
+    droppedTimer["name"] = "翻译定时"
+    droppedTimer["target"] = ["kind": "automation", "automation": UUID().uuidString]
+    timers.append(droppedTimer)
+    defaults.set(try! JSONSerialization.data(withJSONObject: timers), forKey: MacTimerStore.defaultsKey)
+    expect(MacTimerStore(defaults: defaults).allTimers().map(\.name) == ["休息"], "读入丢掉自动化定时器")
 
-    let automation = ModelAutomation(id: saved.id, name: "中译英", prompt: "翻译", modelAlias: "demo-model")
-    let log = AutomationTestLog()
-    var runner: ModelAutomationRunner!
-    runner = ModelAutomationRunner(
-        lookup: { requested in requested == automation.id ? automation : nil },
-        readSelection: { "你好" },
-        complete: { alias, prompt, user in
-            log.completions += 1
-            expect(alias == "demo-model" && prompt == "翻译" && user == "你好", "调用带上模型、提示词和选中文字")
-            runner.run(id: automation.id)
-            return "Hello"
-        },
-        copy: { log.copies.append($0) },
-        paste: {
-            log.pastes += 1
-            return true
-        },
-        notify: { title, _ in log.notes.append(title) }
+    let button = RemoteButton(
+        id: UUID(),
+        name: "锁定",
+        detail: "",
+        icon: "lock",
+        target: .lock
     )
-    runner.onFinish = { log.done = true }
-    runner.run(id: automation.id)
-    expect(await waitUntil { log.done }, "自动化执行结束")
-    expect(log.completions == 1, "执行中再次触发不再调用模型")
-    expect(log.notes == ["自动化正在执行"], "执行中再次触发只提示")
-    expect(log.copies == ["Hello"] && log.pastes == 1, "成功时写入正文并粘贴一次")
+    var buttons = try! JSONSerialization.jsonObject(with: JSONEncoder().encode([button])) as! [[String: Any]]
+    var droppedButton = buttons[0]
+    droppedButton["id"] = UUID().uuidString
+    droppedButton["name"] = "翻译按钮"
+    droppedButton["target"] = [
+        "kind": "mapped",
+        "mapped": ["kind": "automation", "automation": UUID().uuidString]
+    ]
+    buttons.append(droppedButton)
+    defaults.set(try! JSONSerialization.data(withJSONObject: buttons), forKey: RemoteButtonStore.defaultsKey)
+    expect(RemoteButtonStore(defaults: defaults).all().map(\.name) == ["锁定"], "读入丢掉自动化遥控按钮")
 
-    log.notes.removeAll()
-    log.copies.removeAll()
-    log.done = false
-    let missingRunner = ModelAutomationRunner(
-        lookup: { _ in nil },
-        readSelection: { "你好" },
-        complete: { _, _, _ in
-            expect(false, "自动化不存在时不调用模型")
-            return "nope"
-        },
-        copy: { _ in expect(false, "自动化不存在时不改剪贴板") },
-        paste: { false },
-        notify: { title, _ in log.notes.append(title) }
+    let pad = TrackpadShortcutStore(defaults: defaults)
+    pad.setBinding(.shortcut(RecordedShortcut(keyCode: 0, modifiers: [.command], keyLabel: "A")), for: .threeFingerTap)
+    defaults.set(
+        try! JSONSerialization.data(withJSONObject: ["kind": "automation", "automation": UUID().uuidString]),
+        forKey: TrackpadShortcutStore.defaultsKey(for: .fourFingerTap)
     )
-    missingRunner.onFinish = { log.done = true }
-    missingRunner.run(id: UUID())
-    expect(log.notes == ["自动化不存在"], "自动化不存在时只提示")
-    try? await Task.sleep(nanoseconds: 30_000_000)
-    expect(!log.done, "不存在的自动化不会启动执行")
-
-    log.notes.removeAll()
-    log.done = false
-    let emptyRunner = ModelAutomationRunner(
-        lookup: { _ in automation },
-        readSelection: { nil },
-        complete: { _, _, _ in
-            expect(false, "没有选中文字时不调用模型")
-            return "nope"
-        },
-        copy: { _ in expect(false, "没有选中文字时不改剪贴板") },
-        paste: { false },
-        notify: { title, _ in log.notes.append(title) }
-    )
-    emptyRunner.onFinish = { log.done = true }
-    emptyRunner.run(id: automation.id)
-    expect(await waitUntil { log.done }, "没有选中文字的执行结束")
-    expect(log.notes == ["没有读到选中的文字"], "没有选中文字时只提示")
-
-    log.notes.removeAll()
-    log.copies.removeAll()
-    log.done = false
-    let blankRunner = ModelAutomationRunner(
-        lookup: { _ in automation },
-        readSelection: { "你好" },
-        complete: { _, _, _ in "  " },
-        copy: { log.copies.append($0) },
-        paste: { true },
-        notify: { title, _ in log.notes.append(title) }
-    )
-    blankRunner.onFinish = { log.done = true }
-    blankRunner.run(id: automation.id)
-    expect(await waitUntil { log.done }, "空正文执行结束")
-    expect(log.notes == ["自动化没有结果"] && log.copies.isEmpty, "空正文不粘贴")
-}
-
-private final class AutomationTestLog {
-    var notes: [String] = []
-    var copies: [String] = []
-    var pastes = 0
-    var completions = 0
-    var done = false
-}
-
-private final class FakeAutomationPasteboard: AutomationPasteboardReading {
-    var changeCount = 1
-    var value: String?
-    func string() -> String? { value }
+    expect(pad.binding(for: .fourFingerTap) == nil, "触控板自动化目标被丢掉")
+    expect(pad.binding(for: .threeFingerTap) != nil, "其它触控板绑定还在")
+    expect(defaults.data(forKey: TrackpadShortcutStore.defaultsKey(for: .fourFingerTap)) == nil, "自动化触控板键已删除")
 }
 
 func testSettingsPagesUseSecondaryTabs() {
     let titles = SettingsPage.allCases.map(\.title)
     expect(
-        titles == ["菜单栏", "路径", "输入", "工具", "模型", "连接", "通用"],
-        "设置一级页按菜单栏、路径、输入、工具、模型、连接、通用排列"
+        titles == ["路径", "输入", "工具", "连接", "通用"],
+        "设置一级页按路径、输入、工具、连接、通用排列"
     )
     func sectionTitles(_ page: SettingsPage) -> [String] { page.sections.map(\.title) }
-    expect(sectionTitles(.menubar) == ["文件夹", "窗口"], "菜单栏二级标签")
     expect(sectionTitles(.path) == ["固定根", "跟随", "访达"], "路径二级标签")
     expect(sectionTitles(.input) == ["键盘", "触控板", "遥控", "改键"], "输入二级标签")
     expect(sectionTitles(.tools) == ["定时器", "书签", "扩展", "程序坞"], "工具二级标签")
-    expect(sectionTitles(.model) == ["状态", "厂家", "密钥", "自动化"], "模型二级标签")
+    expect(!titles.contains("模型"), "设置里不再有模型页")
     expect(sectionTitles(.connection) == ["应用", "微信"], "连接二级标签")
     expect(sectionTitles(.general) == ["启动", "配置", "说明"], "通用二级标签")
     expect(SettingsPage.tools.sections.contains { $0.id == "timers" }, "定时器仍在工具页")
-    expect(StatusBarIconCatalog.all.count >= 40, "共用图标样式不少于 40 个")
-    expect(StatusBarIconCatalog.styles(for: .folder).count == StatusBarIconCatalog.all.count, "文件夹图标使用共用目录")
-    expect(StatusBarIconCatalog.styles(for: .windows).count == StatusBarIconCatalog.all.count, "窗口图标使用共用目录")
-    expect(StatusBarIconCatalog.contains("folder", slot: .folder), "默认文件夹符号在目录里")
-    expect(StatusBarIconCatalog.contains("macwindow", slot: .windows), "默认窗口符号在目录里")
-    expect(StatusBarIconCatalog.contains("star.fill", slot: .folder), "新增符号两颗图标都能用")
+    expect(!titles.contains("菜单栏"), "设置里不再配置菜单栏图标")
 }
 
-func testStatusBarIconSettings() {
-    let suite = "tocode-test-icons-\(UUID().uuidString)"
+func testStatusMenuKindCycles() {
+    expect(StatusMenuKind.files.next == .windows, "右键从文件切到窗口")
+    expect(StatusMenuKind.windows.next == .bookmarks, "右键从窗口切到书签")
+    expect(StatusMenuKind.bookmarks.next == .files, "右键从书签回到文件")
+    expect(StatusMenuKind.resolved(nil) == .files, "没有存过时是文件")
+    expect(StatusMenuKind.resolved("nope") == .files, "不认识的类型退回文件")
+    expect(StatusMenuKind.files.symbolName == "folder.fill", "文件用实心文件夹")
+    expect(StatusMenuKind.windows.symbolName == "macwindow.on.rectangle", "窗口用叠放窗口")
+    expect(StatusMenuKind.bookmarks.symbolName == "bookmark.fill", "书签用实心书签")
+
+    let suite = "tocode-test-menu-kind-\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suite)!
     defaults.removePersistentDomain(forName: suite)
     defer { defaults.removePersistentDomain(forName: suite) }
-    let store = StatusBarIconSettingsStore(defaults: defaults)
-    expect(store.isVisible(.folder), "文件夹图标默认显示")
-    expect(store.isVisible(.windows), "窗口图标默认显示")
-    expect(store.symbol(for: .folder) == "folder", "文件夹图标默认符号")
-    expect(store.symbol(for: .windows) == "macwindow", "窗口图标默认符号")
-    store.setVisible(false, slot: .folder)
-    expect(!store.isVisible(.folder), "文件夹图标可以关掉")
-    expect(store.isVisible(.windows), "关掉一个图标不影响另一个")
-    store.setSymbol("books.vertical.fill", slot: .folder)
-    expect(store.symbol(for: .folder) == "books.vertical.fill", "记住所选文件夹符号")
-    defaults.set("not-a-symbol", forKey: StatusBarIconSlot.folder.symbolKey)
-    expect(store.symbol(for: .folder) == "folder", "不认识的符号退回默认")
-    store.setSymbol("macwindow", slot: .folder)
-    expect(store.symbol(for: .folder) == "macwindow", "两颗图标可以保存同一套里的符号")
-    store.setSymbol("star.fill", slot: .windows)
-    expect(store.symbol(for: .windows) == "star.fill", "窗口图标也能用新增符号")
+    let store = StatusMenuKindStore(defaults: defaults)
+    expect(store.kind() == .files, "存储缺省是文件")
+    expect(store.cycle() == .windows, "循环一次到窗口")
+    expect(store.kind() == .windows, "记下窗口")
+    expect(store.cycle() == .bookmarks, "再循环到书签")
+    expect(store.cycle() == .files, "再循环回文件")
+}
+
+func testStatusRingGeometry() {
+    expect(StatusRingIcon.canvas == NSSize(width: 32, height: 28), "画布与 DuoBar 同为 32×28")
+    expect(StatusRingIcon.outerDiameter == 26, "圆环直径与 DuoBar 同为 26")
+    expect(StatusRingIcon.strokeWidth == 2.47, "线宽与 DuoBar 同为 2.47")
+    expect(!StatusRingGeometry.hasDots, "圆环没有底部圆点")
+    expect(StatusRingGeometry.gap == 16, "三段之间留缝")
+    expect(StatusRingGeometry.battery.sweep == 104, "电量弧长")
+    expect(StatusRingGeometry.brightness.sweep == StatusRingGeometry.battery.sweep, "亮度弧长与电量相同")
+    expect(StatusRingGeometry.volume.sweep == StatusRingGeometry.battery.sweep, "音量弧长与电量相同")
+    expect(abs(StatusRingGeometry.battery.end - 322) < 0.01, "电量弧穿过底部")
+    expect(abs(StatusRingGeometry.brightness.end - 98) < 0.01, "亮度弧停在左上")
+    expect(abs(StatusRingGeometry.volume.end - 442) < 0.01, "音量弧停在右上")
+    expect(abs(StatusRingGeometry.volume.start - StatusRingGeometry.battery.end - StatusRingGeometry.gap) < 0.01, "电量和音量之间留缝")
+    expect(abs(StatusRingGeometry.battery.fillEnd(0.5) - 270) < 0.01, "电量按比例填充")
+    expect(abs(StatusRingGeometry.brightness.fillEnd(1) - StatusRingGeometry.brightness.end) < 0.01, "亮度满格画完整段")
+    expect(!StatusRingGeometry.brightness.drawsFill(level: nil), "亮度读不到时该段为空")
+    expect(!StatusRingGeometry.brightness.drawsFill(level: 0), "亮度为 0 时不画进度")
+    expect(StatusRingGeometry.volume.drawsFill(level: 0.4), "有音量时画进度")
+    expect(StatusRingLevels.volumeFraction(percent: 40, muted: true) == 0, "静音画成 0")
+    expect(StatusRingLevels.volumeFraction(percent: nil, muted: false) == 0, "没有音量读数时为 0")
     expect(
-        store.menu(for: .folder, isRightClick: false) == .directory,
-        "文件夹左键默认是目录树"
+        StatusRingBatteryPaint.role(StatusRingBattery(present: true, percent: 10, connectedToPower: false)) == .red,
+        "低电量用红色"
     )
     expect(
-        store.menu(for: .folder, isRightClick: true) == .bookmarks,
-        "文件夹右键默认是书签"
+        StatusRingBatteryPaint.role(StatusRingBattery(present: false)) == .label,
+        "没有电池时只有底轨颜色"
     )
     expect(
-        store.menu(for: .windows, isRightClick: false) == .desktopWindows,
-        "窗口图标左键默认是桌面与窗口"
+        RootConfigMenu.itemTitles == ["复制路径", "读取剪贴板", "更改目录", "重置初始目录", "访达跟随", "终端跟随", "codex跟随", "hermes跟随"],
+        "配置夹条目"
     )
-    expect(
-        store.menu(for: .windows, isRightClick: true) == .actions,
-        "窗口图标右键默认是一次性动作"
-    )
-    store.setMenu(.desktopWindows, slot: .folder, isRightClick: false)
-    expect(store.menu(for: .folder, isRightClick: false) == .desktopWindows, "文件夹左键可改成桌面与窗口")
-    expect(store.menu(for: .folder, isRightClick: true) == .bookmarks, "改左键不影响右键")
-    store.setMenu(.desktopWindows, slot: .folder, isRightClick: true)
-    expect(store.menu(for: .folder, isRightClick: false) == .desktopWindows, "左右键可以选同一个菜单")
-    expect(store.menu(for: .folder, isRightClick: true) == .desktopWindows, "右键也可以改成同一个菜单")
-    defaults.set("not-a-menu", forKey: StatusBarIconSlot.windows.leftClickKey)
-    expect(store.menu(for: .windows, isRightClick: false) == .desktopWindows, "不认识的点击退回默认")
-    store.setMenu(.bookmarks, slot: .windows, isRightClick: false)
-    expect(store.menu(for: .windows, isRightClick: false) == .bookmarks, "窗口图标左键也可以改成书签")
 }
 
 func testUserManualPages() {
     expect(UserManual.menuTitle == "说明书", "说明书顶层标题")
     let titles = UserManual.pages.map(\.title)
-    expect(titles == ["入门", "目录树", "访达与目录", "输入与工具", "模型中转", "微信", "命令行", "设置"], "说明书 Tab 分页完整")
+    expect(titles == ["入门", "目录树", "访达与目录", "输入与工具", "微信", "命令行", "设置"], "说明书 Tab 分页完整")
     expect(Set(titles).count == titles.count, "说明书 Tab 标题不重复")
     expect(UserManual.pages.allSatisfy { !$0.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }, "每页都有正文")
 
@@ -1787,7 +1637,7 @@ func testUserManualPages() {
     expect(joined.contains("一行一条") || joined.contains("换行"), "说明书说明多路径换行")
     expect(joined.contains("历史"), "说明书覆盖目录树历史同级")
     expect(joined.contains("始终从当前解析根的第一层开始"), "说明书写明根菜单不整页跳转")
-    expect(joined.contains("分隔线 →「历史」→「终端」→「新增」"), "说明书写明根菜单底部结构")
+    expect(joined.contains("分隔线 →「历史」→「配置」→「终端」→「新增」"), "说明书写明根菜单底部结构")
     expect(joined.contains("终端跟随（默认关）"), "说明书覆盖终端跟随开关")
     expect(joined.contains("hermes跟随（默认关）"), "说明书覆盖 hermes跟随开关")
     expect(joined.contains("当前打开的会话"), "说明书写明用当前打开会话找档案")
@@ -1799,7 +1649,10 @@ func testUserManualPages() {
     expect(joined.contains("totti"), "说明书说明 totti")
     expect(joined.contains("250 毫秒"), "说明书写明点按时间")
     expect(joined.contains("不占用 fn"), "说明书写明不占用 fn")
-    expect(joined.contains("「自动化 → 新增」"), "说明书覆盖模型自动化")
+    expect(!joined.contains("模型中转"), "说明书不再写模型中转")
+    expect(!joined.contains("127.0.0.1"), "说明书不再写本地监听地址")
+    expect(!joined.contains("27800"), "说明书不再写默认端口")
+    expect(!joined.contains("Base URL"), "说明书不再写本地 Base URL")
     expect(joined.contains("限制程序坞弹出"), "说明书覆盖限制程序坞弹出")
     expect(joined.contains("自动隐藏和显示程序坞"), "说明书写明需系统自动隐藏")
     expect(joined.contains("定时器"), "说明书覆盖 mac 定时器")
@@ -1821,7 +1674,7 @@ func testUserManualPages() {
     expect(!joined.contains("设置 → 密钥"), "说明书不再写设置下密钥")
     expect(joined.contains("文稿/wechat"), "说明书写明归档在本机文稿/wechat")
     expect(!joined.contains("/Users/admin/Documents/wechat"), "说明书不写死 admin 用户路径")
-    expect(joined.contains("窗口图标左键"), "说明书写明窗口图标左键切换窗口")
+    expect(joined.contains("• 窗口："), "说明书写明窗口菜单切换桌面")
     expect(!joined.contains("按住 totti 再左键点图标"), "说明书不再要求按住 totti 才打开窗口菜单")
     expect(joined.contains("点击桌面夹"), "说明书写明点击桌面夹切换")
     expect(joined.contains("向右箭头"), "说明书写明桌面夹有向右箭头")
@@ -1841,8 +1694,7 @@ func testUserManualPages() {
     expect(!joined.contains("AK → 模型"), "说明书不再写 AK → 模型")
     expect(!joined.contains("AK → 密钥 → AI"), "说明书不再写 AK 下密钥路径")
     expect(!joined.contains("设置 → 密钥 → AI"), "说明书不再写设置下密钥入口")
-    expect(joined.contains("顶层「模型」"), "说明书覆盖独立顶层模型中转站")
-    expect(joined.contains("不提供人工别名"), "说明书覆盖无模型别名")
+    expect(!joined.contains("顶层「模型」"), "说明书不再写顶层模型中转")
     expect(joined.contains("网关链接"), "说明书覆盖网关链接")
     expect(!joined.contains("录入安克"), "说明书点击路径文案不含安克")
     expect(!joined.contains("ANKER_API_KEY"), "说明书不含密钥字段")
@@ -1925,22 +1777,6 @@ func testRootPathStore() {
 }
 
 func testDesktopWindowSwitch() {
-    expect(
-        StatusItemPrimaryClick.resolve(slot: .folder, isRightClick: false) == .directory,
-        "文件夹左键进入目录树"
-    )
-    expect(
-        StatusItemPrimaryClick.resolve(slot: .folder, isRightClick: true) == .bookmarks,
-        "文件夹右键进入书签"
-    )
-    expect(
-        StatusItemPrimaryClick.resolve(slot: .windows, isRightClick: false) == .desktopWindows,
-        "窗口图标左键进入窗口菜单"
-    )
-    expect(
-        StatusItemPrimaryClick.resolve(slot: .windows, isRightClick: true) == .actions,
-        "窗口图标右键进入一次性动作"
-    )
     expect(SkyLightSpaceDumpParser.parse(["不是字典"]) == nil, "桌面结构认不出时失败")
 
     let parsed = SkyLightSpaceDumpParser.parse([
@@ -4581,27 +4417,9 @@ func testKeyboardMappingTargetEditorRetainsBlackout() {
         actionTriggerPhrase: "轻点后"
     )
     expect(trackpad.target == .action(.blackout), "触控板弹窗复用同一编辑器并回填临时黑屏")
-    let automation = ModelAutomation(
-        id: UUID(),
-        name: "中译英",
-        prompt: "翻译",
-        modelAlias: "demo-model"
-    )
-    let automationEditor = KeyboardMappingTargetEditor(
-        target: .automation(automation.id),
-        automations: [automation]
-    )
-    expect(automationEditor.target == .automation(automation.id), "编辑已有自动化目标时回填")
-    let missingAutomation = KeyboardMappingTargetEditor(
-        target: .automation(UUID()),
-        automations: [automation]
-    )
-    expect(missingAutomation.target == nil, "自动化已删除时不能保存原目标")
     editor.detach()
     desktop.detach()
     trackpad.detach()
-    automationEditor.detach()
-    missingAutomation.detach()
 }
 
 @MainActor
@@ -9828,19 +9646,9 @@ struct TestRunnerMain {
         testTocodePortableSettingsTransfer()
         testUserManualPages()
         testSettingsPagesUseSecondaryTabs()
-        testStatusBarIconSettings()
-        await testModelRelayPromptFormLayout()
-        testModelRelayValidationConfigAndVault()
-        testModelRelayHTTPParser()
-        testModelRelayRouterAndControlPlane()
-        await testModelRelayValidatedKeyControlPlane()
-        await testModelRelayStaleRefreshCannotOverwriteNewConnection()
-        await testModelRelayUpstreamProxy()
-        await testModelRelayHTTPServerRuntime()
-        await testModelRelayPortRollback()
-        testModelRelayManualWithoutAK()
-        testModelRelayCallMetricsStore()
-        await testModelRelayProxyRecordsOneCallEvenOnUpstreamRetryExhaustion()
+        testStatusMenuKindCycles()
+        testStatusRingGeometry()
+        testDroppedAutomationTargets()
         testAnkerCredentialPromptCopyHasNoAnkerWord()
         testRootPathStore()
         testClipboardService()
@@ -9860,7 +9668,6 @@ struct TestRunnerMain {
         testKeyboardShortcutMappingStoreAndEngine()
         testSpaceTottiModifier()
         testDesktopWindowSwitch()
-        await testModelAutomation()
         testKeyboardShortcutMappingActionTargets()
         await testMappedOpenURL()
         await testKeyboardMappingTargetEditorRetainsBlackout()

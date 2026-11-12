@@ -16,6 +16,8 @@ FRAMEWORKS=(
   -framework ServiceManagement
   -framework Network
   -framework CryptoKit
+  -framework IOKit
+  -framework CoreAudio
   -lsqlite3
 )
 
@@ -29,9 +31,6 @@ for file in Sources/*.swift; do
       CLI_SOURCES+=("$file")
       ;;
     TocodeApp.swift|AppDelegate.swift|StatusItemController.swift|MenuBuilder.swift)
-      APP_SOURCES+=("$file")
-      ;;
-    ModelRelay*.swift)
       APP_SOURCES+=("$file")
       ;;
     BookmarkNativeHostMain.swift)

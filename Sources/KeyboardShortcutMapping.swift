@@ -1,6 +1,7 @@
 import AppKit
 import CoreGraphics
 import Foundation
+import UserNotifications
 
 struct KeyboardShortcutMapping: Codable, Equatable, Identifiable {
     let id: UUID
@@ -35,12 +36,11 @@ struct KeyboardShortcutMappingDraft: Equatable {
     }
 }
 
-/// 目标可以是用户录入的组合键、内置命名功能、一个带协议的网址，或一个已保存的自动化。
+/// 目标可以是用户录入的组合键、内置命名功能，或一个带协议的网址。
 enum KeyboardShortcutMappingTarget: Equatable, Hashable {
     case shortcut(RecordedShortcut)
     case action(KeyboardMappingAction)
     case openURL(String)
-    case automation(UUID)
 
     /// 快捷键目标，或桌面切换解析出的组合键；Tocode 动作和打开网址没有组合键。
     var resolvedShortcut: RecordedShortcut? {
@@ -50,8 +50,6 @@ enum KeyboardShortcutMappingTarget: Equatable, Hashable {
         case .action(let action):
             return action.synthesizedShortcut
         case .openURL:
-            return nil
-        case .automation:
             return nil
         }
     }
@@ -67,8 +65,6 @@ enum KeyboardShortcutMappingTarget: Equatable, Hashable {
             return .invoke(action)
         case .openURL(let raw):
             return .openURL(raw)
-        case .automation(let id):
-            return .runAutomation(id)
         }
     }
 
@@ -80,11 +76,6 @@ enum KeyboardShortcutMappingTarget: Equatable, Hashable {
             return action.title
         case .openURL(let raw):
             return MappedURL.displayText(for: raw)
-        case .automation(let id):
-            if let name = ModelAutomationLookup.name(id) {
-                return "自动化 \(name)"
-            }
-            return "自动化"
         }
     }
 
@@ -152,7 +143,7 @@ extension KeyboardShortcutMappingTarget: Codable {
             case .openURL:
                 self = .openURL(try container.decode(String.self, forKey: .url))
             case .automation:
-                self = .automation(try container.decode(UUID.self, forKey: .automation))
+                throw RemovedAutomationTarget.dropped
             }
             return
         }
@@ -172,10 +163,108 @@ extension KeyboardShortcutMappingTarget: Codable {
         case .openURL(let url):
             try container.encode(Kind.openURL, forKey: .kind)
             try container.encode(url, forKey: .url)
-        case .automation(let id):
-            try container.encode(Kind.automation, forKey: .kind)
-            try container.encode(id, forKey: .automation)
         }
+    }
+}
+
+enum RemovedAutomationTarget: Error {
+    case dropped
+}
+
+enum AutomationTargetCleanup {
+    static let pendingNamesKey = "tocode.removedAutomationTargetNames"
+    static let noticeDoneKey = "tocode.removedAutomationTargetsNotified"
+
+    static func remember(_ names: [String], defaults: UserDefaults) {
+        let trimmed = names
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !trimmed.isEmpty else { return }
+        var existing = defaults.stringArray(forKey: pendingNamesKey) ?? []
+        for name in trimmed where !existing.contains(name) {
+            existing.append(name)
+        }
+        defaults.set(existing, forKey: pendingNamesKey)
+    }
+
+    static func notifyIfNeeded(defaults: UserDefaults = TocodePreferences.shared) {
+        guard !defaults.bool(forKey: noticeDoneKey) else { return }
+        let names = defaults.stringArray(forKey: pendingNamesKey) ?? []
+        defaults.set(true, forKey: noticeDoneKey)
+        defaults.removeObject(forKey: pendingNamesKey)
+        guard !names.isEmpty else { return }
+        let content = UNMutableNotificationContent()
+        content.title = "模型自动化已去掉"
+        content.body = "已去掉：" + names.joined(separator: "、") + "。这些触发不再执行。"
+        let request = UNNotificationRequest(
+            identifier: "tocode.removed-automation-targets",
+            content: content,
+            trigger: nil
+        )
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert]) { granted, _ in
+            guard granted else { return }
+            center.add(request) { _ in }
+        }
+    }
+
+    static func isAutomationTarget(_ value: Any) -> Bool {
+        guard let dict = value as? [String: Any] else { return false }
+        if dict["kind"] as? String == "automation" { return true }
+        if dict["kind"] as? String == "mapped", let mapped = dict["mapped"] {
+            return isAutomationTarget(mapped)
+        }
+        return false
+    }
+
+    static func isStoredAutomationTarget(_ data: Data) -> Bool {
+        guard let root = try? JSONSerialization.jsonObject(with: data) else { return false }
+        return isAutomationTarget(root)
+    }
+
+    /// 丢掉目标为自动化的记录。触控板字典里的自动化值只删对应键。没有这类目标时原样返回，避免改写无关配置。
+    static func cleanedRecords(from data: Data) -> (data: Data, removed: [String]) {
+        guard let root = try? JSONSerialization.jsonObject(with: data) else { return (data, []) }
+        var removed: [String] = []
+        let cleaned = stripKnown(root, names: &removed)
+        if removed.isEmpty { return (data, []) }
+        guard JSONSerialization.isValidJSONObject(cleaned),
+              let out = try? JSONSerialization.data(withJSONObject: cleaned) else {
+            return (data, [])
+        }
+        return (out, removed)
+    }
+
+    private static func stripKnown(_ value: Any, names: inout [String]) -> Any {
+        if let array = value as? [Any] {
+            return array.compactMap { item -> Any? in
+                guard let dict = item as? [String: Any] else { return item }
+                if let target = dict["target"], isAutomationTarget(target) {
+                    names.append(recordName(dict))
+                    return nil
+                }
+                return dict
+            }
+        }
+        guard let dict = value as? [String: Any] else { return value }
+        var copy = dict
+        if let mappings = dict["keyboardMappings"] {
+            copy["keyboardMappings"] = stripKnown(mappings, names: &names)
+        }
+        if let trackpad = dict["trackpad"] as? [String: Any] {
+            var pad = trackpad
+            for (key, child) in trackpad where isAutomationTarget(child) {
+                names.append("触控板 \(key) 指")
+                pad.removeValue(forKey: key)
+            }
+            copy["trackpad"] = pad
+        }
+        return copy
+    }
+
+    private static func recordName(_ dict: [String: Any]) -> String {
+        let name = (dict["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return name.isEmpty ? "未命名" : name
     }
 }
 
@@ -510,7 +599,16 @@ struct KeyboardShortcutMappingStore {
 
     func allMappings() -> [KeyboardShortcutMapping] {
         guard let data = defaults.data(forKey: Self.defaultsKey) else { return [] }
-        return (try? JSONDecoder().decode([KeyboardShortcutMapping].self, from: data)) ?? []
+        let cleaned = AutomationTargetCleanup.cleanedRecords(from: data)
+        let payload = cleaned.removed.isEmpty ? data : cleaned.data
+        guard let decoded = try? JSONDecoder().decode([KeyboardShortcutMapping].self, from: payload) else {
+            return []
+        }
+        if !cleaned.removed.isEmpty {
+            defaults.set(cleaned.data, forKey: Self.defaultsKey)
+            AutomationTargetCleanup.remember(cleaned.removed, defaults: defaults)
+        }
+        return decoded
     }
 
     func save(
@@ -626,7 +724,6 @@ enum KeyboardShortcutRemapStep: Equatable {
     case emitUp(RecordedShortcut)
     case invoke(KeyboardMappingAction)
     case openURL(String)
-    case runAutomation(UUID)
 }
 
 struct KeyboardShortcutRemapEngine {
