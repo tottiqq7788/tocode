@@ -2,6 +2,31 @@ import AppKit
 import UniformTypeIdentifiers
 import UserNotifications
 
+/// 包住原有菜单代理，只为记下下级菜单打开时的光标。其它回调仍交给原来的代理。
+@MainActor
+final class MenuOpenNote: NSObject, NSMenuDelegate {
+    var next: NSMenuDelegate?
+    weak var menu: NSMenu?
+
+    func menuWillOpen(_ menu: NSMenu) {
+        self.menu = menu
+        if menu.supermenu != nil {
+            SpuriousMenuExitHub.note(mouse: NSEvent.mouseLocation)
+        }
+        next?.menuWillOpen?(menu)
+    }
+
+    override func responds(to selector: Selector!) -> Bool {
+        if selector == #selector(NSMenuDelegate.menuWillOpen(_:)) { return true }
+        return next?.responds(to: selector) ?? super.responds(to: selector)
+    }
+
+    override func forwardingTarget(for selector: Selector!) -> Any? {
+        if selector == #selector(NSMenuDelegate.menuWillOpen(_:)) { return nil }
+        return next
+    }
+}
+
 /// 两个菜单栏图标：文件夹负责路径和书签，窗口图标负责桌面和一次性动作。
 @MainActor
 final class StatusItemController: NSObject, SettingsHosting {
@@ -11,6 +36,7 @@ final class StatusItemController: NSObject, SettingsHosting {
     private let terminalWindows: DirectoryTerminalWindowStore
     private let terminalFrontWindow: DirectoryTerminalFrontWindowReading
     private let builder: MenuBuilder
+    private let menuProbe = MenuTrackingProbe()
     private let fs = FileSystemService()
     private let clipboard = ClipboardService()
     private let store = RootPathStore()
@@ -46,6 +72,7 @@ final class StatusItemController: NSObject, SettingsHosting {
     private var isCreatingModelRelayProvider = false
     private var relayBusyProviderIDs: Set<UUID> = []
     private var modifierPollingTimer: Timer?
+    private var isPresentingStatusMenu = false
     private var timerMenuRefreshTimer: Timer?
     private weak var liveTimerMenu: NSMenu?
     private weak var liveModelRelayStatusItem: NSMenuItem?
@@ -164,18 +191,8 @@ final class StatusItemController: NSObject, SettingsHosting {
                 self?.refreshLiveTimerMenuItems()
             }
         }
-        installStatusItem(
-            folderItem,
-            slot: .folder,
-            help: "路径与书签",
-            autosaveName: "tocode.folder"
-        )
-        installStatusItem(
-            windowsItem,
-            slot: .windows,
-            help: "窗口与动作",
-            autosaveName: "tocode.windows"
-        )
+        installStatusItem(folderItem, slot: .folder, autosaveName: "tocode.folder")
+        installStatusItem(windowsItem, slot: .windows, autosaveName: "tocode.windows")
         modelRelay.didChange = { [weak self] in
             MainActor.assumeIsolated {
                 self?.refreshModelRelayStatus()
@@ -194,16 +211,22 @@ final class StatusItemController: NSObject, SettingsHosting {
     private func installStatusItem(
         _ item: NSStatusItem,
         slot: StatusBarIconSlot,
-        help: String,
         autosaveName: String
     ) {
         item.autosaveName = autosaveName
-        applyStatusBarIcon(item, slot: slot, help: help)
+        applyStatusBarIcon(item, slot: slot)
     }
 
-    private func applyStatusBarIcon(_ item: NSStatusItem, slot: StatusBarIconSlot, help: String) {
+    private func statusItemHelp(_ slot: StatusBarIconSlot) -> String {
+        let left = statusBarIcons.menu(for: slot, isRightClick: false).menuTitle
+        let right = statusBarIcons.menu(for: slot, isRightClick: true).menuTitle
+        return "左键\(left)，右键\(right)"
+    }
+
+    private func applyStatusBarIcon(_ item: NSStatusItem, slot: StatusBarIconSlot) {
         item.isVisible = statusBarIcons.isVisible(slot)
         guard let button = item.button else { return }
+        let help = statusItemHelp(slot)
         button.image = NSImage(
             systemSymbolName: statusBarIcons.symbol(for: slot),
             accessibilityDescription: help
@@ -215,12 +238,13 @@ final class StatusItemController: NSObject, SettingsHosting {
     }
 
     @objc private func handleClick(_ sender: Any?) {
+        if isPresentingStatusMenu { return }
         guard let event = NSApp.currentEvent else { return }
         let button = (sender as? NSStatusBarButton) ?? folderItem.button
         guard let button else { return }
-        let slot: StatusItemSlot = button === windowsItem.button ? .windows : .folder
+        let slot: StatusBarIconSlot = button === windowsItem.button ? .windows : .folder
         let isRight = event.type == .rightMouseUp
-        switch StatusItemPrimaryClick.resolve(slot: slot, isRightClick: isRight) {
+        switch statusBarIcons.menu(for: slot, isRightClick: isRight) {
         case .directory:
             showDirectoryMenu(on: button)
         case .bookmarks:
@@ -232,7 +256,7 @@ final class StatusItemController: NSObject, SettingsHosting {
         }
     }
 
-    /// 窗口图标左键：列出各桌面及其窗口。不读取、不改写固定根。
+    /// 桌面窗口菜单：列出各桌面及其窗口。不读取、不改写固定根。
     private func showDesktopWindowMenu(on button: NSStatusBarButton) {
         let menu = NSMenu()
         menu.autoenablesItems = false
@@ -246,7 +270,7 @@ final class StatusItemController: NSObject, SettingsHosting {
             unavailable.isEnabled = false
             menu.addItem(unavailable)
         }
-        popUp(menu, on: button)
+        popUp(menu, on: button, kind: "desktop")
     }
 
     private func makeDesktopEntry(_ entry: DesktopMenuEntry) -> NSMenuItem {
@@ -415,7 +439,7 @@ final class StatusItemController: NSObject, SettingsHosting {
 
         repeat {
             builder.beginTracking(rootMenu: menu)
-            popUp(menu, on: button)
+            popUp(menu, on: button, kind: "directory")
             builder.endTracking()
         } while builder.consumeSameMenuRepopRequest()
 
@@ -432,7 +456,7 @@ final class StatusItemController: NSObject, SettingsHosting {
             target: self,
             action: #selector(openBookmarkMenuItem(_:))
         )
-        popUp(menu, on: button)
+        popUp(menu, on: button, kind: "bookmarks")
     }
 
     @objc private func openBookmarkMenuItem(_ sender: NSMenuItem) {
@@ -514,7 +538,7 @@ final class StatusItemController: NSObject, SettingsHosting {
             }
         }
         startTimerMenuRefresh()
-        popUp(menu, on: button)
+        popUp(menu, on: button, kind: "actions")
         stopTimerMenuRefresh()
         liveTimerMenu = nil
         liveTimerMenuItems.removeAll()
@@ -531,8 +555,70 @@ final class StatusItemController: NSObject, SettingsHosting {
         showSettings(page: .tools, timerID: id)
     }
 
-    private func popUp(_ menu: NSMenu, on button: NSStatusBarButton) {
-        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
+    /// 用状态栏菜单跟踪打开。`menu.popUp` 在应用不在前台时，下级窗口一出现就会收到一次虚假的鼠标离开。
+    private func popUp(_ menu: NSMenu, on button: NSStatusBarButton, kind: String) {
+        guard let item = statusItem(for: button) else { return }
+        let previousMenu = item.menu
+        item.menu = menu
+        isPresentingStatusMenu = true
+        menuProbe.begin(kind: kind)
+        menuProbe.attach(menu)
+        let notes = noteSubmenuOpens(in: menu)
+        let exitMonitor = installSpuriousExitMonitor()
+        button.performClick(nil)
+        if let exitMonitor { NSEvent.removeMonitor(exitMonitor) }
+        SpuriousMenuExitHub.reset()
+        restoreMenuDelegates(notes)
+        menuProbe.end()
+        isPresentingStatusMenu = false
+        item.menu = previousMenu
+    }
+
+    private func statusItem(for button: NSStatusBarButton) -> NSStatusItem? {
+        if button === folderItem.button { return folderItem }
+        if button === windowsItem.button { return windowsItem }
+        return nil
+    }
+
+    /// 跟踪期间记下下级菜单打开的位置。目录树在跟踪中新建的子菜单由 MenuBuilder 另记。
+    private func noteSubmenuOpens(in menu: NSMenu) -> [MenuOpenNote] {
+        var notes: [MenuOpenNote] = []
+        func wrap(_ menu: NSMenu) {
+            let note = MenuOpenNote()
+            note.next = menu.delegate
+            note.menu = menu
+            menu.delegate = note
+            notes.append(note)
+            for item in menu.items {
+                if let submenu = item.submenu { wrap(submenu) }
+            }
+        }
+        wrap(menu)
+        return notes
+    }
+
+    private func restoreMenuDelegates(_ notes: [MenuOpenNote]) {
+        for note in notes {
+            guard let menu = note.menu, menu.delegate === note else { continue }
+            menu.delegate = note.next
+        }
+    }
+
+    private func installSpuriousExitMonitor() -> Any? {
+        SpuriousMenuExitHub.reset()
+        return NSEvent.addLocalMonitorForEvents(matching: .mouseExited) { event in
+            let mouse = NSEvent.mouseLocation
+            let inside = SpuriousMenuExitHub.pointerInsideOwnMenu(mouse)
+            if SpuriousMenuExitHub.shouldSwallow(
+                deltaX: event.deltaX,
+                deltaY: event.deltaY,
+                mouse: mouse,
+                pointerInsideMenu: inside
+            ) {
+                return nil
+            }
+            return event
+        }
     }
 
     /// 在菜单跟踪期间轮询 Option/Command 并同步到菜单构建器。Option 优先于 Command。
@@ -1622,9 +1708,14 @@ extension StatusItemController {
     var settingsWindowsIconVisible: Bool { statusBarIcons.isVisible(.windows) }
     var settingsFolderIconSymbol: String { statusBarIcons.symbol(for: .folder) }
     var settingsWindowsIconSymbol: String { statusBarIcons.symbol(for: .windows) }
+    var settingsFolderLeftClick: StatusItemPrimaryClick { statusBarIcons.menu(for: .folder, isRightClick: false) }
+    var settingsFolderRightClick: StatusItemPrimaryClick { statusBarIcons.menu(for: .folder, isRightClick: true) }
+    var settingsWindowsLeftClick: StatusItemPrimaryClick { statusBarIcons.menu(for: .windows, isRightClick: false) }
+    var settingsWindowsRightClick: StatusItemPrimaryClick { statusBarIcons.menu(for: .windows, isRightClick: true) }
     var settingsLaunchAtLogin: Bool { launchAtLogin.isEnabled }
     var settingsHermesInstalled: Bool { hermesGateway.isInstalled }
     var settingsHermesGatewayOn: Bool { hermesGateway.phase != .off }
+    var settingsMenuTracking: Bool { MenuTrackingPreferences.isEnabled() }
     var settingsHermesGatewayDetail: String {
         HermesGatewayMenu.toolTip(phase: hermesGateway.phase, installed: hermesGateway.isInstalled)
     }
@@ -1710,19 +1801,35 @@ extension StatusItemController {
     func settingsSetDockRestrict(_ on: Bool) { _ = dockAutohideRestrict.setEnabled(on) }
     func settingsSetFolderIconVisible(_ on: Bool) {
         statusBarIcons.setVisible(on, slot: .folder)
-        applyStatusBarIcon(folderItem, slot: .folder, help: "路径与书签")
+        applyStatusBarIcon(folderItem, slot: .folder)
     }
     func settingsSetWindowsIconVisible(_ on: Bool) {
         statusBarIcons.setVisible(on, slot: .windows)
-        applyStatusBarIcon(windowsItem, slot: .windows, help: "窗口与动作")
+        applyStatusBarIcon(windowsItem, slot: .windows)
     }
     func settingsSetFolderIconSymbol(_ symbol: String) {
         statusBarIcons.setSymbol(symbol, slot: .folder)
-        applyStatusBarIcon(folderItem, slot: .folder, help: "路径与书签")
+        applyStatusBarIcon(folderItem, slot: .folder)
     }
     func settingsSetWindowsIconSymbol(_ symbol: String) {
         statusBarIcons.setSymbol(symbol, slot: .windows)
-        applyStatusBarIcon(windowsItem, slot: .windows, help: "窗口与动作")
+        applyStatusBarIcon(windowsItem, slot: .windows)
+    }
+    func settingsSetFolderLeftClick(_ menu: StatusItemPrimaryClick) {
+        statusBarIcons.setMenu(menu, slot: .folder, isRightClick: false)
+        applyStatusBarIcon(folderItem, slot: .folder)
+    }
+    func settingsSetFolderRightClick(_ menu: StatusItemPrimaryClick) {
+        statusBarIcons.setMenu(menu, slot: .folder, isRightClick: true)
+        applyStatusBarIcon(folderItem, slot: .folder)
+    }
+    func settingsSetWindowsLeftClick(_ menu: StatusItemPrimaryClick) {
+        statusBarIcons.setMenu(menu, slot: .windows, isRightClick: false)
+        applyStatusBarIcon(windowsItem, slot: .windows)
+    }
+    func settingsSetWindowsRightClick(_ menu: StatusItemPrimaryClick) {
+        statusBarIcons.setMenu(menu, slot: .windows, isRightClick: true)
+        applyStatusBarIcon(windowsItem, slot: .windows)
     }
     func settingsSetLaunchAtLogin(_ on: Bool) {
         guard on != launchAtLogin.isEnabled else { return }
@@ -1766,6 +1873,9 @@ extension StatusItemController {
     func settingsEditAutomation(id: UUID) { editModelAutomation(menuSender(id.uuidString)) }
     func settingsManageBindingKey() { manageBindingKey() }
     func settingsOpenRemoteAssociation() { openRemoteAssociation() }
+    func settingsSetMenuTracking(_ on: Bool) {
+        MenuTrackingPreferences.setEnabled(on)
+    }
     func settingsOpenDiagnostics() { openDiagnosticLogs() }
     func settingsBindWeChat() { bindWeChat() }
     func settingsOpenWeChatLocation() { openWeChatLocation() }

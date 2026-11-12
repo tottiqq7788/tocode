@@ -25,6 +25,10 @@ protocol SettingsHosting: AnyObject {
     var settingsWindowsIconVisible: Bool { get }
     var settingsFolderIconSymbol: String { get }
     var settingsWindowsIconSymbol: String { get }
+    var settingsFolderLeftClick: StatusItemPrimaryClick { get }
+    var settingsFolderRightClick: StatusItemPrimaryClick { get }
+    var settingsWindowsLeftClick: StatusItemPrimaryClick { get }
+    var settingsWindowsRightClick: StatusItemPrimaryClick { get }
     var settingsLaunchAtLogin: Bool { get }
     var settingsHermesInstalled: Bool { get }
     var settingsHermesGatewayOn: Bool { get }
@@ -60,6 +64,10 @@ protocol SettingsHosting: AnyObject {
     func settingsSetWindowsIconVisible(_ on: Bool)
     func settingsSetFolderIconSymbol(_ symbol: String)
     func settingsSetWindowsIconSymbol(_ symbol: String)
+    func settingsSetFolderLeftClick(_ menu: StatusItemPrimaryClick)
+    func settingsSetFolderRightClick(_ menu: StatusItemPrimaryClick)
+    func settingsSetWindowsLeftClick(_ menu: StatusItemPrimaryClick)
+    func settingsSetWindowsRightClick(_ menu: StatusItemPrimaryClick)
     func settingsSetLaunchAtLogin(_ on: Bool)
     func settingsSetHermesGateway(_ on: Bool)
 
@@ -89,6 +97,8 @@ protocol SettingsHosting: AnyObject {
     func settingsEditAutomation(id: UUID)
     func settingsManageBindingKey()
     func settingsOpenRemoteAssociation()
+    var settingsMenuTracking: Bool { get }
+    func settingsSetMenuTracking(_ on: Bool)
     func settingsOpenDiagnostics()
     func settingsBindWeChat()
     func settingsOpenWeChatLocation()
@@ -376,8 +386,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
             visible: host.settingsFolderIconVisible,
             visibleKey: "folderIcon",
             symbol: host.settingsFolderIconSymbol,
-            styles: StatusBarIconCatalog.folder,
-            note: "左键是目录树，右键是书签。",
+            styles: StatusBarIconCatalog.styles(for: .folder),
+            left: host.settingsFolderLeftClick,
+            right: host.settingsFolderRightClick,
+            setLeft: { host.settingsSetFolderLeftClick($0) },
+            setRight: { host.settingsSetFolderRightClick($0) },
             apply: { host.settingsSetFolderIconSymbol($0) }
         )
     }
@@ -387,8 +400,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
             visible: host.settingsWindowsIconVisible,
             visibleKey: "windowsIcon",
             symbol: host.settingsWindowsIconSymbol,
-            styles: StatusBarIconCatalog.windows,
-            note: "左键是桌面和窗口，右键是一次性动作。",
+            styles: StatusBarIconCatalog.styles(for: .windows),
+            left: host.settingsWindowsLeftClick,
+            right: host.settingsWindowsRightClick,
+            setLeft: { host.settingsSetWindowsLeftClick($0) },
+            setRight: { host.settingsSetWindowsRightClick($0) },
             apply: { host.settingsSetWindowsIconSymbol($0) }
         )
     }
@@ -398,16 +414,54 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
         visibleKey: String,
         symbol: String,
         styles: [StatusBarIconStyle],
-        note: String,
+        left: StatusItemPrimaryClick,
+        right: StatusItemPrimaryClick,
+        setLeft: @escaping (StatusItemPrimaryClick) -> Void,
+        setRight: @escaping (StatusItemPrimaryClick) -> Void,
         apply: @escaping (String) -> Void
     ) -> [NSView] {
         [
             toggle("在菜单栏显示", on: visible, key: visibleKey),
-            footnote(note),
+            menuPopupRow("左键", selected: left, apply: setLeft),
+            menuPopupRow("右键", selected: right, apply: setRight),
+            footnote("左键是\(left.menuTitle)，右键是\(right.menuTitle)。左右键可以选同一个菜单。"),
             footnote("两个图标都关掉时，从程序坞打开设置再打开。"),
             footnote("图标样式"),
             symbolGrid(styles: styles, selected: symbol, apply: apply),
         ]
+    }
+
+    private func menuPopupRow(
+        _ title: String,
+        selected: StatusItemPrimaryClick,
+        apply: @escaping (StatusItemPrimaryClick) -> Void
+    ) -> NSView {
+        let label = NSTextField(labelWithString: title)
+        label.font = .systemFont(ofSize: 13)
+        label.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let popup = NSPopUpButton()
+        popup.controlSize = .regular
+        for menu in StatusItemPrimaryClick.assignable {
+            popup.addItem(withTitle: menu.menuTitle)
+            popup.lastItem?.representedObject = menu.rawValue
+        }
+        popup.selectItem(withTitle: selected.menuTitle)
+        popup.target = self
+        popup.action = #selector(runControl(_:))
+        actions[ObjectIdentifier(popup)] = { [weak popup] in
+            guard
+                let raw = popup?.selectedItem?.representedObject as? String,
+                let menu = StatusItemPrimaryClick(rawValue: raw)
+            else { return }
+            apply(menu)
+        }
+        let row = NSStackView(views: [label, popup])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 12
+        row.widthAnchor.constraint(greaterThanOrEqualToConstant: 420).isActive = true
+        popup.widthAnchor.constraint(equalToConstant: 180).isActive = true
+        return row
     }
 
     private func pathRootRows(_ host: SettingsHosting) -> [NSView] {
@@ -624,6 +678,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
                 enabled: host.settingsHermesInstalled
             ),
             footnote(host.settingsHermesGatewayDetail),
+            toggle("记录菜单跟踪", on: host.settingsMenuTracking, key: "menuTracking"),
+            footnote("默认关闭。打开后只记录菜单展开和关闭的时机，不记录名称、网址或路径。"),
             button("打开诊断日志") { host.settingsOpenDiagnostics() },
         ]
     }
@@ -634,7 +690,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
                 host.settingsBindWeChat()
             },
             button("打开文件位置") { host.settingsOpenWeChatLocation() },
-            footnote("窗口图标右键的动作菜单也可以直接打开归档目录。"),
+            footnote("一次性动作菜单也可以直接打开归档目录，默认是窗口图标右键。"),
         ]
     }
 
@@ -813,7 +869,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
 
     @objc private func runControl(_ sender: NSControl) {
         let work = actions[ObjectIdentifier(sender)]
-        if sender is NSSwitch {
+        if sender is NSSwitch || sender is NSPopUpButton {
             restoreScrollOrigin = scroll.contentView.bounds.origin
         }
         work?()
@@ -845,6 +901,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
         case "dock": host.settingsSetDockRestrict(on)
         case "login": host.settingsSetLaunchAtLogin(on)
         case "gateway": host.settingsSetHermesGateway(on)
+        case "menuTracking": host.settingsSetMenuTracking(on)
         default: break
         }
     }

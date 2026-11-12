@@ -291,6 +291,167 @@ func testSubmenuPrefillsOnHighlight() {
     expect(nestedMenu.items.map(\.title) == nestedOnce, "更深层再次高亮或打开不重复条目")
 }
 
+@MainActor
+final class RecordingMenuSink: MenuTrackingSinking {
+    var highlights = 0
+    var lastIndex = 0
+    var lastHasSubmenu = false
+    var counts: [(before: Int, after: Int)] = []
+    var opened = 0
+    var closed = 0
+
+    func menuTrackingHighlight(_ menu: NSMenu, item: NSMenuItem?) {
+        highlights += 1
+        lastIndex = item.flatMap { menu.index(of: $0) } ?? -1
+        lastHasSubmenu = item?.submenu != nil
+    }
+
+    func menuTrackingItemCountChanged(_ menu: NSMenu, before: Int, after: Int) {
+        counts.append((before, after))
+    }
+
+    func menuTrackingWillOpen(_ menu: NSMenu) {
+        opened += 1
+    }
+
+    func menuTrackingDidClose(_ menu: NSMenu) {
+        closed += 1
+    }
+}
+
+final class MemoryMenuTrackingRecorder: MenuTrackingRecording {
+    var rows: [(event: String, detail: [String: Any])] = []
+
+    func record(_ event: String, detail: [String: Any]) {
+        rows.append((event, detail))
+    }
+
+    func blob() -> String {
+        rows.map { row in
+            let body = row.detail.keys.sorted().map { key in
+                "\(key)=\(row.detail[key]!)"
+            }.joined(separator: ",")
+            return "\(row.event){\(body)}"
+        }.joined(separator: "\n")
+    }
+}
+
+@MainActor
+func testMenuBuilderForwardsHighlightWithoutRefilling() {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("tocode-forward-\(UUID().uuidString)", isDirectory: true)
+    let child = root.appendingPathComponent("child", isDirectory: true)
+    try! FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
+    try! Data().write(to: child.appendingPathComponent("note.txt"))
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let suite = "tocode.forward.test.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let builder = MenuBuilder(resumeStore: DirectoryMenuResumeStore(defaults: defaults))
+    let sink = RecordingMenuSink()
+    builder.menuTrackingSink = sink
+    let menu = NSMenu()
+    builder.fillRoot(menu, with: root.path)
+    guard let childItem = menu.items.first(where: { $0.title == "child" }),
+          let submenu = childItem.submenu else {
+        expect(false, "转发测试有子文件夹")
+        return
+    }
+
+    builder.menu(menu, willHighlight: childItem)
+    expect(sink.highlights == 1, "高亮转发给诊断")
+    expect(sink.lastHasSubmenu, "高亮项带子菜单")
+    expect(sink.counts.count == 1, "填充时报告条目数变化")
+    expect(sink.counts[0].before == 1, "填充前只有占位项")
+    expect(sink.counts[0].after > 1, "填充后条目变多")
+    let once = submenu.items.map(\.title)
+    builder.menu(menu, willHighlight: childItem)
+    builder.menuWillOpen(submenu)
+    builder.menuDidClose(submenu)
+    expect(sink.counts.count == 1, "再次高亮或打开不再改条目数")
+    expect(submenu.items.map(\.title) == once, "转发不重复追加")
+    expect(sink.opened == 1, "打开转发给诊断")
+    expect(sink.closed == 1, "关闭转发给诊断")
+}
+
+@MainActor
+func testMenuTrackingProbeRecordsSequenceWithoutTitles() {
+    let suite = "tocode.menu.tracking.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    expect(!MenuTrackingPreferences.isEnabled(defaults: defaults), "菜单跟踪默认关闭")
+    MenuTrackingPreferences.setEnabled(true, defaults: defaults)
+    expect(MenuTrackingPreferences.isEnabled(defaults: defaults), "菜单跟踪可以打开")
+
+    let secretTitle = "SecretFolder"
+    let secretURL = "https://secret.example/hidden-path"
+    let secretPath = "/Users/secret/file.txt"
+    let recorder = MemoryMenuTrackingRecorder()
+    let disabled = MenuTrackingProbe(recorder: recorder, enabled: { false })
+    let idle = NSMenu()
+    idle.addItem(NSMenuItem(title: secretTitle, action: nil, keyEquivalent: ""))
+    disabled.begin(kind: "bookmarks")
+    disabled.attach(idle)
+    disabled.menu(idle, willHighlight: idle.items[0])
+    disabled.menuWillOpen(idle)
+    disabled.menuDidClose(idle)
+    disabled.end()
+    expect(recorder.rows.isEmpty, "关闭时不记录")
+    expect(idle.delegate == nil, "关闭时不设置菜单代理")
+
+    let probe = MenuTrackingProbe(recorder: recorder, enabled: { true })
+    let menu = NSMenu()
+    let folder = NSMenuItem(title: secretTitle, action: nil, keyEquivalent: "")
+    let submenu = NSMenu()
+    submenu.addItem(NSMenuItem(title: secretURL, action: nil, keyEquivalent: ""))
+    folder.submenu = submenu
+    menu.addItem(folder)
+    menu.addItem(NSMenuItem(title: secretPath, action: nil, keyEquivalent: ""))
+
+    probe.begin(kind: "bookmarks")
+    probe.attach(menu)
+    expect(menu.delegate === probe, "打开时接住没有代理的菜单")
+    expect(submenu.delegate === probe, "子菜单也接住")
+    probe.menu(menu, willHighlight: folder)
+    probe.menuTrackingItemCountChanged(submenu, before: 1, after: 4)
+    probe.menuWillOpen(submenu)
+    probe.menuDidClose(submenu)
+    probe.end()
+
+    let names = recorder.rows.map(\.event)
+    expect(names.first == "menu.session_begin", "先记本次弹出")
+    expect(names.contains("menu.will_highlight"), "记录高亮")
+    expect(names.contains("menu.item_count"), "记录条目数变化")
+    expect(names.contains("menu.will_open"), "记录打开")
+    expect(names.contains("menu.did_close"), "记录关闭")
+    expect(names.last == "menu.session_end", "弹出结束后收尾")
+    let highlightAt = names.firstIndex(of: "menu.will_highlight") ?? -1
+    let openAt = names.firstIndex(of: "menu.will_open") ?? -1
+    let closeAt = names.firstIndex(of: "menu.did_close") ?? -1
+    expect(highlightAt < openAt && openAt < closeAt, "顺序是高亮、打开、关闭")
+
+    let highlight = recorder.rows.first { $0.event == "menu.will_highlight" }?.detail
+    expect(highlight?["depth"] as? Int == 0, "高亮发生在根菜单")
+    expect(highlight?["index"] as? Int == 0, "高亮记下序号")
+    expect(highlight?["has_submenu"] as? Bool == true, "高亮记下是否有下级")
+    expect((highlight?["app_active"] as? Bool) != nil, "高亮记下应用是否在前台")
+    expect((highlight?["key_window_nil"] as? Bool) != nil, "高亮记下有没有按键窗口")
+    let opened = recorder.rows.first { $0.event == "menu.will_open" }?.detail
+    expect(opened?["depth"] as? Int == 1, "打开的是下级菜单")
+    let changed = recorder.rows.first { $0.event == "menu.item_count" }?.detail
+    expect(changed?["before"] as? Int == 1 && changed?["after"] as? Int == 4, "条目数只记前后数量")
+
+    let blob = recorder.blob()
+    expect(!blob.contains(secretTitle), "记录不含夹名")
+    expect(!blob.contains(secretURL), "记录不含网址")
+    expect(!blob.contains("secret.example"), "记录不含网址主机")
+    expect(!blob.contains(secretPath), "记录不含路径")
+    expect(!blob.contains("file.txt"), "记录不含文件名")
+    expect(menu.delegate == nil, "弹出结束后卸下探针")
+    expect(submenu.delegate == nil, "子菜单也卸下探针")
+}
+
 func testTerminalWindowFollow() {
     let path = "/tmp/tocode terminal \(UUID().uuidString)"
     expect(!DirectoryTerminalCommand.frontWindowScript.contains(path), "读取前台窗口的脚本不含目录")
@@ -1555,10 +1716,12 @@ func testSettingsPagesUseSecondaryTabs() {
     expect(sectionTitles(.connection) == ["应用", "微信"], "连接二级标签")
     expect(sectionTitles(.general) == ["启动", "配置", "说明"], "通用二级标签")
     expect(SettingsPage.tools.sections.contains { $0.id == "timers" }, "定时器仍在工具页")
-    expect(StatusBarIconCatalog.folder.count >= 8, "文件夹图标样式不少于 8 个")
-    expect(StatusBarIconCatalog.windows.count >= 8, "窗口图标样式不少于 8 个")
+    expect(StatusBarIconCatalog.all.count >= 40, "共用图标样式不少于 40 个")
+    expect(StatusBarIconCatalog.styles(for: .folder).count == StatusBarIconCatalog.all.count, "文件夹图标使用共用目录")
+    expect(StatusBarIconCatalog.styles(for: .windows).count == StatusBarIconCatalog.all.count, "窗口图标使用共用目录")
     expect(StatusBarIconCatalog.contains("folder", slot: .folder), "默认文件夹符号在目录里")
     expect(StatusBarIconCatalog.contains("macwindow", slot: .windows), "默认窗口符号在目录里")
+    expect(StatusBarIconCatalog.contains("star.fill", slot: .folder), "新增符号两颗图标都能用")
 }
 
 func testStatusBarIconSettings() {
@@ -1579,7 +1742,35 @@ func testStatusBarIconSettings() {
     defaults.set("not-a-symbol", forKey: StatusBarIconSlot.folder.symbolKey)
     expect(store.symbol(for: .folder) == "folder", "不认识的符号退回默认")
     store.setSymbol("macwindow", slot: .folder)
-    expect(store.symbol(for: .folder) == "folder", "另一个图标的符号不能写进文件夹")
+    expect(store.symbol(for: .folder) == "macwindow", "两颗图标可以保存同一套里的符号")
+    store.setSymbol("star.fill", slot: .windows)
+    expect(store.symbol(for: .windows) == "star.fill", "窗口图标也能用新增符号")
+    expect(
+        store.menu(for: .folder, isRightClick: false) == .directory,
+        "文件夹左键默认是目录树"
+    )
+    expect(
+        store.menu(for: .folder, isRightClick: true) == .bookmarks,
+        "文件夹右键默认是书签"
+    )
+    expect(
+        store.menu(for: .windows, isRightClick: false) == .desktopWindows,
+        "窗口图标左键默认是桌面与窗口"
+    )
+    expect(
+        store.menu(for: .windows, isRightClick: true) == .actions,
+        "窗口图标右键默认是一次性动作"
+    )
+    store.setMenu(.desktopWindows, slot: .folder, isRightClick: false)
+    expect(store.menu(for: .folder, isRightClick: false) == .desktopWindows, "文件夹左键可改成桌面与窗口")
+    expect(store.menu(for: .folder, isRightClick: true) == .bookmarks, "改左键不影响右键")
+    store.setMenu(.desktopWindows, slot: .folder, isRightClick: true)
+    expect(store.menu(for: .folder, isRightClick: false) == .desktopWindows, "左右键可以选同一个菜单")
+    expect(store.menu(for: .folder, isRightClick: true) == .desktopWindows, "右键也可以改成同一个菜单")
+    defaults.set("not-a-menu", forKey: StatusBarIconSlot.windows.leftClickKey)
+    expect(store.menu(for: .windows, isRightClick: false) == .desktopWindows, "不认识的点击退回默认")
+    store.setMenu(.bookmarks, slot: .windows, isRightClick: false)
+    expect(store.menu(for: .windows, isRightClick: false) == .bookmarks, "窗口图标左键也可以改成书签")
 }
 
 func testUserManualPages() {
@@ -2035,6 +2226,157 @@ func testDirectoryMenuResume() {
     expect(store.load() == DirectoryMenuResume.standardize(deepFile), "存储上次点击路径")
     store.clear()
     expect(store.load() == nil, "清除记忆")
+}
+
+func testDirectoryTrackedClickPolicy() {
+    var session: [String] = []
+    expect(
+        DirectoryTrackedClickPolicy.decide(
+            mode: .normal,
+            shiftHeld: false,
+            entryPath: "/folder",
+            itemHasSubmenu: true,
+            itemHasAction: true,
+            sessionPaths: &session
+        ) == .performActionAndClose,
+        "带下级菜单的文件夹点击要自己执行并关闭"
+    )
+    expect(session.isEmpty, "普通点击不进入多选会话")
+
+    expect(
+        DirectoryTrackedClickPolicy.decide(
+            mode: .normal,
+            shiftHeld: true,
+            entryPath: "/folder",
+            itemHasSubmenu: true,
+            itemHasAction: true,
+            sessionPaths: &session
+        ) == .keepMenuOpen,
+        "Shift 点击文件夹仍保持菜单"
+    )
+    expect(session == ["/folder"], "Shift 点击记入会话")
+
+    expect(
+        DirectoryTrackedClickPolicy.decide(
+            mode: .normal,
+            shiftHeld: false,
+            entryPath: "/file",
+            itemHasSubmenu: false,
+            itemHasAction: true,
+            sessionPaths: &session
+        ) == .passThrough,
+        "文件点击仍交给菜单动作"
+    )
+    expect(session == ["/folder"], "文件点击不改多选会话")
+
+    expect(
+        DirectoryTrackedClickPolicy.decide(
+            mode: .delete,
+            shiftHeld: true,
+            entryPath: "/folder",
+            itemHasSubmenu: true,
+            itemHasAction: true,
+            sessionPaths: &session
+        ) == .performActionAndClose,
+        "删除模式的文件夹点击仍然执行删除"
+    )
+    expect(session == ["/folder"], "删除模式不追加多选")
+
+    expect(
+        DirectoryTrackedClickPolicy.decide(
+            mode: .access,
+            shiftHeld: false,
+            entryPath: "/folder",
+            itemHasSubmenu: true,
+            itemHasAction: true,
+            sessionPaths: &session
+        ) == .performActionAndClose,
+        "访问模式的文件夹点击仍然执行打开"
+    )
+    expect(
+        DirectoryTrackedClickPolicy.decide(
+            mode: .normal,
+            shiftHeld: false,
+            entryPath: nil,
+            itemHasSubmenu: true,
+            itemHasAction: false,
+            sessionPaths: &session
+        ) == .passThrough,
+        "没有动作的夹不拦截点击"
+    )
+}
+
+func testSpuriousMenuExitIgnoresUnmovedNestedClose() {
+    var gate = SpuriousMenuExit()
+    let opened = Date(timeIntervalSince1970: 1_000)
+    let mouse = CGPoint(x: 1216, y: 733)
+    gate.noteOpen(mouse: mouse, at: opened)
+    expect(
+        gate.shouldSwallow(
+            deltaX: 0,
+            deltaY: 0,
+            mouse: mouse,
+            at: opened.addingTimeInterval(0.038),
+            pointerInsideMenu: true
+        ),
+        "光标没动且仍在菜单里的离开要丢掉"
+    )
+    expect(
+        !gate.shouldSwallow(
+            deltaX: 0,
+            deltaY: 0,
+            mouse: mouse,
+            at: opened.addingTimeInterval(0.038),
+            pointerInsideMenu: false
+        ),
+        "光标已经不在菜单里时保留离开"
+    )
+    expect(
+        !gate.shouldSwallow(
+            deltaX: 0,
+            deltaY: 0,
+            mouse: CGPoint(x: 1179, y: 734),
+            at: opened.addingTimeInterval(0.339),
+            pointerInsideMenu: true
+        ),
+        "打开较久或光标已经移动的离开要保留"
+    )
+    expect(
+        !gate.shouldSwallow(
+            deltaX: 2,
+            deltaY: 0,
+            mouse: mouse,
+            at: opened.addingTimeInterval(0.04),
+            pointerInsideMenu: true
+        ),
+        "事件自带位移时保留离开"
+    )
+    var idle = SpuriousMenuExit()
+    expect(
+        !idle.shouldSwallow(
+            deltaX: 0,
+            deltaY: 0,
+            mouse: mouse,
+            at: opened,
+            pointerInsideMenu: true
+        ),
+        "还没有下级菜单打开时保留离开"
+    )
+}
+
+func testMenuActionGateIgnoresSecondDelivery() {
+    var gate = MenuActionGate()
+    let folderItem = NSMenuItem()
+    let fileItem = NSMenuItem()
+    let folder = ObjectIdentifier(folderItem)
+    let file = ObjectIdentifier(fileItem)
+    expect(gate.accept(file), "没有手动点击时动作照常执行")
+    gate.arm(folder)
+    expect(gate.accept(folder), "手动点击的第一次执行")
+    expect(!gate.accept(folder), "同一次点击的第二次投递被丢掉")
+    expect(gate.accept(file), "别的条目不受这次手动点击影响")
+    gate.disarm(ifArmed: folder)
+    expect(gate.accept(folder), "解除后可以再次点击同一条目")
 }
 
 func testDirectoryMenuMultiCopy() {
@@ -9431,6 +9773,11 @@ struct TestRunnerMain {
         testFileCreationAndTrash()
         await testRootMenuTerminalItem()
         await testSubmenuPrefillsOnHighlight()
+        testDirectoryTrackedClickPolicy()
+        testMenuActionGateIgnoresSecondDelivery()
+        testSpuriousMenuExitIgnoresUnmovedNestedClose()
+        await testMenuBuilderForwardsHighlightWithoutRefilling()
+        await testMenuTrackingProbeRecordsSequenceWithoutTitles()
         testTerminalWindowFollow()
         testHermesProjectFollow()
         testHermesCurrentProfileDatabase()

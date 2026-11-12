@@ -1,9 +1,146 @@
 import AppKit
 
+/// 状态栏菜单跟踪不会给「有下级菜单」的条目发送 action。
+/// 这类点击要由我们执行动作并关闭菜单；Shift 多选仍只保持菜单打开。
+enum DirectoryTrackedClick: Equatable {
+    case passThrough
+    case keepMenuOpen
+    case performActionAndClose
+}
+
+enum DirectoryTrackedClickPolicy {
+    static func decide(
+        mode: DirectoryMenuMode,
+        shiftHeld: Bool,
+        entryPath: String?,
+        itemHasSubmenu: Bool,
+        itemHasAction: Bool,
+        sessionPaths: inout [String]
+    ) -> DirectoryTrackedClick {
+        if DirectoryMenuMultiCopy.handleClick(
+            mode: mode,
+            shiftHeld: shiftHeld,
+            entryPath: entryPath,
+            sessionPaths: &sessionPaths
+        ) {
+            return .keepMenuOpen
+        }
+        if itemHasSubmenu && itemHasAction {
+            return .performActionAndClose
+        }
+        return .passThrough
+    }
+}
+
+/// 同一次点击可能被手动发送一次、系统再投递一次。第二次丢掉。
+struct MenuActionGate {
+    private(set) var armed: ObjectIdentifier?
+    private var ran = false
+
+    mutating func arm(_ item: ObjectIdentifier) {
+        armed = item
+        ran = false
+    }
+
+    mutating func accept(_ item: ObjectIdentifier) -> Bool {
+        guard armed == item else { return true }
+        if ran { return false }
+        ran = true
+        return true
+    }
+
+    mutating func disarm(ifArmed item: ObjectIdentifier) {
+        guard armed == item else { return }
+        armed = nil
+        ran = false
+    }
+}
+
+/// 下级菜单打开后约 40 毫秒，系统会在光标没动时送一次鼠标离开。
+/// 只丢掉这一次：仍在菜单窗口内、位移为 0、位置与打开时相同、且发生在打开后 80 毫秒内。
+struct SpuriousMenuExit {
+    private(set) var openedAt: Date?
+    private(set) var openedMouse: CGPoint?
+
+    mutating func noteOpen(mouse: CGPoint, at: Date) {
+        openedAt = at
+        openedMouse = mouse
+    }
+
+    mutating func reset() {
+        openedAt = nil
+        openedMouse = nil
+    }
+
+    func shouldSwallow(
+        deltaX: CGFloat,
+        deltaY: CGFloat,
+        mouse: CGPoint,
+        at: Date,
+        pointerInsideMenu: Bool
+    ) -> Bool {
+        guard pointerInsideMenu else { return false }
+        guard abs(deltaX) < 0.5, abs(deltaY) < 0.5 else { return false }
+        guard let openedAt, let openedMouse else { return false }
+        let age = at.timeIntervalSince(openedAt)
+        guard age >= 0, age < 0.08 else { return false }
+        guard abs(mouse.x - openedMouse.x) < 1.5, abs(mouse.y - openedMouse.y) < 1.5 else { return false }
+        return true
+    }
+}
+
+@MainActor
+enum SpuriousMenuExitHub {
+    private static var state = SpuriousMenuExit()
+
+    static func reset() {
+        state.reset()
+    }
+
+    static func note(mouse: CGPoint, at: Date = Date()) {
+        state.noteOpen(mouse: mouse, at: at)
+    }
+
+    static func shouldSwallow(
+        deltaX: CGFloat,
+        deltaY: CGFloat,
+        mouse: CGPoint,
+        at: Date = Date(),
+        pointerInsideMenu: Bool
+    ) -> Bool {
+        state.shouldSwallow(
+            deltaX: deltaX,
+            deltaY: deltaY,
+            mouse: mouse,
+            at: at,
+            pointerInsideMenu: pointerInsideMenu
+        )
+    }
+
+    static func pointerInsideOwnMenu(_ mouse: CGPoint) -> Bool {
+        let screenMax = NSScreen.screens.map(\.frame.maxY).max() ?? 0
+        let pid = ProcessInfo.processInfo.processIdentifier
+        guard let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else {
+            return false
+        }
+        for dict in info {
+            guard (dict[kCGWindowOwnerPID as String] as? Int) == Int(pid) else { continue }
+            guard let bounds = dict[kCGWindowBounds as String] as? [String: CGFloat] else { continue }
+            let width = bounds["Width"] ?? 0
+            let height = bounds["Height"] ?? 0
+            guard width >= 18, height >= 18, height <= 900, width <= 1400 else { continue }
+            let cg = CGRect(x: bounds["X"] ?? 0, y: bounds["Y"] ?? 0, width: width, height: height)
+            let frame = CGRect(x: cg.minX, y: screenMax - cg.maxY, width: width, height: height)
+            if frame.contains(mouse) { return true }
+        }
+        return false
+    }
+}
+
 /// 目录树菜单构建器：把目录内容渲染为 NSMenu 树，子文件夹惰性递归展开。
 /// 根菜单在「新增」上方依次提供「历史」「配置」与「终端」；普通模式点击复制；Shift 多选；Option 删除；Command 访问。
 @MainActor
-final class MenuBuilder: NSObject, NSMenuDelegate {
+final class MenuBuilder: NSObject, NSMenuDelegate, MenuTrackingForwarding {
     private let fs = FileSystemService()
     private let clipboard = ClipboardService()
     private let opener: WorkspaceItemOpening
@@ -21,9 +158,11 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
     var makeRootConfigItem: (() -> NSMenuItem)?
 
     private var multiCopyPaths: [String] = []
+    private var actionGate = MenuActionGate()
     private var shiftClickMonitor: Any?
     private weak var trackingRootMenu: NSMenu?
     private var needsSameMenuRepop = false
+    weak var menuTrackingSink: MenuTrackingSinking?
 
     private static let placeholderTitle = "\u{2026}"
     private static let newTitle = "新增"
@@ -109,12 +248,29 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
 
     /// 子菜单窗口出现前填充。跟踪开始后再改条目数会让子菜单被关掉，鼠标不动也不会再展开。
     func menu(_ menu: NSMenu, willHighlight item: NSMenuItem?) {
+        menuTrackingSink?.menuTrackingHighlight(menu, item: item)
         guard let submenu = item?.submenu else { return }
+        let before = submenu.items.count
         populateIfNeeded(submenu)
+        if submenu.items.count != before {
+            menuTrackingSink?.menuTrackingItemCountChanged(submenu, before: before, after: submenu.items.count)
+        }
     }
 
     func menuWillOpen(_ menu: NSMenu) {
+        let before = menu.items.count
         populateIfNeeded(menu)
+        if menu.items.count != before {
+            menuTrackingSink?.menuTrackingItemCountChanged(menu, before: before, after: menu.items.count)
+        }
+        menuTrackingSink?.menuTrackingWillOpen(menu)
+        if menu.supermenu != nil {
+            SpuriousMenuExitHub.note(mouse: NSEvent.mouseLocation)
+        }
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        menuTrackingSink?.menuTrackingDidClose(menu)
     }
 
     /// 只在仍是单个占位项时填充一次。高亮和打开都可能走到这里，不能重复追加。
@@ -276,6 +432,7 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
     // MARK: - 普通模式
 
     @objc private func copyItem(_ sender: NSMenuItem) {
+        guard actionGate.accept(ObjectIdentifier(sender)) else { return }
         guard let path = sender.representedObject as? String else { return }
         if mode == .normal, NSEvent.modifierFlags.contains(.shift) {
             if multiCopyPaths.last != path {
@@ -293,28 +450,51 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
 
     private func handlePotentialShiftMultiCopy(_ event: NSEvent) -> NSEvent? {
         guard let root = trackingRootMenu else { return event }
-        let entryPath = highlightedEntryPath(in: root)
-        let keepOpen = DirectoryMenuMultiCopy.handleClick(
+        let item = highlightedEntryItem(in: root)
+        let entryPath = item?.representedObject as? String
+        let decision = DirectoryTrackedClickPolicy.decide(
             mode: mode,
             shiftHeld: NSEvent.modifierFlags.contains(.shift),
             entryPath: entryPath,
+            itemHasSubmenu: item?.submenu != nil,
+            itemHasAction: item?.action != nil,
             sessionPaths: &multiCopyPaths
         )
-        guard keepOpen else { return event }
-        if let entryPath {
-            rememberClick(entryPath)
+        switch decision {
+        case .passThrough:
+            return event
+        case .keepMenuOpen:
+            if let entryPath {
+                rememberClick(entryPath)
+            }
+            clipboard.copyPaths(multiCopyPaths)
+            return nil
+        case .performActionAndClose:
+            guard let item else { return event }
+            performSubmenuItemClick(item)
+            return nil
         }
-        clipboard.copyPaths(multiCopyPaths)
-        return nil
     }
 
-    private func highlightedEntryPath(in menu: NSMenu) -> String? {
+    /// 状态栏跟踪里，带下级菜单的条目收不到 action。这里补上一次，并避免系统再投递时执行第二遍。
+    private func performSubmenuItemClick(_ item: NSMenuItem) {
+        guard let action = item.action else { return }
+        let identity = ObjectIdentifier(item)
+        actionGate.arm(identity)
+        NSApp.sendAction(action, to: item.target, from: item)
+        trackingRootMenu?.cancelTracking()
+        DispatchQueue.main.async { [weak self] in
+            self?.actionGate.disarm(ifArmed: identity)
+        }
+    }
+
+    private func highlightedEntryItem(in menu: NSMenu) -> NSMenuItem? {
         guard let item = menu.highlightedItem else { return nil }
-        if let submenu = item.submenu, let nested = highlightedEntryPath(in: submenu) {
+        if let submenu = item.submenu, let nested = highlightedEntryItem(in: submenu) {
             return nested
         }
         guard entryItems.contains(where: { $0.item === item }) else { return nil }
-        return item.representedObject as? String
+        return item
     }
 
     @objc private func openTerminal(_ sender: NSMenuItem) {
@@ -350,6 +530,7 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
     // MARK: - 访问模式
 
     @objc private func accessEntry(_ sender: NSMenuItem) {
+        guard actionGate.accept(ObjectIdentifier(sender)) else { return }
         guard let path = sender.representedObject as? String,
               let kind = entryItems.first(where: { $0.path == path })?.kind else { return }
         rememberClick(path)
@@ -372,6 +553,7 @@ final class MenuBuilder: NSObject, NSMenuDelegate {
     // MARK: - 删除模式
 
     @objc private func deleteItem(_ sender: NSMenuItem) {
+        guard actionGate.accept(ObjectIdentifier(sender)) else { return }
         guard let path = sender.representedObject as? String else { return }
         let name = (path as NSString).lastPathComponent
         guard DestructionConfirmation.confirm(
