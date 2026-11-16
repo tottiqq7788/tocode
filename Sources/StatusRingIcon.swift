@@ -3,6 +3,7 @@ import CoreAudio
 import Darwin
 import IOKit
 import IOKit.ps
+import QuartzCore
 
 /// 菜单栏唯一图标当前打开的菜单。右键按这个顺序循环。不进入可分享配置。
 enum StatusMenuKind: String, Equatable, CaseIterable {
@@ -384,14 +385,61 @@ enum StatusRingIcon {
 
     static func image(sample: StatusRingSample, symbol: String, title: String) -> NSImage {
         let image = NSImage(size: canvas, flipped: false) { rect in
-            draw(sample: sample, symbol: symbol, title: title, in: rect)
+            draw(sample: sample, symbol: symbol, title: title, in: rect, ring: true, symbolLayer: true)
             return true
         }
         image.isTemplate = false
         return image
     }
 
-    static func draw(sample: StatusRingSample, symbol: String, title: String, in rect: NSRect, color: NSColor = .labelColor) {
+    static func bitmap(
+        sample: StatusRingSample,
+        symbol: String,
+        title: String,
+        ring: Bool,
+        symbolLayer: Bool,
+        scale: CGFloat
+    ) -> CGImage? {
+        let pixelsWide = max(1, Int((canvas.width * scale).rounded()))
+        let pixelsHigh = max(1, Int((canvas.height * scale).rounded()))
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: pixelsWide,
+            pixelsHigh: pixelsHigh,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) else { return nil }
+        rep.size = canvas
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        guard let context = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
+        NSGraphicsContext.current = context
+        draw(
+            sample: sample,
+            symbol: symbol,
+            title: title,
+            in: NSRect(origin: .zero, size: canvas),
+            ring: ring,
+            symbolLayer: symbolLayer
+        )
+        context.flushGraphics()
+        return rep.cgImage
+    }
+
+    static func draw(
+        sample: StatusRingSample,
+        symbol: String,
+        title: String,
+        in rect: NSRect,
+        color: NSColor = .labelColor,
+        ring: Bool,
+        symbolLayer: Bool
+    ) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
         ctx.saveGState()
         defer { ctx.restoreGState() }
@@ -399,20 +447,24 @@ enum StatusRingIcon {
         ctx.translateBy(x: rect.midX - canvas.width * scale / 2, y: rect.midY - canvas.height * scale / 2)
         ctx.scaleBy(x: scale, y: scale)
         let base = color.usingColorSpace(.deviceRGB) ?? color
-        let batteryColor = paint(StatusRingBatteryPaint.role(sample.battery), base: base)
-        stroke(StatusRingGeometry.battery, color: batteryColor, alpha: 0.20, end: StatusRingGeometry.battery.end)
-        stroke(StatusRingGeometry.brightness, color: base, alpha: 0.20, end: StatusRingGeometry.brightness.end)
-        stroke(StatusRingGeometry.volume, color: base, alpha: 0.20, end: StatusRingGeometry.volume.end)
-        if let level = sample.batteryLevel, StatusRingGeometry.battery.drawsFill(level: level) {
-            stroke(StatusRingGeometry.battery, color: batteryColor, alpha: 1, end: StatusRingGeometry.battery.fillEnd(level))
+        if ring {
+            let batteryColor = paint(StatusRingBatteryPaint.role(sample.battery), base: base)
+            stroke(StatusRingGeometry.battery, color: batteryColor, alpha: 0.20, end: StatusRingGeometry.battery.end)
+            stroke(StatusRingGeometry.brightness, color: base, alpha: 0.20, end: StatusRingGeometry.brightness.end)
+            stroke(StatusRingGeometry.volume, color: base, alpha: 0.20, end: StatusRingGeometry.volume.end)
+            if let level = sample.batteryLevel, StatusRingGeometry.battery.drawsFill(level: level) {
+                stroke(StatusRingGeometry.battery, color: batteryColor, alpha: 1, end: StatusRingGeometry.battery.fillEnd(level))
+            }
+            if let level = sample.brightness, StatusRingGeometry.brightness.drawsFill(level: level) {
+                stroke(StatusRingGeometry.brightness, color: base, alpha: 1, end: StatusRingGeometry.brightness.fillEnd(level))
+            }
+            if StatusRingGeometry.volume.drawsFill(level: sample.volume) {
+                stroke(StatusRingGeometry.volume, color: base, alpha: 1, end: StatusRingGeometry.volume.fillEnd(sample.volume))
+            }
         }
-        if let level = sample.brightness, StatusRingGeometry.brightness.drawsFill(level: level) {
-            stroke(StatusRingGeometry.brightness, color: base, alpha: 1, end: StatusRingGeometry.brightness.fillEnd(level))
+        if symbolLayer {
+            drawSymbol(symbol, title: title, color: base)
         }
-        if StatusRingGeometry.volume.drawsFill(level: sample.volume) {
-            stroke(StatusRingGeometry.volume, color: base, alpha: 1, end: StatusRingGeometry.volume.fillEnd(sample.volume))
-        }
-        drawSymbol(symbol, title: title, color: base)
     }
 
     private static func paint(_ role: StatusRingBatteryRole, base: NSColor) -> NSColor {
@@ -463,5 +515,124 @@ enum StatusRingIcon {
             width: width,
             height: height
         ))
+    }
+}
+
+/// DuoBar 的启动转动：1.43 秒转到 -369°，再收回 9°，停在原位。
+enum IconTurn {
+    static let duration: TimeInterval = 1.43
+
+    static func angle(at elapsed: TimeInterval) -> CGFloat {
+        func smootherStep(_ value: Double) -> CGFloat {
+            let t = CGFloat(min(1, max(0, value)))
+            return t * t * t * (t * (t * 6 - 15) + 10)
+        }
+        let turnTime = duration * (1.06 / 1.43)
+        let degrees: CGFloat
+        if elapsed < turnTime {
+            degrees = -369 * smootherStep(elapsed / turnTime)
+        } else {
+            degrees = -369 + 9 * smootherStep((elapsed - turnTime) / (duration - turnTime))
+        }
+        return degrees * .pi / 180
+    }
+}
+
+/// 外层圆环和中间符号分开。只转外层。点击穿过这一层，仍落在状态栏按钮上。
+final class StatusRingIconView: NSView {
+    private let outer = CALayer()
+    private let symbolLayer = CALayer()
+    private var sample = StatusRingSample()
+    private var symbol = ""
+    private var symbolTitle = ""
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layerContentsRedrawPolicy = .never
+        outer.contentsGravity = .resize
+        symbolLayer.contentsGravity = .resize
+        layer?.addSublayer(outer)
+        layer?.addSublayer(symbolLayer)
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func layout() {
+        super.layout()
+        let frame = NSRect(
+            x: bounds.midX - StatusRingIcon.canvas.width / 2,
+            y: bounds.midY - StatusRingIcon.canvas.height / 2,
+            width: StatusRingIcon.canvas.width,
+            height: StatusRingIcon.canvas.height
+        )
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        outer.frame = frame
+        symbolLayer.frame = frame
+        CATransaction.commit()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        render()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        render()
+    }
+
+    func update(sample: StatusRingSample, symbol: String, title: String) {
+        self.sample = sample
+        self.symbol = symbol
+        self.symbolTitle = title
+        render()
+    }
+
+    /// 启动时转一圈。已在转时不重开，避免电量刷新把这一圈打断。
+    func animateTurn() {
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+        guard outer.animation(forKey: "turn") == nil else { return }
+        let samples = 180
+        let turn = CAKeyframeAnimation(keyPath: "transform.rotation.z")
+        turn.values = (0...samples).map { step in
+            IconTurn.angle(at: IconTurn.duration * Double(step) / Double(samples))
+        }
+        turn.keyTimes = (0...samples).map { NSNumber(value: Double($0) / Double(samples)) }
+        turn.duration = IconTurn.duration
+        turn.calculationMode = .linear
+        outer.add(turn, forKey: "turn")
+    }
+
+    private func render() {
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            outer.contentsScale = scale
+            symbolLayer.contentsScale = scale
+            outer.contents = StatusRingIcon.bitmap(
+                sample: sample,
+                symbol: symbol,
+                title: symbolTitle,
+                ring: true,
+                symbolLayer: false,
+                scale: scale
+            )
+            symbolLayer.contents = StatusRingIcon.bitmap(
+                sample: sample,
+                symbol: symbol,
+                title: symbolTitle,
+                ring: false,
+                symbolLayer: true,
+                scale: scale
+            )
+            CATransaction.commit()
+        }
     }
 }

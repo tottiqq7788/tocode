@@ -510,7 +510,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTa
     private func startupRows(_ host: SettingsHosting) -> [NSView] {
         [
             toggle("开机自启", on: host.settingsLaunchAtLogin, key: "login"),
-            footnote("显示的是系统登录项里的实际状态。"),
+            footnote("显示的是系统登录项里的实际状态。登录后只留菜单栏图标，不打开这个窗口。"),
         ]
     }
 

@@ -1589,6 +1589,29 @@ func testStatusMenuKindCycles() {
     expect(store.cycle() == .files, "再循环回文件")
 }
 
+func testIconTurnEndsOnOneRevolution() {
+    expect(IconTurn.angle(at: 0) == 0, "转动从原位开始")
+    expect(IconTurn.angle(at: 0.4) < 0, "转动走向负角度")
+    expect(abs(IconTurn.angle(at: IconTurn.duration) + 2 * .pi) < 0.00001, "1.43 秒停在一整圈")
+    expect(IconTurn.duration == 1.43, "转动时长与 DuoBar 相同")
+}
+
+func testSettingsWindowLaunch() {
+    expect(
+        TocodePreferences.SettingsWindowLaunch.shouldPresent(launchedAsLoginItem: true) == false,
+        "登录项启动不弹出设置窗口"
+    )
+    expect(
+        TocodePreferences.SettingsWindowLaunch.shouldPresent(launchedAsLoginItem: false),
+        "用户打开应用时弹出设置窗口"
+    )
+}
+
+func testStatusRingClickPassesThrough() {
+    let view = StatusRingIconView(frame: NSRect(x: 0, y: 0, width: 36, height: 24))
+    expect(view.hitTest(NSPoint(x: 18, y: 12)) == nil, "点击穿过圆环层，仍落在按钮上")
+}
+
 func testStatusRingGeometry() {
     expect(StatusRingIcon.canvas == NSSize(width: 32, height: 28), "画布与 DuoBar 同为 32×28")
     expect(StatusRingIcon.outerDiameter == 26, "圆环直径与 DuoBar 同为 26")
@@ -1691,6 +1714,13 @@ func testUserManualPages() {
     expect(joined.contains("不是访达/Codex 跟随后的展示根"), "说明书写明 root open 用固定根")
     expect(!joined.contains("顶层「AK」夹"), "说明书不再覆盖顶层 AK 夹")
     expect(joined.contains("Ancode"), "说明书指向独立应用 Ancode")
+    expect(joined.contains("只转外层圆环一圈"), "说明书说明启动后圆环转一圈")
+    expect(joined.contains("中间符号不转"), "说明书说明中间符号不转")
+    expect(joined.contains("减弱动态效果"), "说明书说明减弱动态效果时不转")
+    expect(!joined.contains("静默启动"), "说明书不再写静默启动")
+    expect(joined.contains("平时只在菜单栏放一颗图标，不在程序坞"), "说明书说明平时不在程序坞")
+    expect(joined.contains("才会打开设置窗口"), "说明书说明打开应用才出现设置窗口")
+    expect(joined.contains("关掉窗口不会退出"), "说明书说明关闭窗口不退出")
     expect(!joined.contains("AK → 模型"), "说明书不再写 AK → 模型")
     expect(!joined.contains("AK → 密钥 → AI"), "说明书不再写 AK 下密钥路径")
     expect(!joined.contains("设置 → 密钥 → AI"), "说明书不再写设置下密钥入口")
@@ -9647,6 +9677,9 @@ struct TestRunnerMain {
         testUserManualPages()
         testSettingsPagesUseSecondaryTabs()
         testStatusMenuKindCycles()
+        testIconTurnEndsOnOneRevolution()
+        testSettingsWindowLaunch()
+        testStatusRingClickPassesThrough()
         testStatusRingGeometry()
         testDroppedAutomationTargets()
         testAnkerCredentialPromptCopyHasNoAnkerWord()

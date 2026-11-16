@@ -44,6 +44,13 @@ enum TocodePreferences {
         canonical.set(true, forKey: migratedKey)
     }
 
+    /// 登录项拉起不弹设置窗口。用户自己打开应用才弹。不读 tocode.silentLaunch。
+    enum SettingsWindowLaunch {
+        static func shouldPresent(launchedAsLoginItem: Bool) -> Bool {
+            !launchedAsLoginItem
+        }
+    }
+
     private static func overlayKnownKeys(from source: UserDefaults?, onto canonical: UserDefaults) {
         guard let source else { return }
         for key in knownKeys {

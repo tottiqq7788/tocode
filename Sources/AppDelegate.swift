@@ -1,4 +1,5 @@
 import AppKit
+import CoreServices
 
 @MainActor
 private final class UnboundWeChat: WeChatAssociationControlling {
@@ -27,7 +28,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hermesGateway: HermesGatewayService?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.regular)
         let main = NSMenu()
         let appItem = NSMenuItem()
         appItem.title = "Tocode"
@@ -193,11 +193,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hermesGateway.applySavedPreference()
 
         weChat.startBoundListener()
-        controller.showSettings()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(windowWillClose(_:)),
+            name: NSWindow.willCloseNotification,
+            object: nil
+        )
+        if TocodePreferences.SettingsWindowLaunch.shouldPresent(launchedAsLoginItem: launchedAsLoginItem()) {
+            controller.showSettings()
+        }
+        keepMenuBarResident()
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        keepMenuBarResident()
+    }
+
+    /// 从访达再次打开时，系统会把附属程序改成普通应用。立刻设回去，避免程序坞留下图标。
+    private func keepMenuBarResident() {
+        guard NSApp.activationPolicy() != .accessory else { return }
+        NSApp.setActivationPolicy(.accessory)
+    }
+
+    @objc private func windowWillClose(_ notification: Notification) {
+        DispatchQueue.main.async { [weak self] in
+            self?.keepMenuBarResident()
+        }
+    }
+
+    /// 登录项的打开事件带 keyAELaunchedAsLogInItem。没有这个参数，就是用户自己打开的。
+    private func launchedAsLoginItem() -> Bool {
+        guard let event = NSAppleEventManager.shared().currentAppleEvent else { return false }
+        return event.eventID == kAEOpenApplication
+            && event.paramDescriptor(forKeyword: keyAELaunchedAsLogInItem) != nil
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         controller?.showSettings()
+        keepMenuBarResident()
+        DispatchQueue.main.async { [weak self] in
+            self?.keepMenuBarResident()
+        }
         return true
     }
 

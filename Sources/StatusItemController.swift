@@ -31,6 +31,7 @@ final class MenuOpenNote: NSObject, NSMenuDelegate {
 @MainActor
 final class StatusItemController: NSObject, SettingsHosting {
     private let statusItem: NSStatusItem
+    private var ringView: StatusRingIconView?
     private var ringSample = StatusRingSample()
     private let menuKind = StatusMenuKindStore()
     private var meterTimer: Timer?
@@ -178,12 +179,18 @@ final class StatusItemController: NSObject, SettingsHosting {
         guard let button = statusItem.button else { return }
         button.title = ""
         button.imagePosition = .imageOnly
-        // 按图像的 32×28 原尺寸绘制。缩小适配会把圆环一起缩窄，左右又空出一截。
+        // 空图像只占住 32×28 的高度。圆环画在按钮上的分层视图里。
+        button.image = NSImage(size: StatusRingIcon.canvas)
         button.imageScaling = .scaleNone
         button.target = self
         button.action = #selector(handleClick(_:))
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        let canvas = StatusRingIconView(frame: button.bounds)
+        canvas.autoresizingMask = [.width, .height]
+        button.addSubview(canvas)
+        ringView = canvas
         applyMenuKind()
+        canvas.animateTurn()
     }
 
     private func applyMenuKind() {
@@ -193,11 +200,10 @@ final class StatusItemController: NSObject, SettingsHosting {
     private func updateIcon() {
         guard let button = statusItem.button else { return }
         let kind = menuKind.kind()
-        button.image = StatusRingIcon.image(
-            sample: ringSample,
-            symbol: kind.symbolName,
-            title: kind.title
-        )
+        if button.image?.size != StatusRingIcon.canvas {
+            button.image = NSImage(size: StatusRingIcon.canvas)
+        }
+        ringView?.update(sample: ringSample, symbol: kind.symbolName, title: kind.title)
         let help = "左键\(kind.title)，右键切换"
         button.toolTip = help
         button.setAccessibilityLabel(help)
